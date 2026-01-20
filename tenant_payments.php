@@ -1,0 +1,305 @@
+<?php
+session_start();
+
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "tenant") {
+    header("location: index.php?role=tenant");
+    exit;
+}
+
+require_once "db/database.php";
+
+$tenant_id = $_SESSION["tenant_id"];
+
+try {
+    // Get payment history
+    $stmt = $conn->prepare("
+        SELECT pt.*, b.billing_month, b.amount_due
+        FROM payment_transactions pt
+        JOIN bills b ON pt.bill_id = b.id
+        WHERE pt.tenant_id = :tenant_id
+        ORDER BY pt.payment_date DESC
+    ");
+    $stmt->execute(['tenant_id' => $tenant_id]);
+    $payments = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // Get payment summary
+    $result = $conn->query("
+        SELECT 
+            COUNT(*) as total_payments,
+            SUM(payment_amount) as total_amount
+        FROM payment_transactions
+        WHERE tenant_id = $tenant_id
+    ");
+    $summary = $result->fetch(PDO::FETCH_ASSOC);
+
+    // Get payment methods breakdown
+    $result = $conn->query("
+        SELECT 
+            payment_method,
+            COUNT(*) as count,
+            SUM(payment_amount) as total
+        FROM payment_transactions
+        WHERE tenant_id = $tenant_id
+        GROUP BY payment_method
+        ORDER BY total DESC
+    ");
+    $methods = $result->fetchAll(PDO::FETCH_ASSOC);
+
+} catch (Exception $e) {
+    $error = "Error loading payments: " . $e->getMessage();
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Payments - BAMINT</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; }
+        .sidebar {
+            background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+            padding: 2rem 0;
+        }
+        .sidebar .nav-link {
+            color: rgba(255,255,255,0.7);
+            padding: 1rem 1.5rem;
+            border-left: 3px solid transparent;
+            transition: all 0.3s;
+        }
+        .sidebar .nav-link:hover,
+        .sidebar .nav-link.active {
+            color: white;
+            background: rgba(255,255,255,0.1);
+            border-left-color: white;
+        }
+        .user-info {
+            padding: 1.5rem;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            margin-bottom: 1rem;
+        }
+        .user-info h5 { margin-bottom: 0.25rem; }
+        .user-info p { font-size: 0.9rem; opacity: 0.8; margin-bottom: 0; }
+        .metric-card {
+            border: none;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .metric-value { font-size: 1.75rem; font-weight: 700; }
+        .header-banner {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+        }
+        .btn-logout {
+            background: #dc3545;
+            color: white;
+            border: none;
+            margin-top: 1rem;
+            width: 100%;
+        }
+        .btn-logout:hover {
+            background: #c82333;
+            color: white;
+        }
+        .payment-row:hover {
+            background-color: rgba(102, 126, 234, 0.05);
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Sidebar -->
+            <nav class="col-md-3 col-lg-2 sidebar">
+                <div class="position-sticky pt-3">
+                    <div class="user-info">
+                        <h5><i class="bi bi-person-circle"></i> <?php echo htmlspecialchars($_SESSION["name"]); ?></h5>
+                        <p><?php echo htmlspecialchars($_SESSION["email"]); ?></p>
+                    </div>
+
+                    <ul class="nav flex-column">
+                        <li class="nav-item">
+                            <a class="nav-link" href="tenant_dashboard.php">
+                                <i class="bi bi-house-door"></i> Dashboard
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="tenant_bills.php">
+                                <i class="bi bi-receipt"></i> My Bills
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link active" href="tenant_payments.php">
+                                <i class="bi bi-coin"></i> Payments
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="tenant_maintenance.php">
+                                <i class="bi bi-tools"></i> Maintenance
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="tenant_profile.php">
+                                <i class="bi bi-person"></i> My Profile
+                            </a>
+                        </li>
+                    </ul>
+
+                    <form action="logout.php" method="post">
+                        <button type="submit" class="btn btn-logout">
+                            <i class="bi bi-box-arrow-right"></i> Logout
+                        </button>
+                    </form>
+                </div>
+            </nav>
+
+            <!-- Main Content -->
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
+                <!-- Header -->
+                <div class="header-banner">
+                    <h1><i class="bi bi-coin"></i> Payment History</h1>
+                    <p class="mb-0">View your payment records and transactions</p>
+                </div>
+
+                <?php if (isset($error)): ?>
+                    <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
+                <?php endif; ?>
+
+                <!-- Key Metrics -->
+                <div class="row g-4 mb-4">
+                    <div class="col-md-6 col-lg-3">
+                        <div class="card metric-card bg-success bg-opacity-10">
+                            <div class="card-body">
+                                <p class="text-muted mb-2"><i class="bi bi-cash-coin"></i> Total Paid</p>
+                                <p class="metric-value text-success">₱<?php echo number_format($summary['total_amount'] ?? 0, 2); ?></p>
+                                <small class="text-muted">All time</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-6 col-lg-3">
+                        <div class="card metric-card bg-info bg-opacity-10">
+                            <div class="card-body">
+                                <p class="text-muted mb-2"><i class="bi bi-receipt"></i> Total Payments</p>
+                                <p class="metric-value text-info"><?php echo $summary['total_payments'] ?? 0; ?></p>
+                                <small class="text-muted">Transaction count</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-6 col-lg-3">
+                        <div class="card metric-card bg-primary bg-opacity-10">
+                            <div class="card-body">
+                                <p class="text-muted mb-2"><i class="bi bi-graph-up"></i> Avg Payment</p>
+                                <p class="metric-value text-primary">
+                                    ₱<?php echo number_format(($summary['total_amount'] ?? 0) / max(1, $summary['total_payments'] ?? 1), 2); ?>
+                                </p>
+                                <small class="text-muted">Per transaction</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-6 col-lg-3">
+                        <div class="card metric-card bg-warning bg-opacity-10">
+                            <div class="card-body">
+                                <p class="text-muted mb-2"><i class="bi bi-calendar-event"></i> Last Payment</p>
+                                <p class="metric-value text-warning" style="font-size: 1.25rem;">
+                                    <?php echo !empty($payments) ? date('M d', strtotime($payments[0]['payment_date'])) : 'N/A'; ?>
+                                </p>
+                                <small class="text-muted"><?php echo !empty($payments) ? date('Y', strtotime($payments[0]['payment_date'])) : ''; ?></small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Payment Methods Breakdown -->
+                <?php if (!empty($methods)): ?>
+                    <div class="card mb-4">
+                        <div class="card-header bg-secondary bg-opacity-10">
+                            <h6 class="mb-0"><i class="bi bi-pie-chart"></i> Payment Methods Used</h6>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <?php foreach ($methods as $method): ?>
+                                    <div class="col-md-6 col-lg-3 mb-3">
+                                        <div class="text-center">
+                                            <h6><?php echo htmlspecialchars($method['payment_method'] ?? 'Unknown'); ?></h6>
+                                            <p class="text-muted mb-2">
+                                                <span class="badge bg-primary"><?php echo $method['count']; ?> times</span>
+                                            </p>
+                                            <p class="h5 text-success">₱<?php echo number_format($method['total'], 2); ?></p>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
+                <!-- Payment History Table -->
+                <div class="card">
+                    <div class="card-header bg-primary bg-opacity-10">
+                        <h6 class="mb-0"><i class="bi bi-list-check"></i> Transaction History</h6>
+                    </div>
+                    <div class="card-body">
+                        <?php if (!empty($payments)): ?>
+                            <div class="table-responsive">
+                                <table class="table table-hover">
+                                    <thead>
+                                        <tr>
+                                            <th>Date</th>
+                                            <th>Bill Month</th>
+                                            <th class="text-end">Amount</th>
+                                            <th>Method</th>
+                                            <th>Notes</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($payments as $payment): ?>
+                                            <tr class="payment-row">
+                                                <td>
+                                                    <strong><?php echo date('M d, Y', strtotime($payment['payment_date'])); ?></strong>
+                                                </td>
+                                                <td><?php echo date('F Y', strtotime($payment['billing_month'])); ?></td>
+                                                <td class="text-end">
+                                                    <span class="badge bg-success">₱<?php echo number_format($payment['payment_amount'], 2); ?></span>
+                                                </td>
+                                                <td>
+                                                    <small class="text-muted">
+                                                        <i class="bi bi-credit-card"></i>
+                                                        <?php echo htmlspecialchars($payment['payment_method'] ?? 'N/A'); ?>
+                                                    </small>
+                                                </td>
+                                                <td>
+                                                    <?php if (!empty($payment['notes'])): ?>
+                                                        <small class="text-muted"><?php echo htmlspecialchars($payment['notes']); ?></small>
+                                                    <?php else: ?>
+                                                        <small class="text-muted text-secondary">-</small>
+                                                    <?php endif; ?>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                        <?php else: ?>
+                            <div class="alert alert-info">
+                                <i class="bi bi-info-circle"></i> No payments recorded yet.
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
