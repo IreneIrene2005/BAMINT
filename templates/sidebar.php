@@ -44,6 +44,12 @@
                 </a>
             </li>
             <li class="nav-item">
+                <a class="nav-link" href="room_requests_queue.php">
+                    <i class="bi bi-door-closed"></i>
+                    Room Requests Queue
+                </a>
+            </li>
+            <li class="nav-item">
                 <a class="nav-link" href="maintenance_history.php">
                     <i class="bi bi-clock-history"></i>
                     Maintenance History

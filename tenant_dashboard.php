@@ -169,6 +169,11 @@ try {
                             </a>
                         </li>
                         <li class="nav-item">
+                            <a class="nav-link" href="tenant_add_room.php">
+                                <i class="bi bi-plus-square"></i> Add Room
+                            </a>
+                        </li>
+                        <li class="nav-item">
                             <a class="nav-link" href="tenant_profile.php">
                                 <i class="bi bi-person"></i> My Profile
                             </a>
