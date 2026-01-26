@@ -18,9 +18,21 @@ $total_tenants = $conn->query($sql_tenants)->fetchColumn();
 $sql_rooms = "SELECT COUNT(*) FROM rooms";
 $total_rooms = $conn->query($sql_rooms)->fetchColumn();
 
-// Occupied rooms
-$sql_occupied = "SELECT COUNT(*) FROM rooms WHERE status = 'occupied'";
+// Occupied rooms - Calculate based on actual occupancy (tenants + co-tenants)
+$sql_occupied = "
+    SELECT COUNT(DISTINCT r.id) 
+    FROM rooms r
+    WHERE (
+        SELECT COUNT(DISTINCT t.id) + COUNT(DISTINCT ct.id)
+        FROM tenants t
+        LEFT JOIN co_tenants ct ON r.id = ct.room_id
+        WHERE t.room_id = r.id AND t.status = 'active'
+    ) > 0
+";
 $occupied_rooms = $conn->query($sql_occupied)->fetchColumn();
+
+// Vacant rooms - Calculate as rooms with no tenants and no co-tenants
+$vacant_rooms = $total_rooms - $occupied_rooms;
 
 // Occupancy rate percentage
 $occupancy_rate = $total_rooms > 0 ? round(($occupied_rooms / $total_rooms) * 100, 1) : 0;
@@ -71,19 +83,12 @@ while ($row = $room_types_result->fetch(PDO::FETCH_ASSOC)) {
 $occupancy_chart_labels = [];
 $occupancy_chart_data = [];
 
-$sql_occupancy = "SELECT 
-    CASE 
-        WHEN status = 'occupied' THEN 'Occupied'
-        ELSE 'Vacant'
-    END as status, COUNT(*) as count
-    FROM rooms GROUP BY status";
+// Calculate occupancy based on actual tenants and co-tenants
+$occupancy_chart_labels[] = 'Occupied';
+$occupancy_chart_data[] = (int)$occupied_rooms;
 
-$occupancy_result = $conn->query($sql_occupancy);
-
-while ($row = $occupancy_result->fetch(PDO::FETCH_ASSOC)) {
-    $occupancy_chart_labels[] = $row['status'];
-    $occupancy_chart_data[] = (int)$row['count'];
-}
+$occupancy_chart_labels[] = 'Vacant';
+$occupancy_chart_data[] = (int)$vacant_rooms;
 
 ?>
 

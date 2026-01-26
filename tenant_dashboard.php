@@ -318,9 +318,10 @@ try {
                                                 </td>
                                                 <td>
                                                     <?php 
-                                                    $status_class = $req['status'] === 'completed' ? 'success' : ($req['status'] === 'in-progress' ? 'info' : 'secondary');
+                                                    $status_class = $req['status'] === 'completed' ? 'success' : ($req['status'] === 'in_progress' ? 'primary' : ($req['status'] === 'pending' ? 'warning' : 'secondary'));
+                                                    $status_label = $req['status'] === 'completed' ? '✓ Resolved' : ($req['status'] === 'in_progress' ? '▶ Ongoing' : ($req['status'] === 'pending' ? '⏳ Pending' : ucfirst(str_replace('_', ' ', $req['status']))));
                                                     ?>
-                                                    <span class="badge bg-<?php echo $status_class; ?>"><?php echo ucfirst($req['status']); ?></span>
+                                                    <span class="badge bg-<?php echo $status_class; ?>"><?php echo $status_label; ?></span>
                                                 </td>
                                                 <td><?php echo date('M d, Y', strtotime($req['submitted_date'])); ?></td>
                                             </tr>

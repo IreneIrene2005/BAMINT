@@ -14,7 +14,13 @@ $filter_status = isset($_GET['status']) ? $_GET['status'] : '';
 $filter_type = isset($_GET['type']) ? $_GET['type'] : '';
 
 // Build the SQL query with search and filter
-$sql = "SELECT rooms.*, COUNT(tenants.id) as tenant_count FROM rooms LEFT JOIN tenants ON rooms.id = tenants.room_id WHERE 1=1";
+$sql = "SELECT rooms.*, 
+        COALESCE(tenant_count.count, 0) as tenant_count,
+        COALESCE(co_tenant_count.count, 0) as co_tenant_count 
+        FROM rooms 
+        LEFT JOIN (SELECT room_id, COUNT(id) as count FROM tenants GROUP BY room_id) as tenant_count ON rooms.id = tenant_count.room_id
+        LEFT JOIN (SELECT room_id, COUNT(id) as count FROM co_tenants GROUP BY room_id) as co_tenant_count ON rooms.id = co_tenant_count.room_id
+        WHERE 1=1";
 
 if ($search) {
     $sql .= " AND (rooms.room_number LIKE :search OR COALESCE(rooms.room_type, '') LIKE :search OR COALESCE(rooms.description, '') LIKE :search)";
@@ -138,19 +144,24 @@ try {
                     </thead>
                     <tbody>
                         <?php while($row = $rooms->fetch(PDO::FETCH_ASSOC)) : ?>
+                        <?php
+                        // Calculate actual occupancy and status based on tenants + co-tenants
+                        $total_occupancy = intval($row['tenant_count']) + intval($row['co_tenant_count']);
+                        $actual_status = $total_occupancy > 0 ? 'occupied' : 'available';
+                        ?>
                         <tr>
                             <td><strong><?php echo htmlspecialchars($row['room_number']); ?></strong></td>
                             <td><?php echo htmlspecialchars($row['room_type'] ?? '-'); ?></td>
                             <td><?php echo htmlspecialchars($row['description'] ?? '-'); ?></td>
-                            <td><?php echo htmlspecialchars(number_format($row['rate'], 2)); ?></td>
+                            <td>₱<?php echo htmlspecialchars(number_format($row['rate'], 2)); ?></td>
                             <td>
-                                <span class="badge bg-<?php echo $row['status'] == 'available' ? 'success' : 'warning'; ?>">
-                                    <?php echo ucfirst(htmlspecialchars($row['status'])); ?>
+                                <span class="badge bg-<?php echo $actual_status == 'available' ? 'success' : 'warning'; ?>">
+                                    <?php echo ucfirst($actual_status); ?>
                                 </span>
                             </td>
                             <td>
-                                <span class="badge bg-<?php echo $row['tenant_count'] == 0 ? 'info' : 'danger'; ?>">
-                                    <?php echo htmlspecialchars($row['tenant_count']); ?> <?php echo $row['tenant_count'] == 1 ? 'tenant' : 'tenants'; ?>
+                                <span class="badge bg-<?php echo $total_occupancy == 0 ? 'info' : 'danger'; ?>">
+                                    <?php echo $total_occupancy; ?> person(s)
                                 </span>
                             </td>
                             <td>

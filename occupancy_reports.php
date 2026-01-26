@@ -16,17 +16,25 @@ try {
     $result = $conn->query("SELECT COUNT(*) as total FROM rooms");
     $total_rooms = $result->fetch(PDO::FETCH_ASSOC)['total'];
 
-    // Occupied Rooms
-    $result = $conn->query("SELECT COUNT(*) as occupied FROM rooms WHERE status = 'occupied'");
+    // Occupied Rooms - Calculate based on actual occupancy (tenants + co-tenants)
+    $sql_occupied = "
+        SELECT COUNT(DISTINCT r.id) as occupied
+        FROM rooms r
+        WHERE (
+            SELECT COUNT(DISTINCT t.id) + COUNT(DISTINCT ct.id)
+            FROM tenants t
+            LEFT JOIN co_tenants ct ON r.id = ct.room_id
+            WHERE t.room_id = r.id AND t.status = 'active'
+        ) > 0
+    ";
+    $result = $conn->query($sql_occupied);
     $occupied_rooms = $result->fetch(PDO::FETCH_ASSOC)['occupied'];
 
-    // Vacant Rooms
-    $result = $conn->query("SELECT COUNT(*) as vacant FROM rooms WHERE status = 'available'");
-    $vacant_rooms = $result->fetch(PDO::FETCH_ASSOC)['vacant'];
+    // Vacant Rooms - Rooms with no tenants and no co-tenants
+    $vacant_rooms = $total_rooms - $occupied_rooms;
 
-    // Unavailable Rooms
-    $result = $conn->query("SELECT COUNT(*) as unavailable FROM rooms WHERE status NOT IN ('occupied', 'available')");
-    $unavailable_rooms = $result->fetch(PDO::FETCH_ASSOC)['unavailable'];
+    // Unavailable Rooms - Rooms that are neither occupied nor available (maintenance, etc)
+    $unavailable_rooms = 0; // Since we now calculate status dynamically, there are no unavailable rooms
 
     // Total Tenants
     $result = $conn->query("SELECT COUNT(*) as total FROM tenants WHERE status = 'active'");
@@ -35,30 +43,36 @@ try {
     // Occupancy Rate
     $occupancy_rate = $total_rooms > 0 ? round(($occupied_rooms / $total_rooms) * 100, 1) : 0;
 
-    // Room Types Distribution
+    // Room Types Distribution - Calculate based on actual occupancy
     $result = $conn->query("
         SELECT 
-            room_type,
-            COUNT(*) as count,
-            SUM(CASE WHEN status = 'occupied' THEN 1 ELSE 0 END) as occupied,
-            ROUND((SUM(CASE WHEN status = 'occupied' THEN 1 ELSE 0 END) / COUNT(*)) * 100, 1) as occupancy_pct
-        FROM rooms
-        GROUP BY room_type
+            r.room_type,
+            COUNT(DISTINCT r.id) as count,
+            SUM(CASE WHEN (
+                SELECT COUNT(DISTINCT t.id) + COUNT(DISTINCT ct.id)
+                FROM tenants t
+                LEFT JOIN co_tenants ct ON r.id = ct.room_id
+                WHERE t.room_id = r.id AND t.status = 'active'
+            ) > 0 THEN 1 ELSE 0 END) as occupied,
+            ROUND((SUM(CASE WHEN (
+                SELECT COUNT(DISTINCT t.id) + COUNT(DISTINCT ct.id)
+                FROM tenants t
+                LEFT JOIN co_tenants ct ON r.id = ct.room_id
+                WHERE t.room_id = r.id AND t.status = 'active'
+            ) > 0 THEN 1 ELSE 0 END) / COUNT(DISTINCT r.id)) * 100, 1) as occupancy_pct
+        FROM rooms r
+        GROUP BY r.room_type
         ORDER BY count DESC
     ");
     $room_types = $result->fetchAll(PDO::FETCH_ASSOC);
 
-    // Room Status Breakdown
-    $result = $conn->query("
-        SELECT 
-            status,
-            COUNT(*) as count
-        FROM rooms
-        GROUP BY status
-    ");
-    $status_breakdown = $result->fetchAll(PDO::FETCH_ASSOC);
+    // Room Status Breakdown - Based on actual occupancy
+    $status_breakdown = array(
+        array('status' => 'Occupied', 'count' => $occupied_rooms),
+        array('status' => 'Vacant', 'count' => $vacant_rooms)
+    );
 
-    // Detailed Room Listing
+    // Detailed Room Listing - Include both tenants and co-tenants
     $sql = "
         SELECT 
             r.id,
@@ -66,13 +80,16 @@ try {
             r.room_type,
             r.rate,
             r.status,
-            GROUP_CONCAT(t.name SEPARATOR ', ') as tenant_names,
-            COUNT(t.id) as tenant_count,
-            GROUP_CONCAT(t.phone SEPARATOR ', ') as phones,
+            GROUP_CONCAT(DISTINCT t.name SEPARATOR ', ') as tenant_names,
+            GROUP_CONCAT(DISTINCT ct.name SEPARATOR ', ') as co_tenant_names,
+            COALESCE(COUNT(DISTINCT t.id), 0) as tenant_count,
+            COALESCE(COUNT(DISTINCT ct.id), 0) as co_tenant_count,
+            GROUP_CONCAT(DISTINCT t.phone SEPARATOR ', ') as phones,
             MIN(DATEDIFF(CURDATE(), t.start_date)) as days_occupied_min,
             MAX(DATEDIFF(CURDATE(), t.start_date)) as days_occupied_max
         FROM rooms r
         LEFT JOIN tenants t ON r.id = t.room_id AND t.status = 'active'
+        LEFT JOIN co_tenants ct ON r.id = ct.room_id
         WHERE 1=1
     ";
     
@@ -299,32 +316,50 @@ try {
                                         <th>Type</th>
                                         <th class="text-end">Rate (₱)</th>
                                         <th>Status</th>
-                                        <th>Tenants</th>
-                                        <th>Tenant Names</th>
+                                        <th>Total Occupancy</th>
+                                        <th>Occupants</th>
                                         <th class="text-center">Days Occupied</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <?php if (!empty($rooms)): ?>
                                         <?php foreach ($rooms as $room): ?>
+                                            <?php 
+                                            // Calculate total occupancy
+                                            $total_occupancy = intval($room['tenant_count']) + intval($room['co_tenant_count']);
+                                            
+                                            // Combine tenant and co-tenant names
+                                            $all_occupants = [];
+                                            if ($room['tenant_names']) {
+                                                $all_occupants[] = $room['tenant_names'] . " (Primary)";
+                                            }
+                                            if ($room['co_tenant_names']) {
+                                                $all_occupants[] = $room['co_tenant_names'] . " (Co-tenant)";
+                                            }
+                                            $occupants_display = !empty($all_occupants) ? implode(", ", $all_occupants) : 'Vacant';
+                                            
+                                            // Determine actual status based on occupancy
+                                            $actual_status = $total_occupancy > 0 ? 'occupied' : 'available';
+                                            ?>
                                             <tr>
                                                 <td><strong><?php echo htmlspecialchars($room['room_number']); ?></strong></td>
                                                 <td><?php echo htmlspecialchars($room['room_type'] ?? 'N/A'); ?></td>
                                                 <td class="text-end">₱<?php echo number_format($room['rate'], 2); ?></td>
                                                 <td>
                                                     <?php 
-                                                    $status = $room['status'];
-                                                    $badge_class = $status === 'occupied' ? 'success' : ($status === 'available' ? 'info' : 'warning');
+                                                    $badge_class = $actual_status === 'occupied' ? 'success' : 'info';
                                                     ?>
-                                                    <span class="badge bg-<?php echo $badge_class; ?>"><?php echo ucfirst($status); ?></span>
+                                                    <span class="badge bg-<?php echo $badge_class; ?>"><?php echo ucfirst($actual_status); ?></span>
                                                 </td>
                                                 <td>
-                                                    <span class="badge bg-<?php echo $room['tenant_count'] > 0 ? 'success' : 'secondary'; ?>">
-                                                        <?php echo intval($room['tenant_count']); ?> tenant(s)
+                                                    <span class="badge bg-<?php echo $total_occupancy > 0 ? 'success' : 'secondary'; ?>">
+                                                        <?php echo $total_occupancy; ?> person(s)
                                                     </span>
                                                 </td>
-                                                <td><?php echo htmlspecialchars($room['tenant_names'] ?? 'Vacant'); ?></td>
-                                                <td class="text-center"><?php echo $room['days_occupied_min'] !== null ? $room['days_occupied_min'] : '-'; ?></td>
+                                                <td>
+                                                    <small><?php echo htmlspecialchars($occupants_display); ?></small>
+                                                </td>
+                                                <td class="text-center"><?php echo $room['days_occupied_min'] !== null ? intval($room['days_occupied_min']) : '-'; ?></td>
                                             </tr>
                                         <?php endforeach; ?>
                                     <?php else: ?>

@@ -61,24 +61,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         'tenant_id' => $request['tenant_id']
                     ]);
 
-                    // If more than 1 occupant, create additional tenant records
-                    if ($request['tenant_count'] > 1) {
-                        // Extract additional occupant names from the tenant_info_name
-                        // For now, we'll create generic entries - admin can update later
-                        for ($i = 2; $i <= $request['tenant_count']; $i++) {
-                            $additional_insert = $conn->prepare("
-                                INSERT INTO tenants (name, email, phone, room_id, start_date, status)
-                                VALUES (:name, :email, :phone, :room_id, :start_date, 'active')
-                            ");
-                            $additional_insert->execute([
-                                'name' => $tenant_name . " - Occupant $i",
-                                'email' => '',
-                                'phone' => '',
-                                'room_id' => $request['room_id'],
-                                'start_date' => $start_date
-                            ]);
-                        }
-                    }
+                    // Note: Co-tenants are stored separately in the co_tenants table
+                    // Only the primary tenant (first occupant) is in the tenants table
+                    // This ensures only the primary tenant appears in payment reports
 
                     // Update room status to occupied
                     $room_update = $conn->prepare("
@@ -107,7 +92,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $message_type = "danger";
                 }
             } else {
-                // Reject request
+                // Reject request - also delete associated co-tenants
+                // Get room_id and tenant_id first
+                $get_request = $conn->prepare("SELECT room_id, tenant_id FROM room_requests WHERE id = :id");
+                $get_request->execute(['id' => $request_id]);
+                $request_info = $get_request->fetch(PDO::FETCH_ASSOC);
+                
+                if ($request_info) {
+                    // Delete co-tenants for this request
+                    $delete_co_tenants = $conn->prepare("
+                        DELETE FROM co_tenants 
+                        WHERE room_id = :room_id AND primary_tenant_id = :tenant_id
+                    ");
+                    $delete_co_tenants->execute([
+                        'room_id' => $request_info['room_id'],
+                        'tenant_id' => $request_info['tenant_id']
+                    ]);
+                }
+                
+                // Update request status to rejected
                 $stmt = $conn->prepare("
                     UPDATE room_requests 
                     SET status = :status 
@@ -118,7 +121,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     'id' => $request_id
                 ]);
 
-                $message = "Room request rejected successfully!";
+                $message = "Room request rejected successfully! Co-tenant records have been removed.";
                 $message_type = "success";
             }
         } catch (Exception $e) {

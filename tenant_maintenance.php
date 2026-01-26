@@ -317,9 +317,15 @@ try {
                                             </div>
                                             <span class="badge bg-<?php 
                                                 $status = $request['status'];
-                                                echo $status === 'completed' ? 'success' : ($status === 'in-progress' ? 'info' : 'secondary');
+                                                echo $status === 'completed' ? 'success' : ($status === 'in_progress' ? 'primary' : ($status === 'pending' ? 'warning' : 'secondary'));
                                             ?>">
-                                                <?php echo ucfirst($status); ?>
+                                                <?php 
+                                                    if ($status === 'completed') echo '✓ Resolved';
+                                                    elseif ($status === 'in_progress') echo '▶ Ongoing';
+                                                    elseif ($status === 'pending') echo '⏳ Pending';
+                                                    elseif ($status === 'cancelled') echo '✕ Cancelled';
+                                                    else echo ucfirst(str_replace('_', ' ', $status));
+                                                ?>
                                             </span>
                                         </div>
 

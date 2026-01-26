@@ -69,24 +69,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $message = "You already have a pending request for this room.";
                 $message_type = "warning";
             } else {
-                // Insert room request with occupancy info
-                $stmt = $conn->prepare("
-                    INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status) 
-                    VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending')
-                ");
-                $stmt->execute([
-                    'tenant_id' => $tenant_id,
-                    'room_id' => $room_id,
-                    'tenant_count' => $tenant_count,
-                    'tenant_info_name' => $tenant_info_name,
-                    'tenant_info_email' => $tenant_info_email,
-                    'tenant_info_phone' => $tenant_info_phone,
-                    'tenant_info_address' => $tenant_info_address,
-                    'notes' => $notes
-                ]);
+                // Start transaction
+                $conn->beginTransaction();
+                try {
+                    // Insert room request with occupancy info
+                    $stmt = $conn->prepare("
+                        INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status) 
+                        VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending')
+                    ");
+                    $stmt->execute([
+                        'tenant_id' => $tenant_id,
+                        'room_id' => $room_id,
+                        'tenant_count' => $tenant_count,
+                        'tenant_info_name' => $tenant_info_name,
+                        'tenant_info_email' => $tenant_info_email,
+                        'tenant_info_phone' => $tenant_info_phone,
+                        'tenant_info_address' => $tenant_info_address,
+                        'notes' => $notes
+                    ]);
 
-                $message = "Room request submitted successfully! The admin will review your request soon.";
-                $message_type = "success";
+                    // Save co-tenants if this is a shared/bedspace room with multiple occupants
+                    if ($tenant_count > 1) {
+                        for ($i = 1; $i < $tenant_count; $i++) {
+                            $co_name = isset($_POST['co_tenant_name_' . $i]) ? trim($_POST['co_tenant_name_' . $i]) : '';
+                            $co_email = isset($_POST['co_tenant_email_' . $i]) ? trim($_POST['co_tenant_email_' . $i]) : '';
+                            $co_phone = isset($_POST['co_tenant_phone_' . $i]) ? trim($_POST['co_tenant_phone_' . $i]) : '';
+                            $co_id = isset($_POST['co_tenant_id_' . $i]) ? trim($_POST['co_tenant_id_' . $i]) : '';
+                            $co_address = isset($_POST['co_tenant_address_' . $i]) ? trim($_POST['co_tenant_address_' . $i]) : '';
+
+                            if (!empty($co_name)) {
+                                $co_stmt = $conn->prepare("
+                                    INSERT INTO co_tenants (primary_tenant_id, room_id, name, email, phone, id_number, address) 
+                                    VALUES (:primary_tenant_id, :room_id, :name, :email, :phone, :id_number, :address)
+                                ");
+                                $co_stmt->execute([
+                                    'primary_tenant_id' => $tenant_id,
+                                    'room_id' => $room_id,
+                                    'name' => $co_name,
+                                    'email' => $co_email,
+                                    'phone' => $co_phone,
+                                    'id_number' => $co_id,
+                                    'address' => $co_address
+                                ]);
+                            }
+                        }
+                    }
+
+                    $conn->commit();
+                    $message = "Room request submitted successfully! The admin will review your request soon.";
+                    $message_type = "success";
+                } catch (Exception $e) {
+                    $conn->rollBack();
+                    $message = "Error submitting request: " . $e->getMessage();
+                    $message_type = "danger";
+                }
             }
         } catch (Exception $e) {
             $message = "Error submitting request: " . $e->getMessage();
@@ -95,7 +131,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
-// Fetch all rooms with availability status
+// Fetch all rooms with availability status (including co-tenants)
 try {
     $stmt = $conn->prepare("
         SELECT 
@@ -105,9 +141,11 @@ try {
             r.description,
             r.rate,
             r.status,
-            COUNT(t.id) as tenant_count
+            COALESCE(COUNT(DISTINCT t.id), 0) as tenant_count,
+            COALESCE(COUNT(DISTINCT ct.id), 0) as co_tenant_count
         FROM rooms r
         LEFT JOIN tenants t ON r.id = t.room_id AND t.status = 'active'
+        LEFT JOIN co_tenants ct ON r.id = ct.room_id
         GROUP BY r.id
         ORDER BY r.room_number ASC
     ");
@@ -364,7 +402,17 @@ try {
                                     <div class="alert alert-info">No rooms available at the moment.</div>
                                 <?php else: ?>
                                     <?php foreach ($rooms as $room): ?>
-                                        <div class="room-card <?php echo htmlspecialchars(strtolower($room['status'])); ?>">
+                                        <?php
+                                        // Calculate actual occupancy and status
+                                        $total_occupancy = intval($room['tenant_count']) + intval($room['co_tenant_count']);
+                                        $actual_status = $total_occupancy > 0 ? 'occupied' : 'available';
+                                        $room_type = strtolower($room['room_type']);
+                                        $max_occupancy = 4;
+                                        if ($room_type === 'single') $max_occupancy = 1;
+                                        elseif ($room_type === 'shared') $max_occupancy = 2;
+                                        elseif ($room_type === 'bedspace') $max_occupancy = 4;
+                                        ?>
+                                        <div class="room-card <?php echo htmlspecialchars(strtolower($actual_status)); ?>">
                                             <div class="room-info">
                                                 <div class="room-details">
                                                     <h5><?php echo htmlspecialchars($room['room_number']); ?></h5>
@@ -374,21 +422,13 @@ try {
                                                     <?php if ($room['description']): ?>
                                                         <p><strong>Description:</strong> <?php echo htmlspecialchars($room['description']); ?></p>
                                                     <?php endif; ?>
-                                                    <p><strong>Current Occupancy:</strong> <?php echo intval($room['tenant_count']); ?> tenant(s)</p>
-                                                    <?php
-                                                    // Show occupancy limit based on room type
-                                                    $room_type = strtolower($room['room_type']);
-                                                    $max_occupancy = 4;
-                                                    if ($room_type === 'single') $max_occupancy = 1;
-                                                    elseif ($room_type === 'shared') $max_occupancy = 2;
-                                                    elseif ($room_type === 'bedspace') $max_occupancy = 4;
-                                                    ?>
+                                                    <p><strong>Current Occupancy:</strong> <?php echo $total_occupancy; ?> person(s)</p>
                                                     <p><strong>Max Occupancy:</strong> <?php echo $max_occupancy; ?> person(s)</p>
                                                 </div>
                                                 <div class="text-end">
-                                                    <div class="rate">$<?php echo number_format($room['rate'], 2); ?></div>
-                                                    <div class="status-badge status-<?php echo htmlspecialchars(strtolower($room['status'])); ?>">
-                                                        <?php echo htmlspecialchars(ucfirst($room['status'])); ?>
+                                                    <div class="rate">₱<?php echo number_format($room['rate'], 2); ?></div>
+                                                    <div class="status-badge status-<?php echo htmlspecialchars(strtolower($actual_status)); ?>">
+                                                        <?php echo htmlspecialchars(ucfirst($actual_status)); ?>
                                                     </div>
                                                 </div>
                                             </div>
@@ -427,8 +467,16 @@ try {
 
                                                     <div class="mb-3">
                                                         <label for="tenant_count_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Number of Occupants <span class="text-danger">*</span></label>
-                                                        <input type="number" class="form-control" id="tenant_count_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_count" min="1" max="<?php echo $max_occupancy; ?>" value="1" required>
+                                                        <input type="number" class="form-control tenant-count-input" id="tenant_count_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_count" min="1" max="<?php echo $max_occupancy; ?>" value="1" required data-room-id="<?php echo htmlspecialchars($room['id']); ?>">
                                                         <small class="text-muted">Maximum <?php echo $max_occupancy; ?> person(s) for this room type</small>
+                                                    </div>
+
+                                                    <!-- Co-Tenants Section (shown when occupants > 1) -->
+                                                    <div class="co-tenants-section" id="co_tenants_<?php echo htmlspecialchars($room['id']); ?>" style="display: none;">
+                                                        <div class="alert alert-info">
+                                                            <i class="bi bi-info-circle"></i> Please provide information for all roommates. You will be the primary tenant responsible for payments.
+                                                        </div>
+                                                        <div id="co_tenant_fields_<?php echo htmlspecialchars($room['id']); ?>"></div>
                                                     </div>
 
                                                     <div class="mb-3">
@@ -487,5 +535,58 @@ try {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Handle dynamic co-tenant fields based on occupant count
+        document.querySelectorAll('.tenant-count-input').forEach(input => {
+            input.addEventListener('change', function() {
+                const roomId = this.dataset.roomId;
+                const count = parseInt(this.value);
+                const coTenantSection = document.getElementById('co_tenants_' + roomId);
+                const fieldsContainer = document.getElementById('co_tenant_fields_' + roomId);
+                
+                if (count > 1) {
+                    coTenantSection.style.display = 'block';
+                    let html = '';
+                    
+                    for (let i = 1; i < count; i++) {
+                        html += `
+                            <div class="card mb-3 border-secondary">
+                                <div class="card-header bg-secondary bg-opacity-10">
+                                    <h6 class="mb-0"><i class="bi bi-person-badge"></i> Roommate ${i}</h6>
+                                </div>
+                                <div class="card-body">
+                                    <div class="mb-2">
+                                        <label class="form-label">Full Name <span class="text-danger">*</span></label>
+                                        <input type="text" class="form-control" name="co_tenant_name_${i}" placeholder="Enter roommate's full name" required>
+                                    </div>
+                                    <div class="mb-2">
+                                        <label class="form-label">Email</label>
+                                        <input type="email" class="form-control" name="co_tenant_email_${i}" placeholder="Enter roommate's email">
+                                    </div>
+                                    <div class="mb-2">
+                                        <label class="form-label">Phone Number</label>
+                                        <input type="tel" class="form-control" name="co_tenant_phone_${i}" placeholder="Enter roommate's phone">
+                                    </div>
+                                    <div class="mb-2">
+                                        <label class="form-label">ID Number</label>
+                                        <input type="text" class="form-control" name="co_tenant_id_${i}" placeholder="Enter roommate's ID number">
+                                    </div>
+                                    <div class="mb-0">
+                                        <label class="form-label">Address</label>
+                                        <textarea class="form-control" name="co_tenant_address_${i}" rows="2" placeholder="Enter roommate's address"></textarea>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    
+                    fieldsContainer.innerHTML = html;
+                } else {
+                    coTenantSection.style.display = 'none';
+                    fieldsContainer.innerHTML = '';
+                }
+            });
+        });
+    </script>
 </body>
 </html>

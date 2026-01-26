@@ -38,9 +38,9 @@
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link" href="maintenance_requests.php">
+                <a class="nav-link" href="admin_maintenance_queue.php">
                     <i class="bi bi-tools"></i>
-                    Maintenance Requests
+                    Maintenance Queue
                 </a>
             </li>
             <li class="nav-item">

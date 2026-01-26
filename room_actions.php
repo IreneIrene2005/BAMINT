@@ -42,13 +42,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 } else { // GET request
     if ($action === 'delete') {
         $id = $_GET['id'];
-        $sql = "DELETE FROM rooms WHERE id = :id";
-        $stmt = $conn->prepare($sql);
-        $stmt->execute(['id' => $id]);
-
-        header("location: rooms.php");
-        exit;
-    } elseif ($action === 'edit') {
+        
+        // Start transaction to delete room and all associated data
+        try {
+            $conn->beginTransaction();
+            
+            // Delete co-tenants for this room
+            $delete_co_tenants = $conn->prepare("DELETE FROM co_tenants WHERE room_id = :id");
+            $delete_co_tenants->execute(['id' => $id]);
+            
+            // Delete tenants in this room
+            $delete_tenants = $conn->prepare("DELETE FROM tenants WHERE room_id = :id");
+            $delete_tenants->execute(['id' => $id]);
+            
+            // Delete the room
+            $sql = "DELETE FROM rooms WHERE id = :id";
+            $stmt = $conn->prepare($sql);
+            $stmt->execute(['id' => $id]);
+            
+            $conn->commit();
+            
+            header("location: rooms.php?deleted=1");
+            exit;
+        } catch (Exception $e) {
+            $conn->rollBack();
+            header("location: rooms.php?error=1");
+            exit;
+        } elseif ($action === 'edit') {
         $id = $_GET['id'];
         $sql = "SELECT * FROM rooms WHERE id = :id";
         $stmt = $conn->prepare($sql);
