@@ -8,6 +8,73 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 
 require_once "db/database.php";
 
+// Admin role check
+if ($_SESSION['role'] !== 'admin') {
+    header("location: index.php");
+    exit;
+}
+
+// Handle payment verification/rejection
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    $action = $_POST['action'];
+    $payment_id = isset($_POST['payment_id']) ? intval($_POST['payment_id']) : 0;
+
+    if (($action === 'verify' || $action === 'reject') && $payment_id > 0) {
+        try {
+            if ($action === 'verify') {
+                // Update payment to verified
+                $stmt = $conn->prepare("
+                    UPDATE payment_transactions 
+                    SET payment_status = 'verified', verified_by = :admin_id, verification_date = NOW()
+                    WHERE id = :id AND payment_status = 'pending'
+                ");
+                $stmt->execute(['id' => $payment_id, 'admin_id' => $_SESSION['admin_id']]);
+
+                // Check if bill is fully paid
+                $payment_stmt = $conn->prepare("
+                    SELECT pt.bill_id, b.amount_due FROM payment_transactions pt
+                    JOIN bills b ON pt.bill_id = b.id
+                    WHERE pt.id = :id
+                ");
+                $payment_stmt->execute(['id' => $payment_id]);
+                $payment_info = $payment_stmt->fetch(PDO::FETCH_ASSOC);
+
+                if ($payment_info) {
+                    $bill_check = $conn->prepare("
+                        SELECT COALESCE(SUM(payment_amount), 0) as total_paid FROM payment_transactions 
+                        WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved')
+                    ");
+                    $bill_check->execute(['bill_id' => $payment_info['bill_id']]);
+                    $paid_info = $bill_check->fetch(PDO::FETCH_ASSOC);
+
+                    $total_paid = $paid_info['total_paid'];
+                    $bill_status = ($total_paid >= $payment_info['amount_due']) ? 'paid' : 'partial';
+
+                    $update_bill = $conn->prepare("
+                        UPDATE bills SET status = :status, amount_paid = :amount_paid WHERE id = :id
+                    ");
+                    $update_bill->execute(['status' => $bill_status, 'amount_paid' => $total_paid, 'id' => $payment_info['bill_id']]);
+                }
+
+            } else {
+                // Reject payment
+                $stmt = $conn->prepare("
+                    UPDATE payment_transactions 
+                    SET payment_status = 'rejected', verified_by = :admin_id, verification_date = NOW()
+                    WHERE id = :id AND payment_status = 'pending'
+                ");
+                $stmt->execute(['id' => $payment_id, 'admin_id' => $_SESSION['admin_id']]);
+            }
+            
+            // Redirect to refresh page
+            header("location: bills.php");
+            exit;
+        } catch (Exception $e) {
+            // Error will be displayed on page
+        }
+    }
+}
+
 // Search and filter variables
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
 $filter_status = isset($_GET['status']) ? $_GET['status'] : '';
@@ -63,6 +130,41 @@ $bills = $stmt;
 // Fetch all active tenants for filter dropdown
 $sql_tenants = "SELECT id, name FROM tenants WHERE status = 'active' ORDER BY name ASC";
 $all_tenants = $conn->query($sql_tenants);
+
+// Fetch pending payments (online payments awaiting verification)
+try {
+    $pending_payments_stmt = $conn->prepare("
+        SELECT 
+            pt.id,
+            pt.bill_id,
+            pt.tenant_id,
+            pt.payment_amount,
+            pt.payment_method,
+            pt.payment_type,
+            pt.payment_status,
+            pt.proof_of_payment,
+            pt.payment_date,
+            pt.notes,
+            t.name as tenant_name,
+            t.email,
+            b.billing_month,
+            b.amount_due,
+            b.amount_paid,
+            r.room_number
+        FROM payment_transactions pt
+        JOIN tenants t ON pt.tenant_id = t.id
+        JOIN bills b ON pt.bill_id = b.id
+        LEFT JOIN rooms r ON b.room_id = r.id
+        WHERE pt.payment_status = 'pending'
+        ORDER BY pt.payment_date DESC
+    ");
+    $pending_payments_stmt->execute();
+    $pending_payments = $pending_payments_stmt->fetchAll(PDO::FETCH_ASSOC);
+    $pending_count = count($pending_payments);
+} catch (Exception $e) {
+    $pending_payments = [];
+    $pending_count = 0;
+}
 ?>
 
 <!DOCTYPE html>
@@ -97,6 +199,140 @@ $all_tenants = $conn->query($sql_tenants);
                     </button>
                 </div>
             </div>
+
+            <!-- Pending Payments Queue Section -->
+            <?php if ($pending_count > 0): ?>
+            <div class="alert alert-info alert-dismissible fade show mb-4" role="alert">
+                <div class="d-flex align-items-center">
+                    <i class="bi bi-clock-history me-2" style="font-size: 1.5rem;"></i>
+                    <div>
+                        <h5 class="alert-heading mb-1">⏳ Pending Payment Verification</h5>
+                        <p class="mb-0">You have <strong><?php echo $pending_count; ?></strong> payment<?php echo $pending_count !== 1 ? 's' : ''; ?> awaiting your verification.</p>
+                    </div>
+                </div>
+                <hr>
+                <div class="row g-2">
+                    <?php foreach ($pending_payments as $payment): 
+                        $balance = $payment['amount_due'] - $payment['amount_paid'];
+                    ?>
+                    <div class="col-md-6 mb-2">
+                        <div class="card border-warning h-100">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <div>
+                                        <h6 class="card-title mb-1"><?php echo htmlspecialchars($payment['tenant_name']); ?></h6>
+                                        <p class="card-text mb-1 text-muted small">
+                                            <i class="bi bi-door"></i> Room: <?php echo htmlspecialchars($payment['room_number'] ?? 'N/A'); ?> |
+                                            <i class="bi bi-calendar"></i> <?php echo date('M Y', strtotime($payment['billing_month'])); ?>
+                                        </p>
+                                        <p class="card-text mb-2 text-muted small">
+                                            <i class="bi bi-credit-card"></i> <?php echo htmlspecialchars($payment['payment_method']); ?>
+                                        </p>
+                                        <h5 class="text-primary">₱<?php echo number_format($payment['payment_amount'], 2); ?></h5>
+                                    </div>
+                                    <button class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#paymentModal<?php echo $payment['id']; ?>" title="Review Payment">
+                                        <i class="bi bi-eye"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Payment Review Modal -->
+                    <div class="modal fade" id="paymentModal<?php echo $payment['id']; ?>" tabindex="-1" aria-hidden="true">
+                        <div class="modal-dialog modal-lg">
+                            <div class="modal-content">
+                                <div class="modal-header bg-warning bg-opacity-10">
+                                    <h5 class="modal-title">
+                                        <i class="bi bi-search"></i> Review Payment - <?php echo htmlspecialchars($payment['tenant_name']); ?>
+                                    </h5>
+                                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                </div>
+                                <div class="modal-body">
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <h6 class="text-muted">Tenant Information</h6>
+                                            <p><strong><?php echo htmlspecialchars($payment['tenant_name']); ?></strong><br>
+                                            <small class="text-muted"><?php echo htmlspecialchars($payment['email']); ?></small></p>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <h6 class="text-muted">Payment Details</h6>
+                                            <p><strong>Amount:</strong> ₱<?php echo number_format($payment['payment_amount'], 2); ?><br>
+                                            <strong>Method:</strong> <?php echo htmlspecialchars($payment['payment_method']); ?><br>
+                                            <strong>Date:</strong> <?php echo date('M d, Y H:i', strtotime($payment['payment_date'])); ?></p>
+                                        </div>
+                                    </div>
+
+                                    <div class="row mb-3">
+                                        <div class="col-md-12">
+                                            <h6 class="text-muted">Billing Information</h6>
+                                            <p><strong>Billing Month:</strong> <?php echo date('F Y', strtotime($payment['billing_month'])); ?><br>
+                                            <strong>Amount Due:</strong> ₱<?php echo number_format($payment['amount_due'], 2); ?><br>
+                                            <strong>Already Paid:</strong> ₱<?php echo number_format($payment['amount_paid'], 2); ?><br>
+                                            <strong>Balance:</strong> ₱<?php echo number_format($balance, 2); ?></p>
+                                        </div>
+                                    </div>
+
+                                    <?php if ($payment['proof_of_payment']): ?>
+                                    <div class="row mb-3">
+                                        <div class="col-md-12">
+                                            <h6 class="text-muted">Proof of Payment</h6>
+                                            <div class="card border-secondary">
+                                                <div class="card-body text-center">
+                                                    <?php 
+                                                    $proof_path = "public/payment_proofs/" . htmlspecialchars($payment['proof_of_payment']);
+                                                    $file_ext = pathinfo($payment['proof_of_payment'], PATHINFO_EXTENSION);
+                                                    ?>
+                                                    <?php if (in_array(strtolower($file_ext), ['jpg', 'jpeg', 'png', 'gif'])): ?>
+                                                        <img src="<?php echo $proof_path; ?>" alt="Payment Proof" style="max-width: 100%; max-height: 400px; border-radius: 8px;">
+                                                    <?php elseif (strtolower($file_ext) === 'pdf'): ?>
+                                                        <div class="text-center py-4">
+                                                            <i class="bi bi-file-pdf" style="font-size: 4rem; color: #dc3545;"></i>
+                                                            <p class="mt-2"><a href="<?php echo $proof_path; ?>" target="_blank" class="btn btn-sm btn-danger">
+                                                                <i class="bi bi-download"></i> View PDF
+                                                            </a></p>
+                                                        </div>
+                                                    <?php else: ?>
+                                                        <p class="text-muted"><i class="bi bi-file"></i> File: <?php echo htmlspecialchars($payment['proof_of_payment']); ?></p>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <?php endif; ?>
+
+                                    <?php if ($payment['notes']): ?>
+                                    <div class="row mb-3">
+                                        <div class="col-md-12">
+                                            <h6 class="text-muted">Tenant Notes</h6>
+                                            <p class="bg-light p-2 rounded"><?php echo htmlspecialchars($payment['notes']); ?></p>
+                                        </div>
+                                    </div>
+                                    <?php endif; ?>
+                                </div>
+                                <div class="modal-footer">
+                                    <form method="POST" style="display: inline;">
+                                        <input type="hidden" name="action" value="reject">
+                                        <input type="hidden" name="payment_id" value="<?php echo $payment['id']; ?>">
+                                        <button type="submit" class="btn btn-danger" onclick="return confirm('Reject this payment?');">
+                                            <i class="bi bi-x-circle"></i> Reject
+                                        </button>
+                                    </form>
+                                    <form method="POST" style="display: inline;">
+                                        <input type="hidden" name="action" value="verify">
+                                        <input type="hidden" name="payment_id" value="<?php echo $payment['id']; ?>">
+                                        <button type="submit" class="btn btn-success">
+                                            <i class="bi bi-check-circle"></i> Approve
+                                        </button>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+            <?php endif; ?>
 
             <!-- Search and Filter Section -->
             <div class="row mb-3">

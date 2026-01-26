@@ -28,6 +28,10 @@ try {
     $result = $conn->query("SELECT COUNT(*) as unavailable FROM rooms WHERE status NOT IN ('occupied', 'available')");
     $unavailable_rooms = $result->fetch(PDO::FETCH_ASSOC)['unavailable'];
 
+    // Total Tenants
+    $result = $conn->query("SELECT COUNT(*) as total FROM tenants WHERE status = 'active'");
+    $total_tenants = $result->fetch(PDO::FETCH_ASSOC)['total'];
+
     // Occupancy Rate
     $occupancy_rate = $total_rooms > 0 ? round(($occupied_rooms / $total_rooms) * 100, 1) : 0;
 
@@ -62,9 +66,11 @@ try {
             r.room_type,
             r.rate,
             r.status,
-            t.name as tenant_name,
-            t.phone,
-            DATEDIFF(CURDATE(), t.start_date) as days_occupied
+            GROUP_CONCAT(t.name SEPARATOR ', ') as tenant_names,
+            COUNT(t.id) as tenant_count,
+            GROUP_CONCAT(t.phone SEPARATOR ', ') as phones,
+            MIN(DATEDIFF(CURDATE(), t.start_date)) as days_occupied_min,
+            MAX(DATEDIFF(CURDATE(), t.start_date)) as days_occupied_max
         FROM rooms r
         LEFT JOIN tenants t ON r.id = t.room_id AND t.status = 'active'
         WHERE 1=1
@@ -74,7 +80,7 @@ try {
         $sql .= " AND r.room_type = :room_type";
     }
     
-    $sql .= " ORDER BY r.room_number ASC";
+    $sql .= " GROUP BY r.id ORDER BY r.room_number ASC";
     
     $stmt = $conn->prepare($sql);
     if ($filter_type) {
@@ -168,6 +174,16 @@ try {
                                 <p class="text-muted mb-2">Unavailable</p>
                                 <p class="metric-value text-warning"><?php echo $unavailable_rooms; ?></p>
                                 <small class="text-muted">Maintenance/other</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-6 col-lg-3">
+                        <div class="card metric-card bg-purple bg-opacity-10">
+                            <div class="card-body">
+                                <p class="text-muted mb-2">Total Tenants</p>
+                                <p class="metric-value" style="color: #764ba2;"><?php echo $total_tenants; ?></p>
+                                <small class="text-muted">Active occupants</small>
                             </div>
                         </div>
                     </div>
@@ -283,8 +299,8 @@ try {
                                         <th>Type</th>
                                         <th class="text-end">Rate (₱)</th>
                                         <th>Status</th>
-                                        <th>Current Tenant</th>
-                                        <th>Phone</th>
+                                        <th>Tenants</th>
+                                        <th>Tenant Names</th>
                                         <th class="text-center">Days Occupied</th>
                                     </tr>
                                 </thead>
@@ -302,9 +318,13 @@ try {
                                                     ?>
                                                     <span class="badge bg-<?php echo $badge_class; ?>"><?php echo ucfirst($status); ?></span>
                                                 </td>
-                                                <td><?php echo htmlspecialchars($room['tenant_name'] ?? 'Vacant'); ?></td>
-                                                <td><?php echo htmlspecialchars($room['phone'] ?? '-'); ?></td>
-                                                <td class="text-center"><?php echo $room['days_occupied'] !== null ? $room['days_occupied'] : '-'; ?></td>
+                                                <td>
+                                                    <span class="badge bg-<?php echo $room['tenant_count'] > 0 ? 'success' : 'secondary'; ?>">
+                                                        <?php echo intval($room['tenant_count']); ?> tenant(s)
+                                                    </span>
+                                                </td>
+                                                <td><?php echo htmlspecialchars($room['tenant_names'] ?? 'Vacant'); ?></td>
+                                                <td class="text-center"><?php echo $room['days_occupied_min'] !== null ? $room['days_occupied_min'] : '-'; ?></td>
                                             </tr>
                                         <?php endforeach; ?>
                                     <?php else: ?>

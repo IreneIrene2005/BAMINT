@@ -53,6 +53,31 @@ try {
 } catch (Exception $e) {
     $error = "Error loading bills: " . $e->getMessage();
 }
+
+// Fetch pending payments submitted by tenant
+try {
+    $pending_stmt = $conn->prepare("
+        SELECT 
+            pt.id,
+            pt.payment_amount,
+            pt.payment_method,
+            pt.payment_type,
+            pt.payment_status,
+            pt.payment_date,
+            b.billing_month,
+            b.amount_due
+        FROM payment_transactions pt
+        JOIN bills b ON pt.bill_id = b.id
+        WHERE pt.tenant_id = :tenant_id AND pt.payment_status IN ('pending', 'verified')
+        ORDER BY pt.payment_date DESC
+    ");
+    $pending_stmt->execute(['tenant_id' => $tenant_id]);
+    $pending_payments = $pending_stmt->fetchAll(PDO::FETCH_ASSOC);
+    $pending_count = count($pending_payments);
+} catch (Exception $e) {
+    $pending_payments = [];
+    $pending_count = 0;
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -174,8 +199,15 @@ try {
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
                 <!-- Header -->
                 <div class="header-banner">
-                    <h1><i class="bi bi-receipt"></i> My Bills</h1>
-                    <p class="mb-0">View and manage your billing information</p>
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <h1><i class="bi bi-receipt"></i> My Bills</h1>
+                            <p class="mb-0">View and manage your billing information</p>
+                        </div>
+                        <a href="tenant_make_payment.php" class="btn btn-light btn-lg">
+                            <i class="bi bi-credit-card"></i> Make a Payment
+                        </a>
+                    </div>
                 </div>
 
                 <?php if (isset($error)): ?>
@@ -251,6 +283,50 @@ try {
                         </form>
                     </div>
                 </div>
+
+                <!-- Pending Payments Section -->
+                <?php if ($pending_count > 0): ?>
+                <div class="alert alert-info alert-dismissible fade show mb-4" role="alert">
+                    <div class="d-flex align-items-center">
+                        <i class="bi bi-hourglass-split me-2" style="font-size: 1.5rem;"></i>
+                        <div>
+                            <h5 class="alert-heading mb-1">⏳ Pending Payment Status</h5>
+                            <p class="mb-0">You have <strong><?php echo $pending_count; ?></strong> payment<?php echo $pending_count !== 1 ? 's' : ''; ?> under review by admin.</p>
+                        </div>
+                    </div>
+                    <hr>
+                    <div class="row g-3">
+                        <?php foreach ($pending_payments as $payment): ?>
+                        <div class="col-md-6">
+                            <div class="card border-<?php echo $payment['payment_status'] === 'pending' ? 'warning' : 'info'; ?> h-100">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <h6 class="card-title">
+                                            <?php echo date('F Y', strtotime($payment['billing_month'])); ?>
+                                        </h6>
+                                        <span class="badge bg-<?php echo $payment['payment_status'] === 'pending' ? 'warning' : 'info'; ?>">
+                                            <?php echo $payment['payment_status'] === 'pending' ? '⏳ Awaiting Review' : '✓ Verified'; ?>
+                                        </span>
+                                    </div>
+                                    <p class="text-muted small mb-2">
+                                        <i class="bi bi-credit-card"></i> <?php echo htmlspecialchars($payment['payment_method']); ?> | 
+                                        <?php echo date('M d, Y', strtotime($payment['payment_date'])); ?>
+                                    </p>
+                                    <h5 class="text-primary mb-0">₱<?php echo number_format($payment['payment_amount'], 2); ?></h5>
+                                    <small class="text-muted">
+                                        <?php if ($payment['payment_status'] === 'pending'): ?>
+                                            Waiting for admin approval
+                                        <?php else: ?>
+                                            ✓ Approved and recorded
+                                        <?php endif; ?>
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+                <?php endif; ?>
 
                 <!-- Bills List -->
                 <div class="row g-4">

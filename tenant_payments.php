@@ -111,6 +111,20 @@ try {
         .payment-row:hover {
             background-color: rgba(102, 126, 234, 0.05);
         }
+        .payment-method-card {
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .payment-method-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+        }
+        .border-primary {
+            border: 2px solid #667eea !important;
+        }
+        .border-success {
+            border: 2px solid #28a745 !important;
+        }
     </style>
 </head>
 <body>
@@ -164,13 +178,65 @@ try {
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
                 <!-- Header -->
                 <div class="header-banner">
-                    <h1><i class="bi bi-coin"></i> Payment History</h1>
-                    <p class="mb-0">View your payment records and transactions</p>
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <h1><i class="bi bi-coin"></i> Payment History & Methods</h1>
+                            <p class="mb-0">View your payment records and choose a payment method</p>
+                        </div>
+                        <a href="tenant_make_payment.php" class="btn btn-light btn-lg">
+                            <i class="bi bi-credit-card"></i> Make Payment
+                        </a>
+                    </div>
                 </div>
 
                 <?php if (isset($error)): ?>
                     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
                 <?php endif; ?>
+
+                <!-- Payment Method Selection -->
+                <div class="card mb-4">
+                    <div class="card-header bg-info bg-opacity-10">
+                        <h6 class="mb-0"><i class="bi bi-credit-card"></i> Choose Your Payment Method</h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <div class="card border-primary h-100 payment-method-card" onclick="window.location.href='tenant_make_payment.php'">
+                                    <div class="card-body text-center py-4">
+                                        <div style="font-size: 2.5rem; color: #667eea; margin-bottom: 1rem;">
+                                            <i class="bi bi-credit-card"></i>
+                                        </div>
+                                        <h5 class="card-title">Online Payment</h5>
+                                        <p class="text-muted mb-3">Pay via GCash, Bank Transfer, PayMaya, or Check</p>
+                                        <p class="small text-secondary">Upload proof of payment for verification</p>
+                                        <div class="mt-3">
+                                            <a href="tenant_make_payment.php" class="btn btn-primary btn-sm">
+                                                <i class="bi bi-arrow-right"></i> Pay Online
+                                            </a>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="card border-success h-100 payment-method-card" onclick="alert('Visit our office during business hours to pay with cash or check. Our admin staff will record your payment immediately.')" style="cursor: pointer;">
+                                    <div class="card-body text-center py-4">
+                                        <div style="font-size: 2.5rem; color: #28a745; margin-bottom: 1rem;">
+                                            <i class="bi bi-cash-coin"></i>
+                                        </div>
+                                        <h5 class="card-title">Walk-in / Cash Payment</h5>
+                                        <p class="text-muted mb-3">Pay with cash or check at our office</p>
+                                        <p class="small text-secondary">Admin will process your payment immediately</p>
+                                        <div class="mt-3">
+                                            <button class="btn btn-success btn-sm" onclick="alert('Visit our office during business hours to pay with cash or check. Our admin staff will record your payment immediately.'); return false;">
+                                                <i class="bi bi-info-circle"></i> Learn More
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
 
                 <!-- Key Metrics -->
                 <div class="row g-4 mb-4">

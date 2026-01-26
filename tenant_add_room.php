@@ -15,9 +15,48 @@ $message_type = '';
 // Handle room request submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'request_room') {
     $room_id = isset($_POST['room_id']) ? intval($_POST['room_id']) : 0;
+    $tenant_count = isset($_POST['tenant_count']) ? intval($_POST['tenant_count']) : 1;
+    $tenant_info_name = isset($_POST['tenant_info_name']) ? trim($_POST['tenant_info_name']) : '';
+    $tenant_info_email = isset($_POST['tenant_info_email']) ? trim($_POST['tenant_info_email']) : '';
+    $tenant_info_phone = isset($_POST['tenant_info_phone']) ? trim($_POST['tenant_info_phone']) : '';
+    $tenant_info_address = isset($_POST['tenant_info_address']) ? trim($_POST['tenant_info_address']) : '';
     $notes = isset($_POST['notes']) ? trim($_POST['notes']) : '';
 
-    if ($room_id > 0) {
+    // Validate required fields
+    $errors = [];
+    if (empty($tenant_info_name)) $errors[] = "Name is required";
+    if (empty($tenant_info_email) || !filter_var($tenant_info_email, FILTER_VALIDATE_EMAIL)) $errors[] = "Valid email is required";
+    if (empty($tenant_info_phone)) $errors[] = "Phone number is required";
+    if (empty($tenant_info_address)) $errors[] = "Address is required";
+    if ($tenant_count < 1) $errors[] = "Number of occupants must be at least 1";
+
+    // Get room details to validate occupancy limits
+    if ($room_id > 0 && empty($errors)) {
+        try {
+            $room_stmt = $conn->prepare("SELECT room_type FROM rooms WHERE id = :id");
+            $room_stmt->execute(['id' => $room_id]);
+            $room = $room_stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($room) {
+                // Validate occupancy based on room type
+                $room_type = strtolower($room['room_type']);
+                if ($room_type === 'single' && $tenant_count > 1) {
+                    $errors[] = "Single rooms can only accommodate 1 person.";
+                } elseif ($room_type === 'shared' && $tenant_count > 2) {
+                    $errors[] = "Shared rooms can accommodate maximum 2 people.";
+                } elseif ($room_type === 'bedspace' && $tenant_count > 4) {
+                    $errors[] = "Bedspace rooms can accommodate maximum 4 people.";
+                }
+            }
+        } catch (Exception $e) {
+            $errors[] = "Error validating room: " . $e->getMessage();
+        }
+    }
+
+    if (!empty($errors)) {
+        $message = implode("<br>", $errors);
+        $message_type = "danger";
+    } elseif ($room_id > 0) {
         try {
             // Check if tenant already has a pending request for this room
             $check_stmt = $conn->prepare("
@@ -30,14 +69,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $message = "You already have a pending request for this room.";
                 $message_type = "warning";
             } else {
-                // Insert room request
+                // Insert room request with occupancy info
                 $stmt = $conn->prepare("
-                    INSERT INTO room_requests (tenant_id, room_id, notes, status) 
-                    VALUES (:tenant_id, :room_id, :notes, 'pending')
+                    INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status) 
+                    VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending')
                 ");
                 $stmt->execute([
                     'tenant_id' => $tenant_id,
                     'room_id' => $room_id,
+                    'tenant_count' => $tenant_count,
+                    'tenant_info_name' => $tenant_info_name,
+                    'tenant_info_email' => $tenant_info_email,
+                    'tenant_info_phone' => $tenant_info_phone,
+                    'tenant_info_address' => $tenant_info_address,
                     'notes' => $notes
                 ]);
 
@@ -320,10 +364,7 @@ try {
                                     <div class="alert alert-info">No rooms available at the moment.</div>
                                 <?php else: ?>
                                     <?php foreach ($rooms as $room): ?>
-                                        <form method="POST" class="room-card <?php echo htmlspecialchars(strtolower($room['status'])); ?>">
-                                            <input type="hidden" name="action" value="request_room">
-                                            <input type="hidden" name="room_id" value="<?php echo htmlspecialchars($room['id']); ?>">
-
+                                        <div class="room-card <?php echo htmlspecialchars(strtolower($room['status'])); ?>">
                                             <div class="room-info">
                                                 <div class="room-details">
                                                     <h5><?php echo htmlspecialchars($room['room_number']); ?></h5>
@@ -334,6 +375,15 @@ try {
                                                         <p><strong>Description:</strong> <?php echo htmlspecialchars($room['description']); ?></p>
                                                     <?php endif; ?>
                                                     <p><strong>Current Occupancy:</strong> <?php echo intval($room['tenant_count']); ?> tenant(s)</p>
+                                                    <?php
+                                                    // Show occupancy limit based on room type
+                                                    $room_type = strtolower($room['room_type']);
+                                                    $max_occupancy = 4;
+                                                    if ($room_type === 'single') $max_occupancy = 1;
+                                                    elseif ($room_type === 'shared') $max_occupancy = 2;
+                                                    elseif ($room_type === 'bedspace') $max_occupancy = 4;
+                                                    ?>
+                                                    <p><strong>Max Occupancy:</strong> <?php echo $max_occupancy; ?> person(s)</p>
                                                 </div>
                                                 <div class="text-end">
                                                     <div class="rate">$<?php echo number_format($room['rate'], 2); ?></div>
@@ -343,15 +393,55 @@ try {
                                                 </div>
                                             </div>
 
-                                            <div class="mb-3">
-                                                <label for="notes_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Notes (Optional)</label>
-                                                <textarea class="form-control" id="notes_<?php echo htmlspecialchars($room['id']); ?>" name="notes" rows="2" placeholder="Add any notes about your request..."></textarea>
-                                            </div>
-
-                                            <button type="submit" class="btn btn-primary btn-sm">
-                                                <i class="bi bi-check-circle"></i> Request Room
+                                            <!-- Collapsible Form -->
+                                            <button class="btn btn-sm btn-outline-primary mt-3 w-100" type="button" data-bs-toggle="collapse" data-bs-target="#room-form-<?php echo htmlspecialchars($room['id']); ?>" aria-expanded="false">
+                                                <i class="bi bi-plus-circle"></i> Request Room
                                             </button>
-                                        </form>
+
+                                            <div class="collapse mt-3" id="room-form-<?php echo htmlspecialchars($room['id']); ?>">
+                                                <form method="POST" class="border-top pt-3">
+                                                    <input type="hidden" name="action" value="request_room">
+                                                    <input type="hidden" name="room_id" value="<?php echo htmlspecialchars($room['id']); ?>">
+
+                                                    <h6 class="mb-3"><i class="bi bi-person-check"></i> Occupant Information</h6>
+
+                                                    <div class="mb-3">
+                                                        <label for="name_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Full Name <span class="text-danger">*</span></label>
+                                                        <input type="text" class="form-control" id="name_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_info_name" required placeholder="Enter your full name">
+                                                    </div>
+
+                                                    <div class="mb-3">
+                                                        <label for="email_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Email <span class="text-danger">*</span></label>
+                                                        <input type="email" class="form-control" id="email_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_info_email" required placeholder="Enter your email">
+                                                    </div>
+
+                                                    <div class="mb-3">
+                                                        <label for="phone_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Phone Number <span class="text-danger">*</span></label>
+                                                        <input type="tel" class="form-control" id="phone_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_info_phone" required placeholder="Enter your phone number">
+                                                    </div>
+
+                                                    <div class="mb-3">
+                                                        <label for="address_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Address <span class="text-danger">*</span></label>
+                                                        <textarea class="form-control" id="address_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_info_address" rows="2" required placeholder="Enter your address"></textarea>
+                                                    </div>
+
+                                                    <div class="mb-3">
+                                                        <label for="tenant_count_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Number of Occupants <span class="text-danger">*</span></label>
+                                                        <input type="number" class="form-control" id="tenant_count_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_count" min="1" max="<?php echo $max_occupancy; ?>" value="1" required>
+                                                        <small class="text-muted">Maximum <?php echo $max_occupancy; ?> person(s) for this room type</small>
+                                                    </div>
+
+                                                    <div class="mb-3">
+                                                        <label for="notes_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Notes (Optional)</label>
+                                                        <textarea class="form-control" id="notes_<?php echo htmlspecialchars($room['id']); ?>" name="notes" rows="2" placeholder="Add any notes about your request..."></textarea>
+                                                    </div>
+
+                                                    <button type="submit" class="btn btn-success w-100">
+                                                        <i class="bi bi-check-circle"></i> Submit Request
+                                                    </button>
+                                                </form>
+                                            </div>
+                                        </div>
                                     <?php endforeach; ?>
                                 <?php endif; ?>
                             </div>
@@ -377,7 +467,11 @@ try {
                                                 </span>
                                             </div>
                                             <p class="mb-1"><strong>Rate:</strong> $<?php echo number_format($request['rate'], 2); ?></p>
+                                            <p class="mb-1"><strong>Occupants:</strong> <?php echo intval($request['tenant_count'] ?? 1); ?> person(s)</p>
                                             <p class="mb-1"><strong>Requested:</strong> <?php echo date('M d, Y', strtotime($request['request_date'])); ?></p>
+                                            <?php if (!empty($request['tenant_info_name'])): ?>
+                                                <p class="mb-1 text-muted small"><strong>Name:</strong> <?php echo htmlspecialchars($request['tenant_info_name']); ?></p>
+                                            <?php endif; ?>
                                             <?php if ($request['notes']): ?>
                                                 <p class="mb-0 text-muted small"><strong>Notes:</strong> <?php echo htmlspecialchars($request['notes']); ?></p>
                                             <?php endif; ?>

@@ -88,7 +88,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         </div>
                         <div class="mb-3">
                             <label for="room_type" class="form-label">Room Type</label>
-                            <input type="text" class="form-control" id="room_type" name="room_type" value="<?php echo htmlspecialchars($room['room_type'] ?? ''); ?>" placeholder="e.g., Single, Double, Suite" required>
+                            <select class="form-control" id="room_type" name="room_type" required>
+                              <option value="">Select Room Type</option>
+                              <option value="Single" <?php echo $room['room_type'] === 'Single' ? 'selected' : ''; ?>>Single</option>
+                              <option value="Shared" <?php echo $room['room_type'] === 'Shared' ? 'selected' : ''; ?>>Shared</option>
+                              <option value="Bedspace" <?php echo $room['room_type'] === 'Bedspace' ? 'selected' : ''; ?>>Bedspace</option>
+                            </select>
                         </div>
                         <div class="mb-3">
                             <label for="description" class="form-label">Description</label>

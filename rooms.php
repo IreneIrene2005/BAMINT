@@ -182,7 +182,12 @@ try {
           </div>
           <div class="mb-3">
             <label for="room_type" class="form-label">Room Type</label>
-            <input type="text" class="form-control" id="room_type" name="room_type" placeholder="e.g., Single, Double, Suite" required>
+            <select class="form-control" id="room_type" name="room_type" required>
+              <option value="">Select Room Type</option>
+              <option value="Single">Single</option>
+              <option value="Shared">Shared</option>
+              <option value="Bedspace">Bedspace</option>
+            </select>
           </div>
           <div class="mb-3">
             <label for="description" class="form-label">Description</label>

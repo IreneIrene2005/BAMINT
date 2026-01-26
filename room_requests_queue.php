@@ -20,19 +20,107 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         try {
             $new_status = ($action === 'approve') ? 'approved' : 'rejected';
 
-            // Update request status
-            $stmt = $conn->prepare("
-                UPDATE room_requests 
-                SET status = :status 
-                WHERE id = :id
-            ");
-            $stmt->execute([
-                'status' => $new_status,
-                'id' => $request_id
-            ]);
+            if ($action === 'approve') {
+                // Get room request details
+                $request_stmt = $conn->prepare("
+                    SELECT rr.*, r.room_number, t.name as existing_tenant_name
+                    FROM room_requests rr
+                    JOIN rooms r ON rr.room_id = r.id
+                    LEFT JOIN tenants t ON rr.tenant_id = t.id
+                    WHERE rr.id = :id
+                ");
+                $request_stmt->execute(['id' => $request_id]);
+                $request = $request_stmt->fetch(PDO::FETCH_ASSOC);
 
-            $message = "Room request " . $new_status . " successfully!";
-            $message_type = "success";
+                if ($request) {
+                    // Calculate start_date
+                    $start_date = date('Y-m-d');
+                    
+                    // Get the existing tenant's initial values if not provided in request
+                    $tenant_name = !empty($request['tenant_info_name']) ? $request['tenant_info_name'] : $request['existing_tenant_name'];
+                    $tenant_email = !empty($request['tenant_info_email']) ? $request['tenant_info_email'] : '';
+                    $tenant_phone = !empty($request['tenant_info_phone']) ? $request['tenant_info_phone'] : '';
+
+                    // For first tenant: update the existing tenant record
+                    $first_update = $conn->prepare("
+                        UPDATE tenants 
+                        SET room_id = :room_id, 
+                            start_date = :start_date,
+                            status = 'active',
+                            name = :name,
+                            email = :email,
+                            phone = :phone
+                        WHERE id = :tenant_id
+                    ");
+                    $first_update->execute([
+                        'room_id' => $request['room_id'],
+                        'start_date' => $start_date,
+                        'name' => $tenant_name,
+                        'email' => $tenant_email,
+                        'phone' => $tenant_phone,
+                        'tenant_id' => $request['tenant_id']
+                    ]);
+
+                    // If more than 1 occupant, create additional tenant records
+                    if ($request['tenant_count'] > 1) {
+                        // Extract additional occupant names from the tenant_info_name
+                        // For now, we'll create generic entries - admin can update later
+                        for ($i = 2; $i <= $request['tenant_count']; $i++) {
+                            $additional_insert = $conn->prepare("
+                                INSERT INTO tenants (name, email, phone, room_id, start_date, status)
+                                VALUES (:name, :email, :phone, :room_id, :start_date, 'active')
+                            ");
+                            $additional_insert->execute([
+                                'name' => $tenant_name . " - Occupant $i",
+                                'email' => '',
+                                'phone' => '',
+                                'room_id' => $request['room_id'],
+                                'start_date' => $start_date
+                            ]);
+                        }
+                    }
+
+                    // Update room status to occupied
+                    $room_update = $conn->prepare("
+                        UPDATE rooms 
+                        SET status = 'occupied' 
+                        WHERE id = :room_id
+                    ");
+                    $room_update->execute(['room_id' => $request['room_id']]);
+
+                    // Update request status and approved_date
+                    $stmt = $conn->prepare("
+                        UPDATE room_requests 
+                        SET status = :status, 
+                            approved_date = NOW()
+                        WHERE id = :id
+                    ");
+                    $stmt->execute([
+                        'status' => $new_status,
+                        'id' => $request_id
+                    ]);
+
+                    $message = "Room request approved! Room " . htmlspecialchars($request['room_number']) . " is now marked as occupied.";
+                    $message_type = "success";
+                } else {
+                    $message = "Error: Room request not found.";
+                    $message_type = "danger";
+                }
+            } else {
+                // Reject request
+                $stmt = $conn->prepare("
+                    UPDATE room_requests 
+                    SET status = :status 
+                    WHERE id = :id
+                ");
+                $stmt->execute([
+                    'status' => $new_status,
+                    'id' => $request_id
+                ]);
+
+                $message = "Room request rejected successfully!";
+                $message_type = "success";
+            }
         } catch (Exception $e) {
             $message = "Error updating request: " . $e->getMessage();
             $message_type = "danger";
@@ -44,6 +132,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 try {
     $filter_status = isset($_GET['status']) ? $_GET['status'] : '';
     
+    // Try the new query with additional columns (after migration)
     $sql = "
         SELECT 
             rr.id,
@@ -52,6 +141,11 @@ try {
             rr.request_date,
             rr.status,
             rr.notes,
+            COALESCE(rr.tenant_count, 1) as tenant_count,
+            COALESCE(rr.tenant_info_name, '') as tenant_info_name,
+            COALESCE(rr.tenant_info_email, '') as tenant_info_email,
+            COALESCE(rr.tenant_info_phone, '') as tenant_info_phone,
+            COALESCE(rr.tenant_info_address, '') as tenant_info_address,
             t.name as tenant_name,
             t.email as tenant_email,
             t.phone as tenant_phone,
@@ -78,8 +172,70 @@ try {
     } else {
         $stmt->execute();
     }
-
+    
     $requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    // If query fails due to missing columns (before migration), try fallback query
+    if (strpos($e->getMessage(), 'Unknown column') !== false) {
+        try {
+            $filter_status = isset($_GET['status']) ? $_GET['status'] : '';
+            
+            // Fallback query without new columns (before migration)
+            $sql = "
+                SELECT 
+                    rr.id,
+                    rr.tenant_id,
+                    rr.room_id,
+                    rr.request_date,
+                    rr.status,
+                    rr.notes,
+                    1 as tenant_count,
+                    '' as tenant_info_name,
+                    '' as tenant_info_email,
+                    '' as tenant_info_phone,
+                    '' as tenant_info_address,
+                    t.name as tenant_name,
+                    t.email as tenant_email,
+                    t.phone as tenant_phone,
+                    r.room_number,
+                    r.room_type,
+                    r.rate,
+                    r.status as room_status
+                FROM room_requests rr
+                JOIN tenants t ON rr.tenant_id = t.id
+                JOIN rooms r ON rr.room_id = r.id
+                WHERE 1=1
+            ";
+            
+            if ($filter_status && in_array($filter_status, ['pending', 'approved', 'rejected'])) {
+                $sql .= " AND rr.status = :status";
+            }
+
+            $sql .= " ORDER BY rr.request_date DESC";
+
+            $stmt = $conn->prepare($sql);
+            
+            if ($filter_status) {
+                $stmt->execute(['status' => $filter_status]);
+            } else {
+                $stmt->execute();
+            }
+            
+            $requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            // Show migration notice
+            $message = "⚠️ <strong>Database Migration Required:</strong> Please run the migration script at <code>db/migrate_room_occupancy.php</code> to enable the new occupancy features.";
+            $message_type = "warning";
+        } catch (Exception $fallback_error) {
+            $message = "Error loading requests: " . $fallback_error->getMessage();
+            $message_type = "danger";
+            $requests = [];
+        }
+    } else {
+        $message = "Error loading requests: " . $e->getMessage();
+        $message_type = "danger";
+        $requests = [];
+    }
 } catch (Exception $e) {
     $message = "Error loading requests: " . $e->getMessage();
     $message_type = "danger";
@@ -270,14 +426,20 @@ try {
                                         <div class="mb-2">
                                             <h6 class="mb-1">
                                                 <i class="bi bi-person"></i> 
-                                                <strong><?php echo htmlspecialchars($request['tenant_name']); ?></strong>
+                                                <strong><?php echo htmlspecialchars($request['tenant_info_name'] ?? $request['tenant_name']); ?></strong>
                                             </h6>
                                             <p class="mb-1 text-muted small">
                                                 <i class="bi bi-envelope"></i> 
-                                                <?php echo htmlspecialchars($request['tenant_email']); ?> | 
+                                                <?php echo htmlspecialchars($request['tenant_info_email'] ?? $request['tenant_email']); ?> | 
                                                 <i class="bi bi-telephone"></i> 
-                                                <?php echo htmlspecialchars($request['tenant_phone']); ?>
+                                                <?php echo htmlspecialchars($request['tenant_info_phone'] ?? $request['tenant_phone']); ?>
                                             </p>
+                                            <?php if ($request['tenant_info_address']): ?>
+                                                <p class="mb-1 text-muted small">
+                                                    <i class="bi bi-geo-alt"></i> 
+                                                    <?php echo htmlspecialchars($request['tenant_info_address']); ?>
+                                                </p>
+                                            <?php endif; ?>
                                         </div>
                                         <div class="room-info">
                                             <span class="room-number">
@@ -295,6 +457,9 @@ try {
                                                 <span class="badge bg-<?php echo ($request['room_status'] === 'available') ? 'success' : 'warning'; ?>">
                                                     <?php echo htmlspecialchars(ucfirst($request['room_status'])); ?>
                                                 </span>
+                                            </div>
+                                            <div class="mt-1 text-muted small">
+                                                <strong>Occupants:</strong> <?php echo intval($request['tenant_count']); ?> person(s)
                                             </div>
                                             <?php if ($request['notes']): ?>
                                                 <div class="mt-2">
