@@ -367,16 +367,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
                                         </div>
 
                                         <div class="tenant-detail">
-                                            <span class="detail-label"><i class="bi bi-card-text"></i> ID Number:</span>
-                                            <span class="detail-value"><?php echo htmlspecialchars($tenant['id_number'] ?? 'N/A'); ?></span>
+                                            <span class="detail-label"><i class="bi bi-door-open"></i> Room:</span>
+                                            <span class="detail-value"><?php echo ($tenant['status'] === 'active' && $tenant['room_id']) ? htmlspecialchars($tenant['room_number']) . ' - ' . htmlspecialchars($tenant['room_type']) : '-'; ?></span>
                                         </div>
 
-                                        <?php if ($tenant['room_id']): ?>
-                                            <div class="tenant-detail">
-                                                <span class="detail-label"><i class="bi bi-door-open"></i> Room:</span>
-                                                <span class="detail-value"><?php echo htmlspecialchars($tenant['room_number']); ?> - <?php echo htmlspecialchars($tenant['room_type']); ?></span>
-                                            </div>
-
+                                        <?php if ($tenant['status'] === 'active' && $tenant['start_date']): ?>
                                             <div class="tenant-detail">
                                                 <span class="detail-label"><i class="bi bi-calendar"></i> Move-in Date:</span>
                                                 <span class="detail-value"><?php echo date('M d, Y', strtotime($tenant['start_date'])); ?></span>

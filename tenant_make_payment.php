@@ -131,6 +131,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
             
             $message_type = "success";
+            // Redirect after 2 seconds to clear form data and prevent unsaved changes warning
+            echo '<script>setTimeout(function() { window.location.href = "tenant_payments.php"; }, 2000);</script>';
         } catch (Exception $e) {
             $message = "Error processing payment: " . $e->getMessage();
             $message_type = "danger";

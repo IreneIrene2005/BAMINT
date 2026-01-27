@@ -72,14 +72,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     // Advance payment = 1 month rent
                     $advance_amount = $request['rate'];
                     $billing_month = date('Y-m-01'); // First of current month
+                    $due_date = date('Y-m-t'); // Last day of current month
                     
                     $bill_insert = $conn->prepare("
                         INSERT INTO bills (
                             tenant_id, room_id, billing_month, amount_due, 
-                            amount_paid, status, notes
+                            amount_paid, status, due_date, notes
                         ) VALUES (
                             :tenant_id, :room_id, :billing_month, :amount_due,
-                            0, 'unpaid', :notes
+                            0, 'unpaid', :due_date, :notes
                         )
                     ");
                     
@@ -88,6 +89,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         'room_id' => $request['room_id'],
                         'billing_month' => $billing_month,
                         'amount_due' => $advance_amount,
+                        'due_date' => $due_date,
                         'notes' => 'ADVANCE PAYMENT - Move-in fee (1 month rent)'
                     ]);
                     

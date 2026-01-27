@@ -68,7 +68,7 @@ try {
             b.amount_due
         FROM payment_transactions pt
         JOIN bills b ON pt.bill_id = b.id
-        WHERE pt.tenant_id = :tenant_id AND pt.payment_status IN ('pending', 'verified')
+        WHERE pt.tenant_id = :tenant_id AND pt.payment_status = 'pending'
         ORDER BY pt.payment_date DESC
     ");
     $pending_stmt->execute(['tenant_id' => $tenant_id]);
@@ -286,26 +286,26 @@ try {
 
                 <!-- Pending Payments Section -->
                 <?php if ($pending_count > 0): ?>
-                <div class="alert alert-info alert-dismissible fade show mb-4" role="alert">
+                <div class="alert alert-warning alert-dismissible fade show mb-4" role="alert">
                     <div class="d-flex align-items-center">
                         <i class="bi bi-hourglass-split me-2" style="font-size: 1.5rem;"></i>
                         <div>
                             <h5 class="alert-heading mb-1">⏳ Pending Payment Status</h5>
-                            <p class="mb-0">You have <strong><?php echo $pending_count; ?></strong> payment<?php echo $pending_count !== 1 ? 's' : ''; ?> under review by admin.</p>
+                            <p class="mb-0">You have <strong><?php echo $pending_count; ?></strong> payment<?php echo $pending_count !== 1 ? 's' : ''; ?> awaiting admin review.</p>
                         </div>
                     </div>
                     <hr>
                     <div class="row g-3">
                         <?php foreach ($pending_payments as $payment): ?>
                         <div class="col-md-6">
-                            <div class="card border-<?php echo $payment['payment_status'] === 'pending' ? 'warning' : 'info'; ?> h-100">
+                            <div class="card border-warning h-100">
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between align-items-start mb-2">
                                         <h6 class="card-title">
                                             <?php echo date('F Y', strtotime($payment['billing_month'])); ?>
                                         </h6>
-                                        <span class="badge bg-<?php echo $payment['payment_status'] === 'pending' ? 'warning' : 'info'; ?>">
-                                            <?php echo $payment['payment_status'] === 'pending' ? '⏳ Awaiting Review' : '✓ Verified'; ?>
+                                        <span class="badge bg-warning">
+                                            ⏳ Awaiting Review
                                         </span>
                                     </div>
                                     <p class="text-muted small mb-2">
@@ -314,11 +314,7 @@ try {
                                     </p>
                                     <h5 class="text-primary mb-0">₱<?php echo number_format($payment['payment_amount'], 2); ?></h5>
                                     <small class="text-muted">
-                                        <?php if ($payment['payment_status'] === 'pending'): ?>
-                                            Waiting for admin approval
-                                        <?php else: ?>
-                                            ✓ Approved and recorded
-                                        <?php endif; ?>
+                                        Waiting for admin approval
                                     </small>
                                 </div>
                             </div>

@@ -31,7 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
                 // If verified, mark bill as paid (if fully paid)
                 $payment_stmt = $conn->prepare("
-                    SELECT pt.bill_id, b.amount_due FROM payment_transactions pt
+                    SELECT pt.bill_id, pt.tenant_id, b.amount_due FROM payment_transactions pt
                     JOIN bills b ON pt.bill_id = b.id
                     WHERE pt.id = :id
                 ");
@@ -54,6 +54,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         UPDATE bills SET status = :status WHERE id = :id
                     ");
                     $update_bill->execute(['status' => $bill_status, 'id' => $payment_info['bill_id']]);
+
+                    // If advance payment (move-in) is verified and paid, activate tenant and mark room as occupied
+                    if ($bill_status === 'paid') {
+                        // Get tenant room info and details
+                        $tenant_stmt = $conn->prepare("
+                            SELECT t.id, t.room_id, t.start_date, r.rate 
+                            FROM tenants t
+                            LEFT JOIN rooms r ON t.room_id = r.id
+                            WHERE t.id = :tenant_id
+                        ");
+                        $tenant_stmt->execute(['tenant_id' => $payment_info['tenant_id']]);
+                        $tenant_info = $tenant_stmt->fetch(PDO::FETCH_ASSOC);
+
+                        if ($tenant_info && $tenant_info['room_id']) {
+                            // Update tenant status to active
+                            $activate_tenant = $conn->prepare("
+                                UPDATE tenants SET status = 'active' WHERE id = :tenant_id
+                            ");
+                            $activate_tenant->execute(['tenant_id' => $payment_info['tenant_id']]);
+
+                            // Mark room as occupied
+                            $occupy_room = $conn->prepare("
+                                UPDATE rooms SET status = 'occupied' WHERE id = :room_id
+                            ");
+                            $occupy_room->execute(['room_id' => $tenant_info['room_id']]);
+                        }
+                    }
                 }
 
                 $message = "✓ Payment verified and recorded successfully!";

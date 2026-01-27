@@ -19,7 +19,7 @@ $to_date = isset($_GET['to_date']) ? $_GET['to_date'] : '';
 $sql = "SELECT payment_transactions.*, tenants.name, tenants.email, bills.billing_month FROM payment_transactions 
         LEFT JOIN tenants ON payment_transactions.tenant_id = tenants.id 
         LEFT JOIN bills ON payment_transactions.bill_id = bills.id 
-        WHERE 1=1";
+        WHERE payment_transactions.payment_amount > 0";
 
 if ($search) {
     $sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search)";

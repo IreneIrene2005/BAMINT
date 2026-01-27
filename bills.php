@@ -139,7 +139,7 @@ if ($filter_month) {
     $sql .= " AND DATE_FORMAT(bills.billing_month, '%Y-%m') = :month";
 }
 
-$sql .= " ORDER BY bills.billing_month DESC, tenants.name ASC";
+$sql .= " GROUP BY bills.id ORDER BY bills.billing_month DESC, tenants.name ASC";
 
 $stmt = $conn->prepare($sql);
 
@@ -180,6 +180,7 @@ try {
             pt.payment_status,
             pt.proof_of_payment,
             pt.payment_date,
+            pt.created_at,
             pt.notes,
             t.name as tenant_name,
             t.email,
@@ -192,7 +193,7 @@ try {
         JOIN bills b ON pt.bill_id = b.id
         LEFT JOIN rooms r ON b.room_id = r.id
         WHERE pt.payment_status = 'pending'
-        ORDER BY pt.payment_date DESC
+        ORDER BY pt.created_at DESC
     ");
     $pending_payments_stmt->execute();
     $pending_payments = $pending_payments_stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -200,6 +201,39 @@ try {
 } catch (Exception $e) {
     $pending_payments = [];
     $pending_count = 0;
+}
+
+// Get list of active tenants who need bills created for next month
+// Only include tenants who have PAID their current month bill
+$tenants_needing_bills = [];
+try {
+    $current_month = date('Y-m-01');
+    $next_month = date('Y-m-01', strtotime('+1 month'));
+    
+    $stmt = $conn->prepare("
+        SELECT t.id, t.name, t.room_id, r.rate, r.room_number
+        FROM tenants t
+        LEFT JOIN rooms r ON t.room_id = r.id
+        WHERE t.status = 'active' AND t.room_id IS NOT NULL
+        AND EXISTS (
+            SELECT 1 FROM bills b
+            WHERE b.tenant_id = t.id 
+            AND b.billing_month = :current_month 
+            AND (b.status = 'paid' OR b.status = 'partial')
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM bills 
+            WHERE tenant_id = t.id AND billing_month = :next_month
+        )
+        ORDER BY t.name ASC
+    ");
+    $stmt->execute([
+        'current_month' => $current_month,
+        'next_month' => $next_month
+    ]);
+    $tenants_needing_bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $tenants_needing_bills = [];
 }
 ?>
 
@@ -227,14 +261,40 @@ try {
                 <div class="btn-toolbar mb-2 mb-md-0">
                     <button type="button" class="btn btn-sm btn-outline-secondary me-2" data-bs-toggle="modal" data-bs-target="#generateBillsModal">
                         <i class="bi bi-plus-circle"></i>
-                        Generate Bills
-                    </button>
-                    <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#addBillModal">
-                        <i class="bi bi-plus-circle"></i>
-                        Add Manual Bill
+                        Add Bill
                     </button>
                 </div>
             </div>
+
+            <!-- Notification: Bills to Create Reminder -->
+            <?php if (!empty($tenants_needing_bills)): ?>
+                <div class="alert alert-info alert-dismissible fade show mb-4" role="alert">
+                    <div class="d-flex align-items-start">
+                        <i class="bi bi-info-circle-fill me-3" style="font-size: 1.3rem; flex-shrink: 0;"></i>
+                        <div class="flex-grow-1">
+                            <h5 class="alert-heading mb-2">
+                                <i class="bi bi-calendar-check"></i> Bills Needed for Next Month
+                            </h5>
+                            <p class="mb-2">
+                                <strong><?php echo count($tenants_needing_bills); ?> active tenant(s)</strong> need bills created for <strong><?php echo date('F Y', strtotime('+1 month')); ?></strong>:
+                            </p>
+                            <ul class="mb-2 ps-3">
+                                <?php foreach ($tenants_needing_bills as $tenant): ?>
+                                    <li>
+                                        <strong><?php echo htmlspecialchars($tenant['name']); ?></strong> 
+                                        (Room <?php echo htmlspecialchars($tenant['room_number']); ?>) 
+                                        - ₱<?php echo number_format($tenant['rate'], 2); ?>
+                                    </li>
+                                <?php endforeach; ?>
+                            </ul>
+                            <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#generateBillsModal">
+                                <i class="bi bi-plus-circle"></i> Add Bills Now
+                            </button>
+                        </div>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+            <?php endif; ?>
 
             <!-- Pending Payments Queue Section -->
             <?php if ($pending_count > 0): ?>
@@ -295,7 +355,7 @@ try {
                                             <h6 class="text-muted">Payment Details</h6>
                                             <p><strong>Amount:</strong> ₱<?php echo number_format($payment['payment_amount'], 2); ?><br>
                                             <strong>Method:</strong> <?php echo htmlspecialchars($payment['payment_method']); ?><br>
-                                            <strong>Date:</strong> <?php echo date('M d, Y H:i', strtotime($payment['payment_date'])); ?></p>
+                                            <strong>Submitted:</strong> <?php echo date('M d, Y • H:i A', strtotime($payment['created_at'])); ?></p>
                                         </div>
                                     </div>
 

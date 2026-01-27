@@ -130,7 +130,6 @@ $available_rooms = $conn->query($sql_available_rooms);
                             <th>Name</th>
                             <th>Email</th>
                             <th>Phone</th>
-                            <th>ID Number</th>
                             <th>Room</th>
                             <th>Start Date</th>
                             <th>Status</th>
@@ -143,7 +142,6 @@ $available_rooms = $conn->query($sql_available_rooms);
                             <td><?php echo htmlspecialchars($row['name']); ?></td>
                             <td><?php echo htmlspecialchars($row['email']); ?></td>
                             <td><?php echo htmlspecialchars($row['phone']); ?></td>
-                            <td><?php echo htmlspecialchars($row['id_number'] ?? '-'); ?></td>
                             <td><?php echo htmlspecialchars($row['room_number']); ?></td>
                             <td><?php echo htmlspecialchars($row['start_date']); ?></td>
                             <td>

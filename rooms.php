@@ -19,8 +19,8 @@ $sql = "SELECT rooms.*,
         COALESCE(co_tenant_count.count, 0) as co_tenant_count,
         GROUP_CONCAT(DISTINCT CONCAT(t.name, ' (Tenant)') SEPARATOR ', ') as residents
         FROM rooms 
-        LEFT JOIN (SELECT room_id, COUNT(id) as count FROM tenants GROUP BY room_id) as tenant_count ON rooms.id = tenant_count.room_id
-        LEFT JOIN (SELECT room_id, COUNT(id) as count FROM co_tenants GROUP BY room_id) as co_tenant_count ON rooms.id = co_tenant_count.room_id
+        LEFT JOIN (SELECT room_id, COUNT(id) as count FROM tenants WHERE status = 'active' GROUP BY room_id) as tenant_count ON rooms.id = tenant_count.room_id
+        LEFT JOIN (SELECT ct.room_id, COUNT(ct.id) as count FROM co_tenants ct JOIN tenants t ON ct.primary_tenant_id = t.id AND t.status = 'active' GROUP BY ct.room_id) as co_tenant_count ON rooms.id = co_tenant_count.room_id
         LEFT JOIN tenants t ON rooms.id = t.room_id AND t.status = 'active'
         WHERE 1=1";
 

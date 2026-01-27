@@ -11,35 +11,35 @@ require_once "db/database.php";
 $tenant_id = $_SESSION["tenant_id"];
 
 try {
-    // Get payment history
+    // Get payment history (excluding $0 transactions used for tracking)
     $stmt = $conn->prepare("
         SELECT pt.*, b.billing_month, b.amount_due
         FROM payment_transactions pt
         JOIN bills b ON pt.bill_id = b.id
-        WHERE pt.tenant_id = :tenant_id
+        WHERE pt.tenant_id = :tenant_id AND pt.payment_amount > 0
         ORDER BY pt.payment_date DESC
     ");
     $stmt->execute(['tenant_id' => $tenant_id]);
     $payments = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // Get payment summary
+    // Get payment summary (excluding $0 transactions)
     $result = $conn->query("
         SELECT 
             COUNT(*) as total_payments,
             SUM(payment_amount) as total_amount
         FROM payment_transactions
-        WHERE tenant_id = $tenant_id
+        WHERE tenant_id = $tenant_id AND payment_amount > 0
     ");
     $summary = $result->fetch(PDO::FETCH_ASSOC);
 
-    // Get payment methods breakdown
+    // Get payment methods breakdown (excluding $0 transactions)
     $result = $conn->query("
         SELECT 
             payment_method,
             COUNT(*) as count,
             SUM(payment_amount) as total
         FROM payment_transactions
-        WHERE tenant_id = $tenant_id
+        WHERE tenant_id = $tenant_id AND payment_amount > 0
         GROUP BY payment_method
         ORDER BY total DESC
     ");

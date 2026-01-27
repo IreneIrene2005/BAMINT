@@ -121,7 +121,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <p><strong>Name:</strong> <?php echo htmlspecialchars($tenant['name']); ?></p>
                     <p><strong>Email:</strong> <?php echo htmlspecialchars($tenant['email']); ?></p>
                     <p><strong>Phone:</strong> <?php echo htmlspecialchars($tenant['phone'] ?? 'N/A'); ?></p>
-                    <p><strong>ID Number:</strong> <?php echo htmlspecialchars($tenant['id_number'] ?? 'N/A'); ?></p>
                 </div>
                 <div class="col-md-6">
                     <h6>Room & Lease Information</h6>

@@ -12,119 +12,143 @@ $tenant_id = $_SESSION["tenant_id"];
 $message = '';
 $message_type = '';
 
+// Get tenant status and check if they already have a room
+$is_account_pending = true;
+$tenant_has_room = false;
+try {
+    $status_stmt = $conn->prepare("SELECT status, room_id FROM tenants WHERE id = :tenant_id");
+    $status_stmt->execute(['tenant_id' => $tenant_id]);
+    $tenant_status = $status_stmt->fetch(PDO::FETCH_ASSOC);
+    $is_account_pending = ($tenant_status && $tenant_status['status'] !== 'active');
+    $tenant_has_room = ($tenant_status && !empty($tenant_status['room_id']));
+} catch (Exception $e) {
+    $is_account_pending = true; // Default to pending if can't check
+}
+
 // Handle room request submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'request_room') {
-    $room_id = isset($_POST['room_id']) ? intval($_POST['room_id']) : 0;
-    $tenant_count = isset($_POST['tenant_count']) ? intval($_POST['tenant_count']) : 1;
-    $tenant_info_name = isset($_POST['tenant_info_name']) ? trim($_POST['tenant_info_name']) : '';
-    $tenant_info_email = isset($_POST['tenant_info_email']) ? trim($_POST['tenant_info_email']) : '';
-    $tenant_info_phone = isset($_POST['tenant_info_phone']) ? trim($_POST['tenant_info_phone']) : '';
-    $tenant_info_address = isset($_POST['tenant_info_address']) ? trim($_POST['tenant_info_address']) : '';
-    $notes = isset($_POST['notes']) ? trim($_POST['notes']) : '';
-
-    // Validate required fields
-    $errors = [];
-    if (empty($tenant_info_name)) $errors[] = "Name is required";
-    if (empty($tenant_info_email) || !filter_var($tenant_info_email, FILTER_VALIDATE_EMAIL)) $errors[] = "Valid email is required";
-    if (empty($tenant_info_phone)) $errors[] = "Phone number is required";
-    if (empty($tenant_info_address)) $errors[] = "Address is required";
-    if ($tenant_count < 1) $errors[] = "Number of occupants must be at least 1";
-
-    // Get room details to validate occupancy limits
-    if ($room_id > 0 && empty($errors)) {
-        try {
-            $room_stmt = $conn->prepare("SELECT room_type FROM rooms WHERE id = :id");
-            $room_stmt->execute(['id' => $room_id]);
-            $room = $room_stmt->fetch(PDO::FETCH_ASSOC);
-            
-            if ($room) {
-                // Validate occupancy based on room type
-                $room_type = strtolower($room['room_type']);
-                if ($room_type === 'single' && $tenant_count > 1) {
-                    $errors[] = "Single rooms can only accommodate 1 person.";
-                } elseif ($room_type === 'shared' && $tenant_count > 2) {
-                    $errors[] = "Shared rooms can accommodate maximum 2 people.";
-                } elseif ($room_type === 'bedspace' && $tenant_count > 4) {
-                    $errors[] = "Bedspace rooms can accommodate maximum 4 people.";
-                }
-            }
-        } catch (Exception $e) {
-            $errors[] = "Error validating room: " . $e->getMessage();
-        }
+    // Check if tenant already has a room
+    if ($tenant_has_room) {
+        $message = "⚠️ You already have a room assigned. You cannot request another room while you have an active room.";
+        $message_type = "warning";
     }
+    // Check if account is still pending
+    elseif ($is_account_pending) {
+        $message = "⚠️ Your account is still pending admin approval. You cannot request a room until your account is verified. Please wait for admin confirmation.";
+        $message_type = "warning";
+    } else {
+        $room_id = isset($_POST['room_id']) ? intval($_POST['room_id']) : 0;
+        $tenant_count = isset($_POST['tenant_count']) ? intval($_POST['tenant_count']) : 1;
+        $tenant_info_name = isset($_POST['tenant_info_name']) ? trim($_POST['tenant_info_name']) : '';
+        $tenant_info_email = isset($_POST['tenant_info_email']) ? trim($_POST['tenant_info_email']) : '';
+        $tenant_info_phone = isset($_POST['tenant_info_phone']) ? trim($_POST['tenant_info_phone']) : '';
+        $tenant_info_address = isset($_POST['tenant_info_address']) ? trim($_POST['tenant_info_address']) : '';
+        $notes = isset($_POST['notes']) ? trim($_POST['notes']) : '';
 
-    if (!empty($errors)) {
-        $message = implode("<br>", $errors);
-        $message_type = "danger";
-    } elseif ($room_id > 0) {
-        try {
-            // Check if tenant already has a pending request for this room
-            $check_stmt = $conn->prepare("
-                SELECT id FROM room_requests 
-                WHERE tenant_id = :tenant_id AND room_id = :room_id AND status = 'pending'
-            ");
-            $check_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $room_id]);
-            
-            if ($check_stmt->rowCount() > 0) {
-                $message = "You already have a pending request for this room.";
-                $message_type = "warning";
-            } else {
-                // Start transaction
-                $conn->beginTransaction();
-                try {
-                    // Insert room request with occupancy info
-                    $stmt = $conn->prepare("
-                        INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status) 
-                        VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending')
-                    ");
-                    $stmt->execute([
-                        'tenant_id' => $tenant_id,
-                        'room_id' => $room_id,
-                        'tenant_count' => $tenant_count,
-                        'tenant_info_name' => $tenant_info_name,
-                        'tenant_info_email' => $tenant_info_email,
-                        'tenant_info_phone' => $tenant_info_phone,
-                        'tenant_info_address' => $tenant_info_address,
-                        'notes' => $notes
-                    ]);
+        // Validate required fields
+        $errors = [];
+        if (empty($tenant_info_name)) $errors[] = "Name is required";
+        if (empty($tenant_info_email) || !filter_var($tenant_info_email, FILTER_VALIDATE_EMAIL)) $errors[] = "Valid email is required";
+        if (empty($tenant_info_phone)) $errors[] = "Phone number is required";
+        if (empty($tenant_info_address)) $errors[] = "Address is required";
+        if ($tenant_count < 1) $errors[] = "Number of occupants must be at least 1";
 
-                    // Save co-tenants if this is a shared/bedspace room with multiple occupants
-                    if ($tenant_count > 1) {
-                        for ($i = 1; $i < $tenant_count; $i++) {
-                            $co_name = isset($_POST['co_tenant_name_' . $i]) ? trim($_POST['co_tenant_name_' . $i]) : '';
-                            $co_email = isset($_POST['co_tenant_email_' . $i]) ? trim($_POST['co_tenant_email_' . $i]) : '';
-                            $co_phone = isset($_POST['co_tenant_phone_' . $i]) ? trim($_POST['co_tenant_phone_' . $i]) : '';
-                            $co_address = isset($_POST['co_tenant_address_' . $i]) ? trim($_POST['co_tenant_address_' . $i]) : '';
+        // Get room details to validate occupancy limits
+        if ($room_id > 0 && empty($errors)) {
+            try {
+                $room_stmt = $conn->prepare("SELECT room_type FROM rooms WHERE id = :id");
+                $room_stmt->execute(['id' => $room_id]);
+                $room = $room_stmt->fetch(PDO::FETCH_ASSOC);
+                
+                if ($room) {
+                    // Validate occupancy based on room type
+                    $room_type = strtolower($room['room_type']);
+                    if ($room_type === 'single' && $tenant_count > 1) {
+                        $errors[] = "Single rooms can only accommodate 1 person.";
+                    } elseif ($room_type === 'shared' && $tenant_count > 2) {
+                        $errors[] = "Shared rooms can accommodate maximum 2 people.";
+                    } elseif ($room_type === 'bedspace' && $tenant_count > 4) {
+                        $errors[] = "Bedspace rooms can accommodate maximum 4 people.";
+                    }
+                }
+            } catch (Exception $e) {
+                $errors[] = "Error validating room: " . $e->getMessage();
+            }
+        }
 
-                            if (!empty($co_name)) {
-                                $co_stmt = $conn->prepare("
-                                    INSERT INTO co_tenants (primary_tenant_id, room_id, name, email, phone, address) 
-                                    VALUES (:primary_tenant_id, :room_id, :name, :email, :phone, :address)
-                                ");
-                                $co_stmt->execute([
-                                    'primary_tenant_id' => $tenant_id,
-                                    'room_id' => $room_id,
-                                    'name' => $co_name,
-                                    'email' => $co_email,
-                                    'phone' => $co_phone,
-                                    'address' => $co_address
-                                ]);
+        if (!empty($errors)) {
+            $message = implode("<br>", $errors);
+            $message_type = "danger";
+        } elseif ($room_id > 0) {
+            try {
+                // Check if tenant already has a pending request for this room
+                $check_stmt = $conn->prepare("
+                    SELECT id FROM room_requests 
+                    WHERE tenant_id = :tenant_id AND room_id = :room_id AND status = 'pending'
+                ");
+                $check_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $room_id]);
+                
+                if ($check_stmt->rowCount() > 0) {
+                    $message = "You already have a pending request for this room.";
+                    $message_type = "warning";
+                } else {
+                    // Start transaction
+                    $conn->beginTransaction();
+                    try {
+                        // Insert room request with occupancy info
+                        $stmt = $conn->prepare("
+                            INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status) 
+                            VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending')
+                        ");
+                        $stmt->execute([
+                            'tenant_id' => $tenant_id,
+                            'room_id' => $room_id,
+                            'tenant_count' => $tenant_count,
+                            'tenant_info_name' => $tenant_info_name,
+                            'tenant_info_email' => $tenant_info_email,
+                            'tenant_info_phone' => $tenant_info_phone,
+                            'tenant_info_address' => $tenant_info_address,
+                            'notes' => $notes
+                        ]);
+
+                        // Save co-tenants if this is a shared/bedspace room with multiple occupants
+                        if ($tenant_count > 1) {
+                            for ($i = 1; $i < $tenant_count; $i++) {
+                                $co_name = isset($_POST['co_tenant_name_' . $i]) ? trim($_POST['co_tenant_name_' . $i]) : '';
+                                $co_email = isset($_POST['co_tenant_email_' . $i]) ? trim($_POST['co_tenant_email_' . $i]) : '';
+                                $co_phone = isset($_POST['co_tenant_phone_' . $i]) ? trim($_POST['co_tenant_phone_' . $i]) : '';
+                                $co_address = isset($_POST['co_tenant_address_' . $i]) ? trim($_POST['co_tenant_address_' . $i]) : '';
+
+                                if (!empty($co_name)) {
+                                    $co_stmt = $conn->prepare("
+                                        INSERT INTO co_tenants (primary_tenant_id, room_id, name, email, phone, address) 
+                                        VALUES (:primary_tenant_id, :room_id, :name, :email, :phone, :address)
+                                    ");
+                                    $co_stmt->execute([
+                                        'primary_tenant_id' => $tenant_id,
+                                        'room_id' => $room_id,
+                                        'name' => $co_name,
+                                        'email' => $co_email,
+                                        'phone' => $co_phone,
+                                        'address' => $co_address
+                                    ]);
+                                }
                             }
                         }
-                    }
 
-                    $conn->commit();
-                    $message = "Room request submitted successfully! The admin will review your request soon.";
-                    $message_type = "success";
-                } catch (Exception $e) {
-                    $conn->rollBack();
-                    $message = "Error submitting request: " . $e->getMessage();
-                    $message_type = "danger";
+                        $conn->commit();
+                        $message = "Room request submitted successfully! The admin will review your request soon.";
+                        $message_type = "success";
+                    } catch (Exception $e) {
+                        $conn->rollBack();
+                        $message = "Error submitting request: " . $e->getMessage();
+                        $message_type = "danger";
+                    }
                 }
+            } catch (Exception $e) {
+                $message = "Error submitting request: " . $e->getMessage();
+                $message_type = "danger";
             }
-        } catch (Exception $e) {
-            $message = "Error submitting request: " . $e->getMessage();
-            $message_type = "danger";
         }
     }
 }
@@ -442,11 +466,24 @@ try {
 
                                             <!-- Collapsible Form - Only show for available rooms -->
                                             <?php if ($actual_status === 'available'): ?>
-                                            <button class="btn btn-sm btn-outline-primary mt-3 w-100" type="button" data-bs-toggle="collapse" data-bs-target="#room-form-<?php echo htmlspecialchars($room['id']); ?>" aria-expanded="false">
-                                                <i class="bi bi-plus-circle"></i> Request Room
-                                            </button>
+                                                <?php if ($tenant_has_room): ?>
+                                                    <div class="alert alert-warning mt-3 mb-0">
+                                                        <i class="bi bi-exclamation-triangle"></i> 
+                                                        <strong>Room Already Assigned</strong><br>
+                                                        You already have a room assigned to you. You cannot request another room while your current room is active. Please contact admin if you need to change rooms.
+                                                    </div>
+                                                <?php elseif ($is_account_pending): ?>
+                                                    <div class="alert alert-warning mt-3 mb-0">
+                                                        <i class="bi bi-exclamation-triangle"></i> 
+                                                        <strong>Account Pending Approval</strong><br>
+                                                        Your account is still pending admin approval. You will be able to request a room once your account is verified. Please check your email or dashboard for approval updates.
+                                                    </div>
+                                                <?php else: ?>
+                                                    <button class="btn btn-sm btn-outline-primary mt-3 w-100" type="button" data-bs-toggle="collapse" data-bs-target="#room-form-<?php echo htmlspecialchars($room['id']); ?>" aria-expanded="false">
+                                                        <i class="bi bi-plus-circle"></i> Request Room
+                                                    </button>
 
-                                            <div class="collapse mt-3" id="room-form-<?php echo htmlspecialchars($room['id']); ?>">
+                                                    <div class="collapse mt-3" id="room-form-<?php echo htmlspecialchars($room['id']); ?>">
                                                 <form method="POST" class="border-top pt-3">
                                                     <input type="hidden" name="action" value="request_room">
                                                     <input type="hidden" name="room_id" value="<?php echo htmlspecialchars($room['id']); ?>">
@@ -497,6 +534,7 @@ try {
                                                     </button>
                                                 </form>
                                             </div>
+                                                <?php endif; ?>
                                             <?php elseif ($actual_status === 'unavailable'): ?>
                                             <div class="alert alert-warning mt-3 mb-0">
                                                 <i class="bi bi-exclamation-triangle"></i>
