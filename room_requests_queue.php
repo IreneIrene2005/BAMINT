@@ -18,12 +18,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     if ($request_id > 0 && in_array($action, ['approve', 'reject'])) {
         try {
-            $new_status = ($action === 'approve') ? 'approved' : 'rejected';
-
             if ($action === 'approve') {
                 // Get room request details
                 $request_stmt = $conn->prepare("
-                    SELECT rr.*, r.room_number, t.name as existing_tenant_name
+                    SELECT rr.*, r.room_number, r.rate, t.name as existing_tenant_name
                     FROM room_requests rr
                     JOIN rooms r ON rr.room_id = r.id
                     LEFT JOIN tenants t ON rr.tenant_id = t.id
@@ -33,61 +31,92 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $request = $request_stmt->fetch(PDO::FETCH_ASSOC);
 
                 if ($request) {
-                    // Calculate start_date
-                    $start_date = date('Y-m-d');
+                    $conn->beginTransaction();
                     
                     // Get the existing tenant's initial values if not provided in request
                     $tenant_name = !empty($request['tenant_info_name']) ? $request['tenant_info_name'] : $request['existing_tenant_name'];
                     $tenant_email = !empty($request['tenant_info_email']) ? $request['tenant_info_email'] : '';
                     $tenant_phone = !empty($request['tenant_info_phone']) ? $request['tenant_info_phone'] : '';
 
-                    // For first tenant: update the existing tenant record
-                    $first_update = $conn->prepare("
+                    // STEP 1: Update tenant to pending payment status (not active yet)
+                    // Set room_id but status remains 'inactive' until payment is confirmed
+                    $tenant_update = $conn->prepare("
                         UPDATE tenants 
                         SET room_id = :room_id, 
-                            start_date = :start_date,
-                            status = 'active',
                             name = :name,
                             email = :email,
                             phone = :phone
                         WHERE id = :tenant_id
                     ");
-                    $first_update->execute([
+                    $tenant_update->execute([
                         'room_id' => $request['room_id'],
-                        'start_date' => $start_date,
                         'name' => $tenant_name,
                         'email' => $tenant_email,
                         'phone' => $tenant_phone,
                         'tenant_id' => $request['tenant_id']
                     ]);
 
-                    // Note: Co-tenants are stored separately in the co_tenants table
-                    // Only the primary tenant (first occupant) is in the tenants table
-                    // This ensures only the primary tenant appears in payment reports
+                    // STEP 2: Keep room status as 'available' until payment is confirmed
+                    // Room will be marked as 'occupied' after payment verification
 
-                    // Update room status to occupied
-                    $room_update = $conn->prepare("
-                        UPDATE rooms 
-                        SET status = 'occupied' 
-                        WHERE id = :room_id
-                    ");
-                    $room_update->execute(['room_id' => $request['room_id']]);
-
-                    // Update request status and approved_date
-                    $stmt = $conn->prepare("
+                    // STEP 3: Update room request status to 'pending_payment'
+                    $request_update = $conn->prepare("
                         UPDATE room_requests 
-                        SET status = :status, 
+                        SET status = 'pending_payment',
                             approved_date = NOW()
                         WHERE id = :id
                     ");
-                    $stmt->execute([
-                        'status' => $new_status,
-                        'id' => $request_id
+                    $request_update->execute(['id' => $request_id]);
+
+                    // STEP 4: Create initial advance payment bill
+                    // Advance payment = 1 month rent
+                    $advance_amount = $request['rate'];
+                    $billing_month = date('Y-m-01'); // First of current month
+                    
+                    $bill_insert = $conn->prepare("
+                        INSERT INTO bills (
+                            tenant_id, room_id, billing_month, amount_due, 
+                            amount_paid, status, notes
+                        ) VALUES (
+                            :tenant_id, :room_id, :billing_month, :amount_due,
+                            0, 'unpaid', :notes
+                        )
+                    ");
+                    
+                    $bill_insert->execute([
+                        'tenant_id' => $request['tenant_id'],
+                        'room_id' => $request['room_id'],
+                        'billing_month' => $billing_month,
+                        'amount_due' => $advance_amount,
+                        'notes' => 'ADVANCE PAYMENT - Move-in fee (1 month rent)'
+                    ]);
+                    
+                    $bill_id = $conn->lastInsertId();
+                    
+                    // Create a payment record to track this as move-in advance payment
+                    $payment_insert = $conn->prepare("
+                        INSERT INTO payment_transactions (
+                            bill_id, tenant_id, payment_amount, payment_type, 
+                            payment_status, notes, created_at
+                        ) VALUES (
+                            :bill_id, :tenant_id, 0, 'online', 'pending', 
+                            'Move-in advance payment pending', NOW()
+                        )
+                    ");
+                    
+                    $payment_insert->execute([
+                        'bill_id' => $bill_id,
+                        'tenant_id' => $request['tenant_id']
                     ]);
 
-                    $message = "Room request approved! Room " . htmlspecialchars($request['room_number']) . " is now marked as occupied.";
+                    $conn->commit();
+                    
+                    $message = "Room request approved! Advance payment bill created for " . htmlspecialchars($request['room_number']) . 
+                               ". Tenant must complete payment (₱" . number_format($advance_amount, 2) . 
+                               ") before move-in.";
                     $message_type = "success";
                 } else {
+                    $conn->rollBack();
                     $message = "Error: Room request not found.";
                     $message_type = "danger";
                 }
@@ -162,7 +191,7 @@ try {
         WHERE 1=1
     ";
 
-    if ($filter_status && in_array($filter_status, ['pending', 'approved', 'rejected'])) {
+    if ($filter_status && in_array($filter_status, ['pending', 'pending_payment', 'approved', 'rejected'])) {
         $sql .= " AND rr.status = :status";
     }
 
@@ -210,7 +239,7 @@ try {
                 WHERE 1=1
             ";
             
-            if ($filter_status && in_array($filter_status, ['pending', 'approved', 'rejected'])) {
+            if ($filter_status && in_array($filter_status, ['pending', 'pending_payment', 'approved', 'rejected'])) {
                 $sql .= " AND rr.status = :status";
             }
 
@@ -253,13 +282,16 @@ try {
     $pending_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'pending'");
     $pending_count = $pending_stmt->fetch(PDO::FETCH_ASSOC)['count'];
 
+    $pending_payment_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'pending_payment'");
+    $pending_payment_count = $pending_payment_stmt->fetch(PDO::FETCH_ASSOC)['count'];
+
     $approved_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'approved'");
     $approved_count = $approved_stmt->fetch(PDO::FETCH_ASSOC)['count'];
 
     $rejected_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'rejected'");
     $rejected_count = $rejected_stmt->fetch(PDO::FETCH_ASSOC)['count'];
 } catch (Exception $e) {
-    $total_count = $pending_count = $approved_count = $rejected_count = 0;
+    $total_count = $pending_count = $pending_payment_count = $approved_count = $rejected_count = 0;
 }
 ?>
 <!DOCTYPE html>
@@ -312,6 +344,10 @@ try {
         .status-pending {
             background-color: #cfe2ff;
             color: #084298;
+        }
+        .status-pending_payment {
+            background-color: #fff3cd;
+            color: #664d03;
         }
         .status-approved {
             background-color: #d1e7dd;
@@ -371,25 +407,31 @@ try {
 
             <!-- Statistics Cards -->
             <div class="row mb-4">
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <div class="stat-card bg-white">
                         <div class="stat-value text-primary"><?php echo intval($total_count); ?></div>
                         <div class="stat-label">Total Requests</div>
                     </div>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <div class="stat-card bg-white">
                         <div class="stat-value text-warning"><?php echo intval($pending_count); ?></div>
                         <div class="stat-label">Pending</div>
                     </div>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
+                    <div class="stat-card bg-white">
+                        <div class="stat-value text-info"><?php echo intval($pending_payment_count); ?></div>
+                        <div class="stat-label">Awaiting Payment</div>
+                    </div>
+                </div>
+                <div class="col-md-2">
                     <div class="stat-card bg-white">
                         <div class="stat-value text-success"><?php echo intval($approved_count); ?></div>
                         <div class="stat-label">Approved</div>
                     </div>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <div class="stat-card bg-white">
                         <div class="stat-value text-danger"><?php echo intval($rejected_count); ?></div>
                         <div class="stat-label">Rejected</div>
@@ -404,6 +446,9 @@ try {
                 </a>
                 <a href="room_requests_queue.php?status=pending" class="btn btn-sm btn-outline-warning filter-btn <?php echo (isset($_GET['status']) && $_GET['status'] === 'pending') ? 'active' : ''; ?>">
                     <i class="bi bi-clock"></i> Pending
+                </a>
+                <a href="room_requests_queue.php?status=pending_payment" class="btn btn-sm btn-outline-info filter-btn <?php echo (isset($_GET['status']) && $_GET['status'] === 'pending_payment') ? 'active' : ''; ?>">
+                    <i class="bi bi-cash-coin"></i> Awaiting Payment
                 </a>
                 <a href="room_requests_queue.php?status=approved" class="btn btn-sm btn-outline-success filter-btn <?php echo (isset($_GET['status']) && $_GET['status'] === 'approved') ? 'active' : ''; ?>">
                     <i class="bi bi-check-circle"></i> Approved
@@ -482,7 +527,16 @@ try {
                                             <div class="mb-3">
                                                 <span class="status-badge status-<?php echo htmlspecialchars(strtolower($request['status'])); ?>">
                                                     <i class="bi bi-info-circle"></i>
-                                                    <?php echo htmlspecialchars(ucfirst($request['status'])); ?>
+                                                    <?php 
+                                                        $status_labels = [
+                                                            'pending' => 'Pending Review',
+                                                            'pending_payment' => 'Awaiting Payment',
+                                                            'approved' => 'Approved',
+                                                            'rejected' => 'Rejected'
+                                                        ];
+                                                        echo $status_labels[$request['status']] ?? ucfirst($request['status']);
+                                                    ?>
+                                                </span>
                                                 </span>
                                             </div>
 

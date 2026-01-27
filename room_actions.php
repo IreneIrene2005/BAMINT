@@ -68,7 +68,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $conn->rollBack();
             header("location: rooms.php?error=1");
             exit;
-        } elseif ($action === 'edit') {
+        }
+    } elseif ($action === 'edit') {
         $id = $_GET['id'];
         $sql = "SELECT * FROM rooms WHERE id = :id";
         $stmt = $conn->prepare($sql);
@@ -128,6 +129,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <select class="form-control" id="status" name="status">
                                 <option value="available" <?php echo $room['status'] === 'available' ? 'selected' : ''; ?>>Available</option>
                                 <option value="occupied" <?php echo $room['status'] === 'occupied' ? 'selected' : ''; ?>>Occupied</option>
+                                <option value="unavailable" <?php echo $room['status'] === 'unavailable' ? 'selected' : ''; ?>>Unavailable (Maintenance)</option>
                             </select>
                         </div>
                         <button type="submit" class="btn btn-primary">Save Changes</button>

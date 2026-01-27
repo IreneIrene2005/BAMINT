@@ -16,17 +16,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = $_POST['name'];
         $email = $_POST['email'];
         $phone = $_POST['phone'];
-        $id_number = $_POST['id_number'] ?? '';
-        $room_id = $_POST['room_id'];
+        $room_id = $_POST['room_id'] ?? null;
         $start_date = $_POST['start_date'];
 
         $conn->beginTransaction();
         try {
-            $sql = "INSERT INTO tenants (name, email, phone, id_number, room_id, start_date, status) VALUES (:name, :email, :phone, :id_number, :room_id, :start_date, 'active')";
+            // Create tenant without room assignment (admin approves and assigns room later)
+            $sql = "INSERT INTO tenants (name, email, phone, room_id, start_date, status) VALUES (:name, :email, :phone, :room_id, :start_date, 'inactive')";
             $stmt = $conn->prepare($sql);
-            $stmt->execute(['name' => $name, 'email' => $email, 'phone' => $phone, 'id_number' => $id_number, 'room_id' => $room_id, 'start_date' => $start_date]);
+            $stmt->execute(['name' => $name, 'email' => $email, 'phone' => $phone, 'room_id' => $room_id, 'start_date' => $start_date]);
 
-            $sql_update_room = "UPDATE rooms SET status = 'occupied' WHERE id = :room_id";
+            $sql_update_room = "UPDATE rooms SET status = 'occupied' WHERE id = :room_id AND :room_id IS NOT NULL";
             $stmt_update_room = $conn->prepare($sql_update_room);
             $stmt_update_room->execute(['room_id' => $room_id]);
             
@@ -45,16 +45,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = $_POST['name'];
         $email = $_POST['email'];
         $phone = $_POST['phone'];
-        $id_number = $_POST['id_number'] ?? '';
-        $room_id = $_POST['room_id'];
+        $room_id = $_POST['room_id'] ?? null;
         $start_date = $_POST['start_date'];
-        $original_room_id = $_POST['original_room_id'];
+        $original_room_id = $_POST['original_room_id'] ?? null;
 
         $conn->beginTransaction();
         try {
-            $sql = "UPDATE tenants SET name = :name, email = :email, phone = :phone, id_number = :id_number, room_id = :room_id, start_date = :start_date WHERE id = :id";
+            $sql = "UPDATE tenants SET name = :name, email = :email, phone = :phone, room_id = :room_id, start_date = :start_date WHERE id = :id";
             $stmt = $conn->prepare($sql);
-            $stmt->execute(['name' => $name, 'email' => $email, 'phone' => $phone, 'id_number' => $id_number, 'room_id' => $room_id, 'start_date' => $start_date, 'id' => $id]);
+            $stmt->execute(['name' => $name, 'email' => $email, 'phone' => $phone, 'room_id' => $room_id, 'start_date' => $start_date, 'id' => $id]);
 
             if ($original_room_id != $room_id) {
                 // Update old room to available

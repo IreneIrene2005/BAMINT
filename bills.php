@@ -21,7 +21,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     if (($action === 'verify' || $action === 'reject') && $payment_id > 0) {
         try {
+            $conn->beginTransaction();
+            
             if ($action === 'verify') {
+                // Get payment and bill details first
+                $payment_stmt = $conn->prepare("
+                    SELECT pt.*, b.amount_due, b.notes, b.tenant_id, b.room_id 
+                    FROM payment_transactions pt
+                    JOIN bills b ON pt.bill_id = b.id
+                    WHERE pt.id = :id
+                ");
+                $payment_stmt->execute(['id' => $payment_id]);
+                $payment_info = $payment_stmt->fetch(PDO::FETCH_ASSOC);
+
                 // Update payment to verified
                 $stmt = $conn->prepare("
                     UPDATE payment_transactions 
@@ -29,15 +41,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     WHERE id = :id AND payment_status = 'pending'
                 ");
                 $stmt->execute(['id' => $payment_id, 'admin_id' => $_SESSION['admin_id']]);
-
-                // Check if bill is fully paid
-                $payment_stmt = $conn->prepare("
-                    SELECT pt.bill_id, b.amount_due FROM payment_transactions pt
-                    JOIN bills b ON pt.bill_id = b.id
-                    WHERE pt.id = :id
-                ");
-                $payment_stmt->execute(['id' => $payment_id]);
-                $payment_info = $payment_stmt->fetch(PDO::FETCH_ASSOC);
 
                 if ($payment_info) {
                     $bill_check = $conn->prepare("
@@ -54,6 +57,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         UPDATE bills SET status = :status, amount_paid = :amount_paid WHERE id = :id
                     ");
                     $update_bill->execute(['status' => $bill_status, 'amount_paid' => $total_paid, 'id' => $payment_info['bill_id']]);
+
+                    // CHECK: Is this an advance/move-in payment?
+                    if ($bill_status === 'paid' && strpos($payment_info['notes'], 'ADVANCE PAYMENT') !== false) {
+                        // STEP 1: Update tenant status to 'active' with move-in date
+                        $tenant_update = $conn->prepare("
+                            UPDATE tenants 
+                            SET status = 'active', start_date = NOW()
+                            WHERE id = :tenant_id
+                        ");
+                        $tenant_update->execute(['tenant_id' => $payment_info['tenant_id']]);
+
+                        // STEP 2: Update room status to 'occupied'
+                        $room_update = $conn->prepare("
+                            UPDATE rooms 
+                            SET status = 'occupied'
+                            WHERE id = :room_id
+                        ");
+                        $room_update->execute(['room_id' => $payment_info['room_id']]);
+
+                        // STEP 3: Update room request status to 'approved' (final approval)
+                        $request_update = $conn->prepare("
+                            UPDATE room_requests 
+                            SET status = 'approved'
+                            WHERE tenant_id = :tenant_id AND room_id = :room_id AND status = 'pending_payment'
+                        ");
+                        $request_update->execute([
+                            'tenant_id' => $payment_info['tenant_id'],
+                            'room_id' => $payment_info['room_id']
+                        ]);
+                    }
                 }
 
             } else {
@@ -66,10 +99,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $stmt->execute(['id' => $payment_id, 'admin_id' => $_SESSION['admin_id']]);
             }
             
+            $conn->commit();
+            
             // Redirect to refresh page
             header("location: bills.php");
             exit;
         } catch (Exception $e) {
+            $conn->rollBack();
             // Error will be displayed on page
         }
     }
@@ -384,7 +420,6 @@ try {
                             <th>Tenant</th>
                             <th>Room</th>
                             <th>Amount Due (₱)</th>
-                            <th>Discount (₱)</th>
                             <th>Amount Paid (₱)</th>
                             <th>Balance (₱)</th>
                             <th>Status</th>
@@ -394,14 +429,13 @@ try {
                     </thead>
                     <tbody>
                         <?php while($row = $bills->fetch(PDO::FETCH_ASSOC)) : 
-                            $balance = $row['amount_due'] - $row['discount'] - $row['amount_paid'];
+                            $balance = $row['amount_due'] - $row['amount_paid'];
                         ?>
                         <tr>
                             <td><?php echo htmlspecialchars(date('F Y', strtotime($row['billing_month']))); ?></td>
                             <td><?php echo htmlspecialchars($row['name']); ?></td>
                             <td><?php echo htmlspecialchars($row['room_number']); ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['amount_due'], 2)); ?></td>
-                            <td><?php echo htmlspecialchars(number_format($row['discount'], 2)); ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['amount_paid'], 2)); ?></td>
                             <td><strong><?php echo htmlspecialchars(number_format($balance, 2)); ?></strong></td>
                             <td>

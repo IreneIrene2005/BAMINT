@@ -106,7 +106,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Update bill payment
         $id = $_POST['id'];
         $amount_paid = $_POST['amount_paid'];
-        $discount = $_POST['discount'];
         $notes = $_POST['notes'] ?? '';
         $payment_method = $_POST['payment_method'] ?? '';
         
@@ -120,13 +119,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Calculate payment difference to record transaction
             $new_payment = $amount_paid - $bill['prev_amount_paid'];
             
-            $balance = $bill['amount_due'] - $discount - $amount_paid;
+            $balance = $bill['amount_due'] - $amount_paid;
             
             // Determine status
-            if ($amount_paid + $discount >= $bill['amount_due']) {
+            if ($amount_paid >= $bill['amount_due']) {
                 $status = 'paid';
                 $paid_date = date('Y-m-d');
-            } elseif ($amount_paid > 0 || $discount > 0) {
+            } elseif ($amount_paid > 0) {
                 $status = 'partial';
                 $paid_date = null;
             } else {
@@ -137,11 +136,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $conn->beginTransaction();
             
             // Update bill
-            $update_sql = "UPDATE bills SET amount_paid = :amount_paid, discount = :discount, status = :status, notes = :notes, paid_date = :paid_date WHERE id = :id";
+            $update_sql = "UPDATE bills SET amount_paid = :amount_paid, status = :status, notes = :notes, paid_date = :paid_date WHERE id = :id";
             $update_stmt = $conn->prepare($update_sql);
             $update_stmt->execute([
                 'amount_paid' => $amount_paid,
-                'discount' => $discount,
                 'status' => $status,
                 'notes' => $notes,
                 'paid_date' => $paid_date,
@@ -207,7 +205,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
         
-        $balance = $bill['amount_due'] - $bill['discount'] - $bill['amount_paid'];
+        $balance = $bill['amount_due'] - $bill['amount_paid'];
         ?>
         <!DOCTYPE html>
         <html lang="en">
@@ -262,12 +260,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 <div class="mb-3">
                                     <label for="amount_paid" class="form-label">Amount Paid (₱)</label>
                                     <input type="number" step="0.01" class="form-control" id="amount_paid" name="amount_paid" value="<?php echo htmlspecialchars($bill['amount_paid']); ?>" required>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="mb-3">
-                                    <label for="discount" class="form-label">Discount (₱)</label>
-                                    <input type="number" step="0.01" class="form-control" id="discount" name="discount" value="<?php echo htmlspecialchars($bill['discount']); ?>" required>
                                 </div>
                             </div>
                         </div>
@@ -332,7 +324,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
         
-        $balance = $bill['amount_due'] - $bill['discount'] - $bill['amount_paid'];
+        $balance = $bill['amount_due'] - $bill['amount_paid'];
         ?>
         <!DOCTYPE html>
         <html lang="en">
@@ -395,12 +387,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     <td><strong>Monthly Rent</strong></td>
                                     <td class="text-end"><strong>₱<?php echo number_format($bill['amount_due'], 2); ?></strong></td>
                                 </tr>
-                                <?php if ($bill['discount'] > 0): ?>
-                                <tr>
-                                    <td><strong>Discount</strong></td>
-                                    <td class="text-end">-₱<?php echo number_format($bill['discount'], 2); ?></td>
-                                </tr>
-                                <?php endif; ?>
                                 <tr>
                                     <td><strong>Amount Paid</strong></td>
                                     <td class="text-end">₱<?php echo number_format($bill['amount_paid'], 2); ?></td>

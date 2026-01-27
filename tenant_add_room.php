@@ -94,13 +94,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                             $co_name = isset($_POST['co_tenant_name_' . $i]) ? trim($_POST['co_tenant_name_' . $i]) : '';
                             $co_email = isset($_POST['co_tenant_email_' . $i]) ? trim($_POST['co_tenant_email_' . $i]) : '';
                             $co_phone = isset($_POST['co_tenant_phone_' . $i]) ? trim($_POST['co_tenant_phone_' . $i]) : '';
-                            $co_id = isset($_POST['co_tenant_id_' . $i]) ? trim($_POST['co_tenant_id_' . $i]) : '';
                             $co_address = isset($_POST['co_tenant_address_' . $i]) ? trim($_POST['co_tenant_address_' . $i]) : '';
 
                             if (!empty($co_name)) {
                                 $co_stmt = $conn->prepare("
-                                    INSERT INTO co_tenants (primary_tenant_id, room_id, name, email, phone, id_number, address) 
-                                    VALUES (:primary_tenant_id, :room_id, :name, :email, :phone, :id_number, :address)
+                                    INSERT INTO co_tenants (primary_tenant_id, room_id, name, email, phone, address) 
+                                    VALUES (:primary_tenant_id, :room_id, :name, :email, :phone, :address)
                                 ");
                                 $co_stmt->execute([
                                     'primary_tenant_id' => $tenant_id,
@@ -108,7 +107,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                     'name' => $co_name,
                                     'email' => $co_email,
                                     'phone' => $co_phone,
-                                    'id_number' => $co_id,
                                     'address' => $co_address
                                 ]);
                             }
@@ -405,7 +403,16 @@ try {
                                         <?php
                                         // Calculate actual occupancy and status
                                         $total_occupancy = intval($room['tenant_count']) + intval($room['co_tenant_count']);
-                                        $actual_status = $total_occupancy > 0 ? 'occupied' : 'available';
+                                        
+                                        // Check database status first (for unavailable rooms)
+                                        if ($room['status'] === 'unavailable') {
+                                            $actual_status = 'unavailable';
+                                            $status_label = 'Unavailable (Maintenance)';
+                                        } else {
+                                            $actual_status = $total_occupancy > 0 ? 'occupied' : 'available';
+                                            $status_label = ucfirst($actual_status);
+                                        }
+                                        
                                         $room_type = strtolower($room['room_type']);
                                         $max_occupancy = 4;
                                         if ($room_type === 'single') $max_occupancy = 1;
@@ -428,12 +435,13 @@ try {
                                                 <div class="text-end">
                                                     <div class="rate">₱<?php echo number_format($room['rate'], 2); ?></div>
                                                     <div class="status-badge status-<?php echo htmlspecialchars(strtolower($actual_status)); ?>">
-                                                        <?php echo htmlspecialchars(ucfirst($actual_status)); ?>
+                                                        <?php echo htmlspecialchars($status_label); ?>
                                                     </div>
                                                 </div>
                                             </div>
 
-                                            <!-- Collapsible Form -->
+                                            <!-- Collapsible Form - Only show for available rooms -->
+                                            <?php if ($actual_status === 'available'): ?>
                                             <button class="btn btn-sm btn-outline-primary mt-3 w-100" type="button" data-bs-toggle="collapse" data-bs-target="#room-form-<?php echo htmlspecialchars($room['id']); ?>" aria-expanded="false">
                                                 <i class="bi bi-plus-circle"></i> Request Room
                                             </button>
@@ -489,6 +497,16 @@ try {
                                                     </button>
                                                 </form>
                                             </div>
+                                            <?php elseif ($actual_status === 'unavailable'): ?>
+                                            <div class="alert alert-warning mt-3 mb-0">
+                                                <i class="bi bi-exclamation-triangle"></i>
+                                                <strong>Unavailable:</strong> This room is currently under maintenance. Please check back later.
+                                            </div>
+                                            <?php elseif ($actual_status === 'occupied'): ?>
+                                            <button class="btn btn-sm btn-outline-secondary mt-3 w-100 disabled">
+                                                <i class="bi bi-ban"></i> Room Occupied
+                                            </button>
+                                            <?php endif; ?>
                                         </div>
                                     <?php endforeach; ?>
                                 <?php endif; ?>
@@ -566,10 +584,6 @@ try {
                                     <div class="mb-2">
                                         <label class="form-label">Phone Number</label>
                                         <input type="tel" class="form-control" name="co_tenant_phone_${i}" placeholder="Enter roommate's phone">
-                                    </div>
-                                    <div class="mb-2">
-                                        <label class="form-label">ID Number</label>
-                                        <input type="text" class="form-control" name="co_tenant_id_${i}" placeholder="Enter roommate's ID number">
                                     </div>
                                     <div class="mb-0">
                                         <label class="form-label">Address</label>

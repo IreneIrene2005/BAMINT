@@ -13,7 +13,7 @@ $message = '';
 $message_type = '';
 
 // Handle payment submission
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'submit_payment') {
     $action = $_POST['action'];
     $bill_id = isset($_POST['bill_id']) ? intval($_POST['bill_id']) : 0;
     $payment_type = isset($_POST['payment_type']) ? $_POST['payment_type'] : '';
@@ -495,19 +495,65 @@ try {
         function enableSubmitButton() {
             const paymentType = document.getElementById('payment_type').value;
             const billId = document.getElementById('bill_id').value;
-            const amount = document.getElementById('payment_amount').value;
+            const amount = parseFloat(document.getElementById('payment_amount').value) || 0;
             const method = document.getElementById('payment_method').value;
+            const proofFile = document.getElementById('proof_of_payment').files.length;
             
-            const canSubmit = paymentType && billId && amount > 0 && method;
-            document.getElementById('submit_btn').disabled = !canSubmit;
+            // For online payments, require file upload
+            if (paymentType === 'online') {
+                const canSubmit = paymentType && billId && amount > 0 && method && proofFile > 0;
+                document.getElementById('submit_btn').disabled = !canSubmit;
+            } else {
+                const canSubmit = paymentType && billId && amount > 0 && method;
+                document.getElementById('submit_btn').disabled = !canSubmit;
+            }
         }
+
+        // Add event listener to file input to enable/disable submit button
+        document.getElementById('proof_of_payment').addEventListener('change', function() {
+            enableSubmitButton();
+        });
+
+        // Add event listener to amount input
+        document.getElementById('payment_amount').addEventListener('input', function() {
+            enableSubmitButton();
+        });
 
         // Form submission validation
         document.querySelector('form').addEventListener('submit', function(e) {
             const paymentType = document.getElementById('payment_type').value;
+            const billId = document.getElementById('bill_id').value;
+            const amount = parseFloat(document.getElementById('payment_amount').value) || 0;
+            const method = document.getElementById('payment_method').value;
+            const proofFile = document.getElementById('proof_of_payment').files.length;
+            
             if (!paymentType) {
                 e.preventDefault();
-                alert('Please select a payment method');
+                alert('Please select a payment method (Online or Walk-in/Cash)');
+                return false;
+            }
+            
+            if (!billId) {
+                e.preventDefault();
+                alert('Please select a bill to pay');
+                return false;
+            }
+            
+            if (amount <= 0) {
+                e.preventDefault();
+                alert('Please enter a valid payment amount greater than 0');
+                return false;
+            }
+            
+            if (!method) {
+                e.preventDefault();
+                alert('Please select a payment method (e.g., GCash, Bank Transfer, etc.)');
+                return false;
+            }
+            
+            if (paymentType === 'online' && proofFile === 0) {
+                e.preventDefault();
+                alert('For online payments, please upload proof of payment');
                 return false;
             }
         });

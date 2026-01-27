@@ -40,7 +40,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
     $name = trim($_POST['name'] ?? '');
     $phone = trim($_POST['phone'] ?? '');
     $email = trim($_POST['email'] ?? '');
-    $id_number = trim($_POST['id_number'] ?? '');
 
     // Validation
     $validation_errors = [];
@@ -76,14 +75,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
             // Update tenant info
             $stmt = $conn->prepare("
                 UPDATE tenants 
-                SET name = :name, phone = :phone, id_number = :id_number
+                SET name = :name, phone = :phone
                 WHERE id = :tenant_id
             ");
-            
             $stmt->execute([
                 'name' => $name,
                 'phone' => $phone,
-                'id_number' => $id_number,
                 'tenant_id' => $tenant_id
             ]);
 
@@ -311,13 +308,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
                                         <small class="text-muted">Used for login and notifications</small>
                                     </div>
 
-                                    <div class="mb-3">
-                                        <label for="id_number" class="form-label">ID Number</label>
-                                        <input type="text" class="form-control" id="id_number" name="id_number" 
-                                               value="<?php echo htmlspecialchars($tenant['id_number'] ?? ''); ?>">
-                                        <small class="text-muted">Government ID, Driver's License, etc.</small>
-                                    </div>
-
                                     <button type="submit" name="update_profile" class="btn btn-primary w-100">
                                         <i class="bi bi-save"></i> Save Changes
                                     </button>
@@ -390,7 +380,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
                                 <div class="info-section">
                                     <div class="info-label">Account Status</div>
                                     <div class="info-value">
-                                        <span class="badge bg-success">Active</span>
+                                        <span class="badge bg-<?php echo $tenant['status'] === 'active' ? 'success' : 'warning'; ?>">
+                                            <?php echo $tenant['status'] === 'active' ? 'Active' : 'Pending Admin Approval'; ?>
+                                        </span>
                                     </div>
                                 </div>
                             </div>

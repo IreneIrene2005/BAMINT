@@ -53,6 +53,27 @@ try {
     $stmt->execute(['tenant_id' => $tenant_id]);
     $balance = $stmt->fetch(PDO::FETCH_ASSOC);
 
+    // Get overdue bills (bills with pending/partial status where billing_month is past current month)
+    $stmt = $conn->prepare("
+        SELECT * FROM bills
+        WHERE tenant_id = :tenant_id 
+        AND status IN ('pending', 'partial')
+        AND billing_month < DATE_FORMAT(NOW(), '%Y-%m-01')
+        ORDER BY billing_month ASC
+    ");
+    $stmt->execute(['tenant_id' => $tenant_id]);
+    $overdue_bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // Get total overdue amount
+    $stmt = $conn->prepare("
+        SELECT SUM(amount_due - amount_paid) as overdue_amount FROM bills
+        WHERE tenant_id = :tenant_id 
+        AND status IN ('pending', 'partial')
+        AND billing_month < DATE_FORMAT(NOW(), '%Y-%m-01')
+    ");
+    $stmt->execute(['tenant_id' => $tenant_id]);
+    $overdue_info = $stmt->fetch(PDO::FETCH_ASSOC);
+
 } catch (Exception $e) {
     $error = "Error loading tenant data: " . $e->getMessage();
 }
@@ -176,6 +197,11 @@ try {
                         <li class="nav-item">
                             <a class="nav-link" href="tenant_profile.php">
                                 <i class="bi bi-person"></i> My Profile
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="tenant_archives.php">
+                                <i class="bi bi-archive"></i> Archives
                             </a>
                         </li>
                     </ul>

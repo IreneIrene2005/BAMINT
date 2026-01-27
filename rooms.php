@@ -16,10 +16,12 @@ $filter_type = isset($_GET['type']) ? $_GET['type'] : '';
 // Build the SQL query with search and filter
 $sql = "SELECT rooms.*, 
         COALESCE(tenant_count.count, 0) as tenant_count,
-        COALESCE(co_tenant_count.count, 0) as co_tenant_count 
+        COALESCE(co_tenant_count.count, 0) as co_tenant_count,
+        GROUP_CONCAT(DISTINCT CONCAT(t.name, ' (Tenant)') SEPARATOR ', ') as residents
         FROM rooms 
         LEFT JOIN (SELECT room_id, COUNT(id) as count FROM tenants GROUP BY room_id) as tenant_count ON rooms.id = tenant_count.room_id
         LEFT JOIN (SELECT room_id, COUNT(id) as count FROM co_tenants GROUP BY room_id) as co_tenant_count ON rooms.id = co_tenant_count.room_id
+        LEFT JOIN tenants t ON rooms.id = t.room_id AND t.status = 'active'
         WHERE 1=1";
 
 if ($search) {
@@ -107,6 +109,7 @@ try {
                                 <option value="">All Status</option>
                                 <option value="available" <?php echo $filter_status === 'available' ? 'selected' : ''; ?>>Available</option>
                                 <option value="occupied" <?php echo $filter_status === 'occupied' ? 'selected' : ''; ?>>Occupied</option>
+                                <option value="unavailable" <?php echo $filter_status === 'unavailable' ? 'selected' : ''; ?>>Unavailable (Maintenance)</option>
                             </select>
                         </div>
                         <div class="col-md-3">
@@ -147,7 +150,17 @@ try {
                         <?php
                         // Calculate actual occupancy and status based on tenants + co-tenants
                         $total_occupancy = intval($row['tenant_count']) + intval($row['co_tenant_count']);
-                        $actual_status = $total_occupancy > 0 ? 'occupied' : 'available';
+                        
+                        // Check database status first (for unavailable rooms)
+                        if ($row['status'] === 'unavailable') {
+                            $actual_status = 'unavailable';
+                            $badge_color = 'danger';
+                            $status_label = 'Unavailable';
+                        } else {
+                            $actual_status = $total_occupancy > 0 ? 'occupied' : 'available';
+                            $badge_color = $actual_status == 'available' ? 'success' : 'warning';
+                            $status_label = ucfirst($actual_status);
+                        }
                         ?>
                         <tr>
                             <td><strong><?php echo htmlspecialchars($row['room_number']); ?></strong></td>
@@ -155,8 +168,8 @@ try {
                             <td><?php echo htmlspecialchars($row['description'] ?? '-'); ?></td>
                             <td>₱<?php echo htmlspecialchars(number_format($row['rate'], 2)); ?></td>
                             <td>
-                                <span class="badge bg-<?php echo $actual_status == 'available' ? 'success' : 'warning'; ?>">
-                                    <?php echo ucfirst($actual_status); ?>
+                                <span class="badge bg-<?php echo $badge_color; ?>">
+                                    <?php echo $status_label; ?>
                                 </span>
                             </td>
                             <td>
@@ -165,6 +178,7 @@ try {
                                 </span>
                             </td>
                             <td>
+                                <button class="btn btn-sm btn-outline-info" title="View Residents" data-bs-toggle="modal" data-bs-target="#roomResidentsModal<?php echo $row['id']; ?>"><i class="bi bi-people"></i> Residents</button>
                                 <a href="room_actions.php?action=edit&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-primary" title="Edit"><i class="bi bi-pencil-square"></i></a>
                                 <a href="room_actions.php?action=delete&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-danger" title="Delete" onclick="return confirm('Are you sure you want to delete this room?');"><i class="bi bi-trash"></i></a>
                             </td>
@@ -173,6 +187,81 @@ try {
                     </tbody>
                 </table>
             </div>
+
+            <!-- Residents Modals for Each Room -->
+            <?php 
+            // Reset the statement to get rooms again for modals
+            $stmt->execute();
+            while($room = $stmt->fetch(PDO::FETCH_ASSOC)) : 
+            ?>
+            <div class="modal fade" id="roomResidentsModal<?php echo $room['id']; ?>" tabindex="-1" aria-labelledby="roomResidentsModalLabel<?php echo $room['id']; ?>" aria-hidden="true">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title" id="roomResidentsModalLabel<?php echo $room['id']; ?>">
+                                <i class="bi bi-people"></i> Residents in Room <?php echo htmlspecialchars($room['room_number']); ?>
+                            </h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <?php 
+                            // Get all residents (tenants and co-tenants) for this room
+                            $residents_sql = "
+                                SELECT 
+                                    t.id,
+                                    t.name,
+                                    t.email,
+                                    t.phone,
+                                    t.status,
+                                    'Tenant' as resident_type
+                                FROM tenants t
+                                WHERE t.room_id = :room_id AND t.status = 'active'
+                                
+                                UNION ALL
+                                
+                                SELECT 
+                                    ct.id,
+                                    ct.name,
+                                    ct.email,
+                                    ct.phone,
+                                    t.status,
+                                    'Co-tenant' as resident_type
+                                FROM co_tenants ct
+                                JOIN tenants t ON ct.primary_tenant_id = t.id
+                                WHERE ct.room_id = :room_id
+                                
+                                ORDER BY resident_type ASC, name ASC
+                            ";
+                            
+                            $residents_stmt = $conn->prepare($residents_sql);
+                            $residents_stmt->execute([':room_id' => $room['id']]);
+                            $residents_list = $residents_stmt->fetchAll(PDO::FETCH_ASSOC);
+                            
+                            if (empty($residents_list)) {
+                                echo '<p class="text-muted"><i class="bi bi-inbox"></i> No active residents in this room</p>';
+                            } else {
+                                echo '<div class="list-group">';
+                                foreach ($residents_list as $resident) {
+                                    $badge_class = ($resident['resident_type'] === 'Tenant') ? 'bg-primary' : 'bg-success';
+                                    echo '<div class="list-group-item">';
+                                    echo '<div class="d-flex w-100 justify-content-between">';
+                                    echo '<h6 class="mb-1">' . htmlspecialchars($resident['name']) . ' <span class="badge ' . $badge_class . '">' . htmlspecialchars($resident['resident_type']) . '</span></h6>';
+                                    echo '</div>';
+                                    echo '<p class="mb-1"><strong>Email:</strong> ' . htmlspecialchars($resident['email'] ?? 'N/A') . '</p>';
+                                    echo '<p class="mb-0"><strong>Phone:</strong> ' . htmlspecialchars($resident['phone'] ?? 'N/A') . '</p>';
+                                    echo '</div>';
+                                }
+                                echo '</div>';
+                            }
+                            ?>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <?php endwhile; ?>
         </main>
     </div>
 </div>

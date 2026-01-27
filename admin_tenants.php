@@ -68,7 +68,43 @@ try {
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_POST['tenant_id'])) {
     $tenant_id = intval($_POST['tenant_id']);
     
-    if ($_POST['action'] === 'verify') {
+    if ($_POST['action'] === 'approve') {
+        // Approve tenant and assign room
+        try {
+            $room_id = $_POST['room_id'] ?? null;
+            
+            $conn->beginTransaction();
+            
+            // Update tenant status to active
+            $stmt = $conn->prepare("UPDATE tenants SET status = 'active' WHERE id = :tenant_id");
+            $stmt->execute(['tenant_id' => $tenant_id]);
+            
+            // If room assignment provided, assign it
+            if ($room_id) {
+                $stmt = $conn->prepare("UPDATE tenants SET room_id = :room_id WHERE id = :tenant_id");
+                $stmt->execute(['room_id' => $room_id, 'tenant_id' => $tenant_id]);
+                
+                // Update room status to occupied
+                $stmt = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id");
+                $stmt->execute(['room_id' => $room_id]);
+            }
+            
+            $conn->commit();
+            $success_msg = "Tenant approved successfully!";
+        } catch (Exception $e) {
+            $conn->rollBack();
+            $error_msg = "Error approving tenant: " . $e->getMessage();
+        }
+    } elseif ($_POST['action'] === 'reject') {
+        // Reject tenant
+        try {
+            $stmt = $conn->prepare("DELETE FROM tenants WHERE id = :tenant_id");
+            $stmt->execute(['tenant_id' => $tenant_id]);
+            $success_msg = "Tenant rejected and removed!";
+        } catch (Exception $e) {
+            $error_msg = "Error rejecting tenant: " . $e->getMessage();
+        }
+    } elseif ($_POST['action'] === 'verify') {
         try {
             $stmt = $conn->prepare("UPDATE tenants SET verification_notes = :notes WHERE id = :tenant_id");
             $stmt->execute([

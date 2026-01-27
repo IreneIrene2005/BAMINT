@@ -20,6 +20,12 @@
                 </a>
             </li>
             <li class="nav-item">
+                <a class="nav-link" href="admin_resident_list.php">
+                    <i class="bi bi-people-fill"></i>
+                    Resident List
+                </a>
+            </li>
+            <li class="nav-item">
                 <a class="nav-link" href="bills.php">
                     <i class="bi bi-receipt"></i>
                     Bills & Billing

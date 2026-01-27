@@ -30,11 +30,12 @@ try {
     $result = $conn->query($sql_occupied);
     $occupied_rooms = $result->fetch(PDO::FETCH_ASSOC)['occupied'];
 
-    // Vacant Rooms - Rooms with no tenants and no co-tenants
-    $vacant_rooms = $total_rooms - $occupied_rooms;
+    // Unavailable Rooms - Count rooms with status='unavailable' in database (REAL-TIME)
+    $result = $conn->query("SELECT COUNT(*) as count FROM rooms WHERE status = 'unavailable'");
+    $unavailable_rooms = $result->fetch(PDO::FETCH_ASSOC)['count'];
 
-    // Unavailable Rooms - Rooms that are neither occupied nor available (maintenance, etc)
-    $unavailable_rooms = 0; // Since we now calculate status dynamically, there are no unavailable rooms
+    // Vacant Rooms - Rooms with no tenants and no co-tenants and not unavailable
+    $vacant_rooms = $total_rooms - $occupied_rooms - $unavailable_rooms;
 
     // Total Tenants
     $result = $conn->query("SELECT COUNT(*) as total FROM tenants WHERE status = 'active'");
@@ -294,9 +295,6 @@ try {
                                 <a href="occupancy_reports.php" class="btn btn-secondary">
                                     <i class="bi bi-arrow-clockwise"></i> Reset
                                 </a>
-                                <button type="button" class="btn btn-success" onclick="printReport()">
-                                    <i class="bi bi-printer"></i> Print
-                                </button>
                             </div>
                         </form>
                     </div>
@@ -438,10 +436,6 @@ try {
                     plugins: { legend: { position: 'bottom' } }
                 }
             });
-        }
-
-        function printReport() {
-            window.print();
         }
     </script>
 </body>
