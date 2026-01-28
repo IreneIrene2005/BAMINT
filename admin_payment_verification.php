@@ -18,6 +18,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = $_POST['action'];
     $payment_id = isset($_POST['payment_id']) ? intval($_POST['payment_id']) : 0;
     $verification_notes = isset($_POST['verification_notes']) ? trim($_POST['verification_notes']) : '';
+    $partial_payment_message = isset($_POST['partial_payment_message']) ? trim($_POST['partial_payment_message']) : '';
 
     if ($action === 'verify' || $action === 'reject') {
         try {
@@ -56,6 +57,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     ");
                     $update_bill->execute(['status' => $bill_status, 'id' => $payment_info['bill_id']]);
 
+                    // Notify if partial payment
+                    if ($bill_status === 'partial') {
+                        $amount_due_remaining = $payment_info['amount_due'] - $total_paid;
+                        notifyPartialPayment($conn, $payment_info['tenant_id'], $payment_info['bill_id'], $payment_info['amount_due'], $total_paid, $payment_id);
+                        
+                        // Send admin's message to tenant if provided
+                        if (!empty($partial_payment_message)) {
+                            sendMessage(
+                                $conn,
+                                'admin',
+                                $admin_id,
+                                'tenant',
+                                $payment_info['tenant_id'],
+                                'Partial Payment Notice - Remaining Balance',
+                                $partial_payment_message,
+                                'bill',
+                                $payment_info['bill_id']
+                            );
+                        }
+                    } else {
+                        // Only notify for full payment, not for partial
+                        notifyTenantPaymentVerification($conn, $payment_info['tenant_id'], $payment_id, 'approved');
+                    }
+
                     // If advance payment (move-in) is verified and paid, activate tenant and mark room as occupied
                     if ($bill_status === 'paid') {
                         // Get tenant room info and details
@@ -82,9 +107,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                             $occupy_room->execute(['room_id' => $tenant_info['room_id']]);
                         }
                     }
-                    
-                    // Notify tenant about payment verification
-                    notifyTenantPaymentVerification($conn, $payment_info['tenant_id'], $payment_id, 'approved');
                 }
 
                 $message = "✓ Payment verified and recorded successfully!";
@@ -136,6 +158,25 @@ try {
     $message = "Error loading payments: " . $e->getMessage();
     $message_type = "danger";
     $pending_payments = [];
+}
+
+// Fetch unpaid bills with outstanding balances
+try {
+    $stmt = $conn->prepare("
+        SELECT b.*, t.name as tenant_name, t.email as tenant_email, t.id as tenant_id,
+               COALESCE(SUM(pt.payment_amount), 0) as total_paid,
+               (b.amount_due - COALESCE(SUM(pt.payment_amount), 0)) as remaining_balance
+        FROM bills b
+        JOIN tenants t ON b.tenant_id = t.id
+        LEFT JOIN payment_transactions pt ON b.id = pt.bill_id AND pt.payment_status IN ('verified', 'approved')
+        WHERE b.status IN ('partial', 'unpaid')
+        GROUP BY b.id, t.name, t.email, t.id, b.amount_due
+        ORDER BY b.billing_month DESC
+    ");
+    $stmt->execute();
+    $unpaid_bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $unpaid_bills = [];
 }
 
 // Fetch recent verified payments (last 30 days)
@@ -372,6 +413,65 @@ try {
                     </div>
                 </div>
 
+                <!-- Outstanding Bills Alert Section -->
+                <?php if (!empty($unpaid_bills)): ?>
+                    <div class="mb-5">
+                        <div class="alert alert-warning alert-dismissible fade show" role="alert">
+                            <div class="d-flex align-items-center gap-3">
+                                <div class="flex-shrink-0">
+                                    <i class="bi bi-exclamation-triangle-fill" style="font-size: 1.5rem;"></i>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h5 class="alert-heading mb-2">
+                                        <i class="bi bi-cash-coin"></i> Outstanding Bills
+                                    </h5>
+                                    <p class="mb-0">
+                                        There are <strong><?php echo count($unpaid_bills); ?></strong> bill(s) with outstanding balances. 
+                                        Contact tenants to collect remaining payment.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Tenant Name</th>
+                                        <th>Billing Month</th>
+                                        <th>Amount Due</th>
+                                        <th>Paid</th>
+                                        <th>Remaining Balance</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($unpaid_bills as $bill): ?>
+                                        <tr>
+                                            <td>
+                                                <strong><?php echo htmlspecialchars($bill['tenant_name']); ?></strong><br>
+                                                <small class="text-muted"><?php echo htmlspecialchars($bill['tenant_email']); ?></small>
+                                            </td>
+                                            <td><?php echo date('F Y', strtotime($bill['billing_month'])); ?></td>
+                                            <td>₱<?php echo number_format($bill['amount_due'], 2); ?></td>
+                                            <td>₱<?php echo number_format($bill['total_paid'], 2); ?></td>
+                                            <td>
+                                                <span class="badge bg-danger">₱<?php echo number_format($bill['remaining_balance'], 2); ?></span>
+                                            </td>
+                                            <td>
+                                                <a href="admin_send_message.php?tenant_id=<?php echo $bill['tenant_id']; ?>&bill_id=<?php echo $bill['id']; ?>" 
+                                                   class="btn btn-sm btn-outline-primary" title="Send payment reminder">
+                                                    <i class="bi bi-envelope"></i> Message
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
                 <!-- Pending Payments Section -->
                 <div class="mb-5">
                     <h4 class="mb-3"><i class="bi bi-hourglass-split"></i> Pending Online Payments</h4>
@@ -447,6 +547,39 @@ try {
                                     </div>
                                 <?php endif; ?>
 
+                                <!-- PARTIAL PAYMENT ALERT -->
+                                <?php 
+                                $is_partial = $payment['payment_amount'] < $payment['amount_due'];
+                                $remaining_balance = $payment['amount_due'] - $payment['payment_amount'];
+                                ?>
+                                <?php if ($is_partial): ?>
+                                    <div class="alert alert-warning alert-dismissible fade show mb-4" role="alert">
+                                        <div class="d-flex align-items-start gap-3">
+                                            <div class="flex-shrink-0">
+                                                <i class="bi bi-exclamation-circle-fill" style="font-size: 1.5rem; color: #ff9800;"></i>
+                                            </div>
+                                            <div class="flex-grow-1">
+                                                <h5 class="alert-heading mb-2">
+                                                    <i class="bi bi-info-circle"></i> Partial Payment Detected
+                                                </h5>
+                                                <p class="mb-2">
+                                                    <strong><?php echo htmlspecialchars($payment['tenant_name']); ?></strong> has paid 
+                                                    <strong class="text-primary">₱<?php echo number_format($payment['payment_amount'], 2); ?></strong> 
+                                                    but owes <strong class="text-danger">₱<?php echo number_format($payment['amount_due'], 2); ?></strong>.
+                                                </p>
+                                                <p class="mb-0">
+                                                    <strong>Remaining Balance: <span class="text-danger">₱<?php echo number_format($remaining_balance, 2); ?></span></strong>
+                                                </p>
+                                                <hr class="my-2">
+                                                <small class="text-muted">
+                                                    ⚠️ <strong>Note:</strong> The billing for this month will NOT be officially marked as PAID until the full amount is received. 
+                                                    If you approve this partial payment, you MUST send a message to the tenant notifying them about the remaining balance.
+                                                </small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                <?php endif; ?>
+
                                 <!-- Verification Form -->
                                 <form method="POST" class="mt-4">
                                     <input type="hidden" name="payment_id" value="<?php echo $payment['id']; ?>">
@@ -454,17 +587,48 @@ try {
                                     <div class="mb-3">
                                         <label class="form-label"><strong>Verification Decision</strong></label>
                                         <div class="btn-group w-100" role="group">
-                                            <input type="radio" class="btn-check" name="action" id="verify_yes" value="verify" required>
+                                            <input type="radio" class="btn-check" name="action" id="verify_yes" value="verify" required 
+                                                   onchange="togglePartialMessageField(<?php echo $is_partial ? 'true' : 'false'; ?>, <?php echo $payment['id']; ?>)">
                                             <label class="btn btn-outline-success" for="verify_yes">
                                                 <i class="bi bi-check-circle"></i> Verify & Approve
                                             </label>
 
-                                            <input type="radio" class="btn-check" name="action" id="verify_no" value="reject" required>
+                                            <input type="radio" class="btn-check" name="action" id="verify_no" value="reject" required
+                                                   onchange="togglePartialMessageField(false, <?php echo $payment['id']; ?>)">
                                             <label class="btn btn-outline-danger" for="verify_no">
                                                 <i class="bi bi-x-circle"></i> Reject
                                             </label>
                                         </div>
                                     </div>
+
+                                    <!-- PARTIAL PAYMENT MESSAGE FIELD (Conditional) -->
+                                    <?php if ($is_partial): ?>
+                                        <div id="partial_message_field_<?php echo $payment['id']; ?>" class="mb-3" style="display: none;">
+                                            <div class="alert alert-info mb-3">
+                                                <i class="bi bi-info-circle"></i> <strong>Required:</strong> You must send a message to the tenant about the remaining balance (₱<?php echo number_format($remaining_balance, 2); ?>) before approving.
+                                            </div>
+                                            <label for="partial_message_<?php echo $payment['id']; ?>" class="form-label">
+                                                <strong>Message to Tenant</strong> <span class="text-danger">*</span>
+                                            </label>
+                                            <textarea class="form-control" name="partial_payment_message" id="partial_message_<?php echo $payment['id']; ?>" 
+                                                      rows="4" placeholder="Inform tenant about partial payment and remaining balance...">
+Dear <?php echo htmlspecialchars(explode(' ', $payment['tenant_name'])[0]); ?>,
+
+Thank you for your payment of ₱<?php echo number_format($payment['payment_amount'], 2); ?>. 
+
+Please note: Your billing for <?php echo date('F Y', strtotime($payment['billing_month'])); ?> is NOT YET officially paid. 
+
+You still have a remaining balance of ₱<?php echo number_format($remaining_balance, 2); ?> that needs to be paid to complete your monthly billing.
+
+Please settle the remaining amount as soon as possible.
+
+Thank you for your cooperation.
+</textarea>
+                                            <small class="text-muted d-block mt-2">
+                                                <i class="bi bi-bell"></i> This message will be sent to the tenant via notification and they will receive it in their message inbox.
+                                            </small>
+                                        </div>
+                                    <?php endif; ?>
 
                                     <div class="mb-3">
                                         <label for="notes_<?php echo $payment['id']; ?>" class="form-label">Verification Notes (Optional)</label>
@@ -529,5 +693,52 @@ try {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        // Toggle partial payment message field
+        function togglePartialMessageField(isPartial, paymentId) {
+            const messageField = document.getElementById('partial_message_field_' + paymentId);
+            const messageTextarea = document.getElementById('partial_message_' + paymentId);
+            const verifyBtn = document.getElementById('verify_yes');
+            const submitBtn = document.querySelector('form button[type="submit"]');
+            
+            if (isPartial && verifyBtn.checked) {
+                // Show message field if partial payment and "Verify" is selected
+                messageField.style.display = 'block';
+                messageTextarea.required = true;
+                
+                // Update submit button styling
+                submitBtn.disabled = !messageTextarea.value.trim();
+                messageTextarea.addEventListener('input', function() {
+                    submitBtn.disabled = !this.value.trim();
+                });
+            } else {
+                // Hide message field
+                messageField.style.display = 'none';
+                messageTextarea.required = false;
+                submitBtn.disabled = false;
+            }
+        }
+        
+        // Form submission validation for partial payments
+        document.addEventListener('submit', function(e) {
+            const verifyYes = document.getElementById('verify_yes');
+            if (verifyYes && verifyYes.checked) {
+                // Get payment ID from form (we need to add this)
+                const paymentId = document.querySelector('input[name="payment_id"]').value;
+                const messageField = document.getElementById('partial_message_field_' + paymentId);
+                
+                if (messageField && messageField.style.display !== 'none') {
+                    const messageTextarea = document.getElementById('partial_message_' + paymentId);
+                    if (!messageTextarea.value.trim()) {
+                        e.preventDefault();
+                        alert('⚠️ Please write a message to the tenant about the remaining balance before approving the partial payment.');
+                        messageTextarea.focus();
+                        return false;
+                    }
+                }
+            }
+        });
+    </script>
 </body>
 </html>

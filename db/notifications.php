@@ -513,4 +513,179 @@ function notifyAdminsNewRoomRequest($conn, $roomRequestId, $tenantId, $tenantCou
         return false;
     }
 }
+
+/**
+ * Add maintenance cost to tenant's next monthly bill
+ * Creates bill if it doesn't exist, updates if it does
+ * @param PDO $conn Database connection
+ * @param int $tenantId Tenant ID
+ * @param decimal $cost Maintenance cost in ₱
+ * @return bool Success status
+ */
+function addMaintenanceCostToBill($conn, $tenantId, $cost) {
+    if (!$tenantId || !$cost || $cost <= 0) {
+        return false;
+    }
+
+    try {
+        // Get tenant's room_id
+        $tenantStmt = $conn->prepare("SELECT room_id FROM tenants WHERE id = :tenant_id");
+        $tenantStmt->execute(['tenant_id' => $tenantId]);
+        $tenant = $tenantStmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$tenant || !$tenant['room_id']) {
+            return false;
+        }
+
+        $roomId = $tenant['room_id'];
+
+        // Determine next month (current month of first day)
+        $nextMonth = date('Y-m-01', strtotime('first day of next month'));
+
+        // Check if bill exists for next month
+        $billStmt = $conn->prepare("
+            SELECT id, amount_due FROM bills 
+            WHERE tenant_id = :tenant_id AND billing_month = :billing_month
+        ");
+        $billStmt->execute([
+            'tenant_id' => $tenantId,
+            'billing_month' => $nextMonth
+        ]);
+        $bill = $billStmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($bill) {
+            // Update existing bill by adding cost
+            $updateStmt = $conn->prepare("
+                UPDATE bills 
+                SET amount_due = amount_due + :cost,
+                    updated_at = NOW()
+                WHERE id = :bill_id
+            ");
+            $updateStmt->execute([
+                'cost' => $cost,
+                'bill_id' => $bill['id']
+            ]);
+        } else {
+            // Create new bill for next month with maintenance cost
+            // Get room rate
+            $roomStmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
+            $roomStmt->execute(['room_id' => $roomId]);
+            $room = $roomStmt->fetch(PDO::FETCH_ASSOC);
+            
+            $roomRate = $room['rate'] ?? 0;
+            $totalAmount = $roomRate + $cost;
+
+            $insertStmt = $conn->prepare("
+                INSERT INTO bills 
+                (tenant_id, room_id, billing_month, amount_due, amount_paid, status, created_at, updated_at)
+                VALUES (:tenant_id, :room_id, :billing_month, :amount_due, 0, 'pending', NOW(), NOW())
+            ");
+            $insertStmt->execute([
+                'tenant_id' => $tenantId,
+                'room_id' => $roomId,
+                'billing_month' => $nextMonth,
+                'amount_due' => $totalAmount
+            ]);
+        }
+
+        return true;
+    } catch (Exception $e) {
+        error_log("Error adding maintenance cost to bill: " . $e->getMessage());
+        return false;
+    }
+}
+
+/**
+ * Send message from admin/tenant to another user
+ * @param PDO $conn Database connection
+ * @param string $senderType 'admin' or 'tenant'
+ * @param int $senderId admin_id or tenant_id
+ * @param string $recipientType 'admin' or 'tenant'
+ * @param int $recipientId admin_id or tenant_id
+ * @param string $subject Message subject
+ * @param string $text Message content
+ * @param string|null $relatedType Related record type (bill, payment_transaction, etc)
+ * @param int|null $relatedId Related record ID
+ * @return bool Success status
+ */
+function sendMessage($conn, $senderType, $senderId, $recipientType, $recipientId, $subject, $text, $relatedType = null, $relatedId = null) {
+    try {
+        $stmt = $conn->prepare("
+            INSERT INTO messages 
+            (sender_type, sender_id, recipient_type, recipient_id, subject, message, related_type, related_id, created_at)
+            VALUES (:sender_type, :sender_id, :recipient_type, :recipient_id, :subject, :message, :related_type, :related_id, NOW())
+        ");
+        
+        return $stmt->execute([
+            ':sender_type' => $senderType,
+            ':sender_id' => $senderId,
+            ':recipient_type' => $recipientType,
+            ':recipient_id' => $recipientId,
+            ':subject' => $subject,
+            ':message' => $text,
+            ':related_type' => $relatedType,
+            ':related_id' => $relatedId
+        ]);
+    } catch (Exception $e) {
+        error_log("Error sending message: " . $e->getMessage());
+        return false;
+    }
+}
+
+/**
+ * Notify tenant and admin about partial payment
+ * @param PDO $conn Database connection
+ * @param int $tenantId Tenant ID
+ * @param int $billId Bill ID
+ * @param decimal $amountDue Total amount due
+ * @param decimal $amountPaid Amount paid
+ * @param int $paymentTransactionId Payment transaction ID
+ * @return bool Success status
+ */
+function notifyPartialPayment($conn, $tenantId, $billId, $amountDue, $amountPaid, $paymentTransactionId) {
+    try {
+        $remainingBalance = $amountDue - $amountPaid;
+        
+        // Get bill details for tenant notification
+        $billStmt = $conn->prepare("SELECT billing_month FROM bills WHERE id = :id");
+        $billStmt->execute(['id' => $billId]);
+        $bill = $billStmt->fetch(PDO::FETCH_ASSOC);
+        $billingMonth = $bill ? date('F Y', strtotime($bill['billing_month'])) : 'current month';
+        
+        // Admin notification message
+        $adminNotifyMsg = "Payment received: ₱" . number_format($amountPaid, 2) . " but ₱" . number_format($remainingBalance, 2) . " still due";
+        
+        // Tenant notification message - your partial payment has been approved
+        $tenantNotifyMsg = "Your partial payment has been approved. Kindly settle the remaining balance of ₱" . 
+                          number_format($remainingBalance, 2) . " to complete your monthly bill payment.";
+        
+        // Get tenant name and admin IDs
+        $tenantStmt = $conn->prepare("SELECT name FROM tenants WHERE id = :id");
+        $tenantStmt->execute(['id' => $tenantId]);
+        $tenant = $tenantStmt->fetch(PDO::FETCH_ASSOC);
+        $tenantName = $tenant['name'] ?? 'Tenant #' . $tenantId;
+        
+        $adminStmt = $conn->query("SELECT id FROM admins");
+        $admins = $adminStmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Notify all admins
+        foreach ($admins as $admin) {
+            createNotification($conn, 'admin', $admin['id'], 'partial_payment', 
+                'Partial Payment from ' . $tenantName, 
+                $adminNotifyMsg, 
+                $billId, 'bill', 'admin_payment_verification.php');
+        }
+        
+        // Notify tenant with approval message
+        createNotification($conn, 'tenant', $tenantId, 'partial_payment_approved',
+            'Partial Payment Approved',
+            $tenantNotifyMsg,
+            $billId, 'bill', 'tenant_bills.php');
+        
+        return true;
+    } catch (Exception $e) {
+        error_log("Error notifying partial payment: " . $e->getMessage());
+        return false;
+    }
+}
 ?>

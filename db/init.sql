@@ -173,3 +173,25 @@ CREATE TABLE IF NOT EXISTS `notifications` (
   KEY `created_at` (`created_at`),
   KEY `notification_type` (`notification_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `messages` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `sender_type` varchar(50) NOT NULL COMMENT 'admin or tenant',
+  `sender_id` int(11) NOT NULL COMMENT 'admin_id or tenant_id',
+  `recipient_type` varchar(50) NOT NULL COMMENT 'admin or tenant',
+  `recipient_id` int(11) NOT NULL COMMENT 'admin_id or tenant_id',
+  `subject` varchar(255) NOT NULL,
+  `message` text NOT NULL,
+  `related_type` varchar(100) COMMENT 'bill, payment_transaction, maintenance_request, etc',
+  `related_id` int(11) COMMENT 'Related record ID',
+  `is_read` tinyint(1) DEFAULT 0,
+  `read_at` datetime,
+  `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `sender_type_id` (`sender_type`, `sender_id`),
+  KEY `recipient_type_id` (`recipient_type`, `recipient_id`),
+  KEY `is_read` (`is_read`),
+  KEY `created_at` (`created_at`),
+  KEY `related_type_id` (`related_type`, `related_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

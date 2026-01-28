@@ -214,10 +214,15 @@ $summary = $conn->query($sql_summary)->fetch(PDO::FETCH_ASSOC);
                             <label for="category" class="form-label">Category</label>
                             <select class="form-control" id="category" name="category">
                                 <option value="">All Categories</option>
-                                <?php 
-                                while($cat = $all_categories->fetch(PDO::FETCH_ASSOC)): ?>
-                                    <option value="<?php echo htmlspecialchars($cat['category']); ?>" <?php echo $filter_category === $cat['category'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($cat['category']); ?></option>
-                                <?php endwhile; ?>
+                                <option value="Door/Lock" <?php echo $filter_category === 'Door/Lock' ? 'selected' : ''; ?>>Door/Lock – Broken lock, stuck door ₱150</option>
+                                <option value="Walls/Paint" <?php echo $filter_category === 'Walls/Paint' ? 'selected' : ''; ?>>Walls/Paint – Scratches, peeling paint ₱200</option>
+                                <option value="Furniture" <?php echo $filter_category === 'Furniture' ? 'selected' : ''; ?>>Furniture – Bedframe/furniture repair ₱200</option>
+                                <option value="Cleaning" <?php echo $filter_category === 'Cleaning' ? 'selected' : ''; ?>>Cleaning – Deep cleaning, carpet/fan cleaning ₱100</option>
+                                <option value="Light/Bulb" <?php echo $filter_category === 'Light/Bulb' ? 'selected' : ''; ?>>Light/Bulb – Bulb replacement, fixture issues ₱50</option>
+                                <option value="Leak/Water" <?php echo $filter_category === 'Leak/Water' ? 'selected' : ''; ?>>Leak/Water – Faucet drips, small pipe leak ₱150</option>
+                                <option value="Pest/Bedbugs" <?php echo $filter_category === 'Pest/Bedbugs' ? 'selected' : ''; ?>>Pest/Bedbugs – Cockroaches, ants, bedbugs ₱100</option>
+                                <option value="Appliances" <?php echo $filter_category === 'Appliances' ? 'selected' : ''; ?>>Appliances – Fan, fridge, microwave repair ₱200</option>
+                                <option value="Other" <?php echo $filter_category === 'Other' ? 'selected' : ''; ?>>Other – Describe your issue (Cost determined by admin)</option>
                             </select>
                         </div>
                         <div class="col-md-2">
@@ -254,6 +259,7 @@ $summary = $conn->query($sql_summary)->fetch(PDO::FETCH_ASSOC);
                             <th>Priority</th>
                             <th>Status</th>
                             <th>Assigned To</th>
+                            <th>Cost</th>
                             <th>Submitted</th>
                             <th>Actions</th>
                         </tr>
@@ -289,6 +295,28 @@ $summary = $conn->query($sql_summary)->fetch(PDO::FETCH_ASSOC);
                                     <small><?php echo htmlspecialchars($row['username']); ?></small>
                                 <?php else: ?>
                                     <span class="text-muted"><small>Unassigned</small></span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <?php if (isset($row['cost']) && $row['cost'] !== null && $row['cost'] !== ''): ?>
+                                    <small>₱<?php echo number_format($row['cost'], 2); ?></small>
+                                <?php else:
+                                    $prices = [
+                                        'Door/Lock' => 150,
+                                        'Walls/Paint' => 200,
+                                        'Furniture' => 200,
+                                        'Cleaning' => 100,
+                                        'Light/Bulb' => 50,
+                                        'Leak/Water' => 150,
+                                        'Pest/Bedbugs' => 100,
+                                        'Appliances' => 200,
+                                        'Other' => null
+                                    ];
+                                    if (!empty($row['category']) && array_key_exists($row['category'], $prices) && $prices[$row['category']] !== null): ?>
+                                        <small>₱<?php echo number_format($prices[$row['category']], 2); ?></small>
+                                    <?php else: ?>
+                                        <small class="text-muted">-</small>
+                                    <?php endif; ?>
                                 <?php endif; ?>
                             </td>
                             <td><small><?php echo htmlspecialchars(date('M d, Y', strtotime($row['submitted_date']))); ?></small></td>
@@ -341,19 +369,21 @@ $summary = $conn->query($sql_summary)->fetch(PDO::FETCH_ASSOC);
           </div>
           <div class="row">
             <div class="col-md-6">
-              <div class="mb-3">
-                <label for="category" class="form-label">Category</label>
-                <select class="form-control" id="category" name="category" required>
+                            <div class="mb-3">
+                                <label for="category" class="form-label">Category</label>
+                                <select class="form-control" id="category" name="category" required onchange="updateCategoryCost()">
                     <option value="">Select category</option>
-                    <option value="Plumbing">Plumbing</option>
-                    <option value="Electrical">Electrical</option>
-                    <option value="HVAC">HVAC/Cooling</option>
-                    <option value="Furniture">Furniture</option>
-                    <option value="Cleaning">Cleaning</option>
-                    <option value="Security">Security</option>
-                    <option value="Internet">Internet/WiFi</option>
-                    <option value="Other">Other</option>
+                    <option value="Door/Lock">Door/Lock – Broken lock, stuck door ₱150</option>
+                    <option value="Walls/Paint">Walls/Paint – Scratches, peeling paint ₱200</option>
+                    <option value="Furniture">Furniture – Bedframe/furniture repair ₱200</option>
+                    <option value="Cleaning">Cleaning – Deep cleaning, carpet/fan cleaning ₱100</option>
+                    <option value="Light/Bulb">Light/Bulb – Bulb replacement, fixture issues ₱50</option>
+                    <option value="Leak/Water">Leak/Water – Faucet drips, small pipe leak ₱150</option>
+                    <option value="Pest/Bedbugs">Pest/Bedbugs – Cockroaches, ants, bedbugs ₱100</option>
+                    <option value="Appliances">Appliances – Fan, fridge, microwave repair ₱200</option>
+                    <option value="Other">Other – Describe your issue (Cost determined by admin)</option>
                 </select>
+                                <div class="form-text mt-1">Estimated cost: <span id="category_cost_text">-</span></div>
               </div>
             </div>
             <div class="col-md-6">
@@ -394,6 +424,31 @@ function updateRoom() {
                 roomSelect.innerHTML = '<option value="' + data.id + '">' + data.room_number + '</option>';
                 roomSelect.value = data.id;
             });
+    }
+}
+
+const categoryPrices = {
+    'Door/Lock': 150,
+    'Walls/Paint': 200,
+    'Furniture': 200,
+    'Cleaning': 100,
+    'Light/Bulb': 50,
+    'Leak/Water': 150,
+    'Pest/Bedbugs': 100,
+    'Appliances': 200,
+    'Other': null
+};
+
+function updateCategoryCost() {
+    const sel = document.getElementById('category');
+    const txt = document.getElementById('category_cost_text');
+    const v = sel.value;
+    if (v && categoryPrices[v] != null) {
+        txt.textContent = '₱' + Number(categoryPrices[v]).toFixed(2);
+    } else if (v) {
+        txt.textContent = 'Determined by admin';
+    } else {
+        txt.textContent = '-';
     }
 }
 </script>

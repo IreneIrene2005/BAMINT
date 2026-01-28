@@ -53,6 +53,18 @@ try {
     $stmt->execute(['tenant_id' => $tenant_id]);
     $balance = $stmt->fetch(PDO::FETCH_ASSOC);
 
+    // Get remaining balance (bills with unpaid amount)
+    $stmt = $conn->prepare("
+        SELECT 
+            SUM(amount_due - amount_paid) as remaining_balance
+        FROM bills
+        WHERE tenant_id = :tenant_id 
+        AND (amount_due - amount_paid) > 0
+    ");
+    $stmt->execute(['tenant_id' => $tenant_id]);
+    $remaining = $stmt->fetch(PDO::FETCH_ASSOC);
+    $remaining_balance = $remaining['remaining_balance'] ?? 0;
+
     // Get overdue bills (bills with pending/partial status where billing_month is past current month)
     $stmt = $conn->prepare("
         SELECT * FROM bills
@@ -216,6 +228,11 @@ try {
                             </a>
                         </li>
                         <li class="nav-item">
+                            <a class="nav-link" href="tenant_messages.php">
+                                <i class="bi bi-envelope"></i> Messages
+                            </a>
+                        </li>
+                        <li class="nav-item">
                             <a class="nav-link" href="tenant_add_room.php">
                                 <i class="bi bi-plus-square"></i> Add Room
                             </a>
@@ -368,6 +385,16 @@ try {
                                 <p class="text-muted mb-2"><i class="bi bi-check-circle"></i> Total Paid</p>
                                 <p class="metric-value text-info">₱<?php echo number_format($balance['total_paid'] ?? 0, 2); ?></p>
                                 <small class="text-muted">All time</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-6 col-lg-3">
+                        <div class="card metric-card <?php echo $remaining_balance > 0 ? 'border-danger' : 'border-success'; ?>">
+                            <div class="card-body">
+                                <p class="text-muted mb-2"><i class="bi bi-exclamation-circle"></i> Remaining Balance</p>
+                                <p class="metric-value <?php echo $remaining_balance > 0 ? 'text-danger' : 'text-success'; ?>">₱<?php echo number_format($remaining_balance, 2); ?></p>
+                                <small class="text-muted"><?php echo $remaining_balance > 0 ? 'Amount due' : 'All paid up!'; ?></small>
                             </div>
                         </div>
                     </div>

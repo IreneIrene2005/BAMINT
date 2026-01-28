@@ -9,6 +9,23 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 require_once "db/database.php";
 require_once "db/notifications.php";
 
+// Map maintenance category to default cost (₱)
+function getCategoryCost($category) {
+    $prices = [
+        'Door/Lock' => 150,
+        'Walls/Paint' => 200,
+        'Furniture' => 200,
+        'Cleaning' => 100,
+        'Light/Bulb' => 50,
+        'Leak/Water' => 150,
+        'Pest/Bedbugs' => 100,
+        'Appliances' => 200,
+        'Other' => null
+    ];
+
+    return array_key_exists($category, $prices) ? $prices[$category] : null;
+}
+
 $action = $_GET['action'] ?? '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -23,15 +40,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $description = $_POST['description'];
         
         try {
-            $sql = "INSERT INTO maintenance_requests (tenant_id, room_id, category, priority, description, status) 
-                   VALUES (:tenant_id, :room_id, :category, :priority, :description, 'pending')";
+            // determine cost from category (admin can change later in edit)
+            $cost = getCategoryCost($category);
+
+                 $sql = "INSERT INTO maintenance_requests (tenant_id, room_id, category, priority, description, status, cost) VALUES (:tenant_id, :room_id, :category, :priority, :description, 'pending', :cost)";
             $stmt = $conn->prepare($sql);
             $stmt->execute([
                 'tenant_id' => $tenant_id,
                 'room_id' => $room_id,
                 'category' => $category,
                 'priority' => $priority,
-                'description' => $description
+                'description' => $description,
+                'cost' => $cost
             ]);
             
             $maintenanceId = $conn->lastInsertId();
@@ -58,6 +78,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $completion_date = $_POST['completion_date'] ?? null;
         $cost = $_POST['cost'] ?? null;
         $notes = $_POST['notes'] ?? '';
+
+        // If no explicit cost provided, derive from category
+        if ($cost === null || $cost === '') {
+            $cost = getCategoryCost($category);
+        }
         
         try {
             // Get tenant ID for notification
@@ -92,6 +117,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
             
             $conn->commit();
+            
+            // If status changed to completed and cost exists, add to tenant's next bill
+            if ($status === 'completed' && $cost && $maintenance) {
+                addMaintenanceCostToBill($conn, $maintenance['tenant_id'], $cost);
+            }
             
             // Notify tenant about maintenance status change
             if ($maintenance) {
@@ -347,7 +377,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     
                                     <div class="mb-3">
                                         <label for="category" class="form-label">Category</label>
-                                        <input type="text" class="form-control" id="category" name="category" value="<?php echo htmlspecialchars($request['category']); ?>" required>
+                                        <select class="form-control" id="category" name="category" required>
+                                            <option value="">Select category</option>
+                                            <option value="Door/Lock" <?php echo $request['category'] === 'Door/Lock' ? 'selected' : ''; ?>>Door/Lock – Broken lock, stuck door ₱150</option>
+                                            <option value="Walls/Paint" <?php echo $request['category'] === 'Walls/Paint' ? 'selected' : ''; ?>>Walls/Paint – Scratches, peeling paint ₱200</option>
+                                            <option value="Furniture" <?php echo $request['category'] === 'Furniture' ? 'selected' : ''; ?>>Furniture – Bedframe/furniture repair ₱200</option>
+                                            <option value="Cleaning" <?php echo $request['category'] === 'Cleaning' ? 'selected' : ''; ?>>Cleaning – Deep cleaning, carpet/fan cleaning ₱100</option>
+                                            <option value="Light/Bulb" <?php echo $request['category'] === 'Light/Bulb' ? 'selected' : ''; ?>>Light/Bulb – Bulb replacement, fixture issues ₱50</option>
+                                            <option value="Leak/Water" <?php echo $request['category'] === 'Leak/Water' ? 'selected' : ''; ?>>Leak/Water – Faucet drips, small pipe leak ₱150</option>
+                                            <option value="Pest/Bedbugs" <?php echo $request['category'] === 'Pest/Bedbugs' ? 'selected' : ''; ?>>Pest/Bedbugs – Cockroaches, ants, bedbugs ₱100</option>
+                                            <option value="Appliances" <?php echo $request['category'] === 'Appliances' ? 'selected' : ''; ?>>Appliances – Fan, fridge, microwave repair ₱200</option>
+                                            <option value="Other" <?php echo $request['category'] === 'Other' ? 'selected' : ''; ?>>Other – Describe your issue (Cost determined by admin)</option>
+                                        </select>
                                     </div>
                                     
                                     <div class="mb-3">

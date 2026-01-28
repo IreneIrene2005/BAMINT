@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $admin_id = $_SESSION["admin_id"] ?? 0;
 $message = '';
@@ -58,6 +59,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 // Mark as completed
                 $completion_notes = isset($_POST['completion_notes']) ? trim($_POST['completion_notes']) : '';
                 
+                // Get maintenance request details (tenant_id, cost)
+                $getReqStmt = $conn->prepare("SELECT tenant_id, cost FROM maintenance_requests WHERE id = :id");
+                $getReqStmt->execute(['id' => $request_id]);
+                $maint_req = $getReqStmt->fetch(PDO::FETCH_ASSOC);
+                
                 $stmt = $conn->prepare("
                     UPDATE maintenance_requests 
                     SET status = 'completed', 
@@ -69,7 +75,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     'id' => $request_id,
                     'notes' => $completion_notes
                 ]);
-                $message = "✓ Request marked as completed!";
+                
+                // Add cost to tenant's next monthly bill
+                if ($maint_req && $maint_req['cost'] && $maint_req['cost'] > 0) {
+                    addMaintenanceCostToBill($conn, $maint_req['tenant_id'], $maint_req['cost']);
+                }
+                
+                $message = "✓ Request marked as completed! Cost added to next month's bill.";
                 $message_type = "success";
 
             } elseif ($action === 'update_notes') {
@@ -135,6 +147,7 @@ try {
             mr.start_date,
             mr.completion_date,
             mr.notes,
+            mr.cost,
             t.name as tenant_name,
             t.email as tenant_email,
             r.room_number,
@@ -350,6 +363,38 @@ try {
                                 <p class="text-muted small mb-2">
                                     <i class="bi bi-calendar"></i> 
                                     Submitted: <?php echo date('M d, Y H:i', strtotime($request['submitted_date'])); ?>
+                                </p>
+
+                                <p class="text-muted small mb-2">
+                                    <i class="bi bi-cash"></i>
+                                    <?php
+                                        // determine display cost: use stored cost if present, otherwise map category
+                                        $display_cost = null;
+                                        if (isset($request['cost']) && $request['cost'] !== null && $request['cost'] !== '') {
+                                            $display_cost = $request['cost'];
+                                        } else {
+                                            $price_map = [
+                                                'Door/Lock' => 150,
+                                                'Walls/Paint' => 200,
+                                                'Furniture' => 200,
+                                                'Cleaning' => 100,
+                                                'Light/Bulb' => 50,
+                                                'Leak/Water' => 150,
+                                                'Pest/Bedbugs' => 100,
+                                                'Appliances' => 200,
+                                                'Other' => null
+                                            ];
+                                            if (!empty($request['category']) && array_key_exists($request['category'], $price_map)) {
+                                                $display_cost = $price_map[$request['category']];
+                                            }
+                                        }
+
+                                        if ($display_cost !== null) {
+                                            echo 'Estimated: ₱' . number_format($display_cost, 2);
+                                        } else {
+                                            echo 'Cost: Determined by admin';
+                                        }
+                                    ?>
                                 </p>
 
                                 <?php if ($request['notes']): ?>

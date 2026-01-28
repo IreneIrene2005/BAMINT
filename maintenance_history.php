@@ -185,10 +185,15 @@ $stats = $stats_stmt->fetch(PDO::FETCH_ASSOC);
                             <label for="category" class="form-label">Category</label>
                             <select class="form-control" id="category" name="category">
                                 <option value="">All Categories</option>
-                                <?php 
-                                while($cat = $all_categories->fetch(PDO::FETCH_ASSOC)): ?>
-                                    <option value="<?php echo htmlspecialchars($cat['category']); ?>" <?php echo $filter_category === $cat['category'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($cat['category']); ?></option>
-                                <?php endwhile; ?>
+                                <option value="Door/Lock" <?php echo $filter_category === 'Door/Lock' ? 'selected' : ''; ?>>Door/Lock – Broken lock, stuck door ₱150</option>
+                                <option value="Walls/Paint" <?php echo $filter_category === 'Walls/Paint' ? 'selected' : ''; ?>>Walls/Paint – Scratches, peeling paint ₱200</option>
+                                <option value="Furniture" <?php echo $filter_category === 'Furniture' ? 'selected' : ''; ?>>Furniture – Bedframe/furniture repair ₱200</option>
+                                <option value="Cleaning" <?php echo $filter_category === 'Cleaning' ? 'selected' : ''; ?>>Cleaning – Deep cleaning, carpet/fan cleaning ₱100</option>
+                                <option value="Light/Bulb" <?php echo $filter_category === 'Light/Bulb' ? 'selected' : ''; ?>>Light/Bulb – Bulb replacement, fixture issues ₱50</option>
+                                <option value="Leak/Water" <?php echo $filter_category === 'Leak/Water' ? 'selected' : ''; ?>>Leak/Water – Faucet drips, small pipe leak ₱150</option>
+                                <option value="Pest/Bedbugs" <?php echo $filter_category === 'Pest/Bedbugs' ? 'selected' : ''; ?>>Pest/Bedbugs – Cockroaches, ants, bedbugs ₱100</option>
+                                <option value="Appliances" <?php echo $filter_category === 'Appliances' ? 'selected' : ''; ?>>Appliances – Fan, fridge, microwave repair ₱200</option>
+                                <option value="Other" <?php echo $filter_category === 'Other' ? 'selected' : ''; ?>>Other – Describe your issue (Cost determined by admin)</option>
                             </select>
                         </div>
                         <div class="col-md-2">

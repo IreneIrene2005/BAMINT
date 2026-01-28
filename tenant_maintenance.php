@@ -24,19 +24,29 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_request'])) {
             $stmt->execute(['tenant_id' => $tenant_id]);
             $room = $stmt->fetch(PDO::FETCH_ASSOC);
             $room_id = $room['room_id'] ?? 0;
+            // determine cost server-side for accuracy
+            $category_prices = [
+                'Door/Lock' => 150,
+                'Walls/Paint' => 200,
+                'Furniture' => 200,
+                'Cleaning' => 100,
+                'Light/Bulb' => 50,
+                'Leak/Water' => 150,
+                'Pest/Bedbugs' => 100,
+                'Appliances' => 200,
+                'Other' => null
+            ];
+            $cost = array_key_exists($category, $category_prices) ? $category_prices[$category] : null;
 
-            $stmt = $conn->prepare("
-                INSERT INTO maintenance_requests 
-                (tenant_id, room_id, category, description, priority, status)
-                VALUES (:tenant_id, :room_id, :category, :description, :priority, 'pending')
-            ");
-            
+            $stmt = $conn->prepare("INSERT INTO maintenance_requests (tenant_id, room_id, category, description, priority, status, cost) VALUES (:tenant_id, :room_id, :category, :description, :priority, 'pending', :cost)");
+
             $stmt->execute([
                 'tenant_id' => $tenant_id,
                 'room_id' => $room_id,
                 'category' => $category,
                 'description' => $description,
-                'priority' => $priority
+                'priority' => $priority,
+                'cost' => $cost
             ]);
 
             $success_msg = "Maintenance request submitted successfully!";
@@ -262,17 +272,25 @@ try {
                             <div class="row g-3">
                                 <div class="col-md-6">
                                     <label for="category" class="form-label">Category</label>
-                                    <select class="form-select" id="category" name="category" required>
+                                    <select class="form-select" id="category" name="category" required onchange="updateCostDisplay()">
                                         <option value="">Select category...</option>
-                                        <option value="Plumbing">Plumbing</option>
-                                        <option value="Electrical">Electrical</option>
-                                        <option value="HVAC">HVAC/Cooling</option>
-                                        <option value="Door/Lock">Door/Lock</option>
-                                        <option value="Walls/Paint">Walls/Paint</option>
-                                        <option value="Furniture">Furniture</option>
-                                        <option value="Cleaning">Cleaning</option>
-                                        <option value="Other">Other</option>
+                                        <option value="Door/Lock">Door/Lock – Broken lock, stuck door ₱150</option>
+                                        <option value="Walls/Paint">Walls/Paint – Scratches, peeling paint ₱200</option>
+                                        <option value="Furniture">Furniture – Bedframe/furniture repair ₱200</option>
+                                        <option value="Cleaning">Cleaning – Deep cleaning, carpet/fan cleaning ₱100</option>
+                                        <option value="Light/Bulb">Light/Bulb – Bulb replacement, fixture issues ₱50</option>
+                                        <option value="Leak/Water">Leak/Water – Faucet drips, small pipe leak ₱150</option>
+                                        <option value="Pest/Bedbugs">Pest/Bedbugs – Cockroaches, ants, bedbugs ₱100</option>
+                                        <option value="Appliances">Appliances – Fan, fridge, microwave repair ₱200</option>
+                                        <option value="Other">Other – Describe your issue (Cost determined by admin)</option>
                                     </select>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label class="form-label">Estimated Cost</label>
+                                    <div>
+                                        <input type="text" id="category_cost_display" class="form-control" readonly placeholder="Will show price when category selected">
+                                    </div>
                                 </div>
 
                                 <div class="col-md-6">
@@ -360,11 +378,37 @@ try {
                                             </div>
                                         <?php endif; ?>
 
-                                        <?php if ($request['cost'] > 0): ?>
+                                        <?php
+                                            $display_cost = null;
+                                            if (isset($request['cost']) && $request['cost'] !== null && $request['cost'] !== '') {
+                                                $display_cost = $request['cost'];
+                                            } else {
+                                                $category_prices = [
+                                                    'Door/Lock' => 150,
+                                                    'Walls/Paint' => 200,
+                                                    'Furniture' => 200,
+                                                    'Cleaning' => 100,
+                                                    'Light/Bulb' => 50,
+                                                    'Leak/Water' => 150,
+                                                    'Pest/Bedbugs' => 100,
+                                                    'Appliances' => 200,
+                                                    'Other' => null
+                                                ];
+                                                if (!empty($request['category']) && array_key_exists($request['category'], $category_prices)) {
+                                                    $display_cost = $category_prices[$request['category']];
+                                                }
+                                            }
+
+                                            if ($display_cost !== null) {
+                                        ?>
                                             <div class="mt-2">
-                                                <small class="text-muted"><strong>Cost:</strong> ₱<?php echo number_format($request['cost'], 2); ?></small>
+                                                <small class="text-muted"><strong>Cost:</strong> ₱<?php echo number_format($display_cost, 2); ?></small>
                                             </div>
-                                        <?php endif; ?>
+                                        <?php } else { ?>
+                                            <div class="mt-2">
+                                                <small class="text-muted"><strong>Cost:</strong> Determined by admin</small>
+                                            </div>
+                                        <?php } ?>
                                     </div>
                                 </div>
                             </div>
@@ -382,5 +426,31 @@ try {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const categoryPrices = {
+            'Door/Lock': 150,
+            'Walls/Paint': 200,
+            'Furniture': 200,
+            'Cleaning': 100,
+            'Light/Bulb': 50,
+            'Leak/Water': 150,
+            'Pest/Bedbugs': 100,
+            'Appliances': 200,
+            'Other': null
+        };
+
+        function updateCostDisplay() {
+            const sel = document.getElementById('category');
+            const val = sel.value;
+            const out = document.getElementById('category_cost_display');
+            if (val && categoryPrices[val] != null) {
+                out.value = '₱' + Number(categoryPrices[val]).toFixed(2);
+            } else if (val) {
+                out.value = 'Determined by admin';
+            } else {
+                out.value = '';
+            }
+        }
+    </script>
 </body>
 </html>
