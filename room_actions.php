@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $action = $_GET['action'] ?? '';
 
@@ -21,6 +22,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sql = "INSERT INTO rooms (room_number, room_type, description, rate) VALUES (:room_number, :room_type, :description, :rate)";
         $stmt = $conn->prepare($sql);
         $stmt->execute(['room_number' => $room_number, 'room_type' => $room_type, 'description' => $description, 'rate' => $rate]);
+        
+        $roomId = $conn->lastInsertId();
+        
+        // Send notifications to all admins about new room
+        notifyAdminsNewRoom($conn, $roomId, $room_number);
 
         header("location: rooms.php");
         exit;

@@ -73,12 +73,13 @@ $transactions = $stmt;
 $sql_tenants = "SELECT id, name FROM tenants WHERE status = 'active' ORDER BY name ASC";
 $all_tenants = $conn->query($sql_tenants);
 
-// Get payment summary statistics
+// Get payment summary statistics (exclude zero-amount tracking records)
 $sql_summary = "SELECT 
     COUNT(*) as total_payments,
     SUM(payment_amount) as total_amount,
     AVG(payment_amount) as avg_amount
-    FROM payment_transactions";
+    FROM payment_transactions
+    WHERE payment_amount > 0";
 $summary = $conn->query($sql_summary)->fetch(PDO::FETCH_ASSOC);
 ?>
 

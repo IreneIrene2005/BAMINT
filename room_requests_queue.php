@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $message = '';
 $message_type = '';
@@ -113,6 +114,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
                     $conn->commit();
                     
+                    // Notify tenant about room request approval
+                    notifyTenantRoomRequestStatus($conn, $request['tenant_id'], $request_id, 'approved');
+                    
                     $message = "Room request approved! Advance payment bill created for " . htmlspecialchars($request['room_number']) . 
                                ". Tenant must complete payment (₱" . number_format($advance_amount, 2) . 
                                ") before move-in.";
@@ -144,13 +148,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 // Update request status to rejected
                 $stmt = $conn->prepare("
                     UPDATE room_requests 
-                    SET status = :status 
+                    SET status = 'rejected' 
                     WHERE id = :id
                 ");
-                $stmt->execute([
-                    'status' => $new_status,
-                    'id' => $request_id
-                ]);
+                $stmt->execute(['id' => $request_id]);
+                
+                // Notify tenant about room request rejection
+                if ($request_info) {
+                    notifyTenantRoomRequestStatus($conn, $request_info['tenant_id'], $request_id, 'rejected');
+                }
 
                 $message = "Room request rejected successfully! Co-tenant records have been removed.";
                 $message_type = "success";

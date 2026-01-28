@@ -210,6 +210,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
     </style>
 </head>
 <body>
+    <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
             <!-- Sidebar -->

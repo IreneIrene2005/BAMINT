@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $action = $_GET['action'] ?? '';
 
@@ -33,6 +34,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'description' => $description
             ]);
             
+            $maintenanceId = $conn->lastInsertId();
+            
+            // Notify all admins about new maintenance request
+            notifyAdminsNewMaintenance($conn, $maintenanceId, $tenant_id, $category);
+            
             $_SESSION['message'] = "Maintenance request submitted successfully!";
         } catch (Exception $e) {
             $_SESSION['error'] = "Error submitting request: " . $e->getMessage();
@@ -54,6 +60,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $notes = $_POST['notes'] ?? '';
         
         try {
+            // Get tenant ID for notification
+            $getMaintenanceStmt = $conn->prepare("SELECT tenant_id FROM maintenance_requests WHERE id = :id");
+            $getMaintenanceStmt->execute(['id' => $id]);
+            $maintenance = $getMaintenanceStmt->fetch(PDO::FETCH_ASSOC);
+            
             $conn->beginTransaction();
             
             $sql = "UPDATE maintenance_requests SET 
@@ -81,6 +92,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
             
             $conn->commit();
+            
+            // Notify tenant about maintenance status change
+            if ($maintenance) {
+                notifyTenantMaintenanceStatus($conn, $maintenance['tenant_id'], $id, $status);
+            }
+            
             $_SESSION['message'] = "Request updated successfully!";
         } catch (Exception $e) {
             $conn->rollBack();

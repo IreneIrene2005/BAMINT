@@ -74,21 +74,30 @@ try {
     $stmt->execute(['tenant_id' => $tenant_id]);
     $overdue_info = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    // Get approved advance payment notification
+    // Get approved advance payment notification (only if not dismissed)
     $advance_payment = null;
     $stmt = $conn->prepare("
-        SELECT b.id, b.amount_due, pt.verified_by, pt.verification_date, r.room_number
-        FROM bills b
-        LEFT JOIN payment_transactions pt ON b.id = pt.bill_id AND pt.payment_status = 'verified'
-        LEFT JOIN rooms r ON b.room_id = r.id
-        WHERE b.tenant_id = :tenant_id 
-        AND b.notes LIKE '%ADVANCE PAYMENT%'
-        AND b.status = 'paid'
-        ORDER BY b.created_at DESC
-        LIMIT 1
+        SELECT advance_payment_dismissed FROM tenants WHERE id = :tenant_id
     ");
     $stmt->execute(['tenant_id' => $tenant_id]);
-    $advance_payment = $stmt->fetch(PDO::FETCH_ASSOC);
+    $tenant_flags = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    // Only fetch advance payment if not dismissed
+    if (!$tenant_flags || !$tenant_flags['advance_payment_dismissed']) {
+        $stmt = $conn->prepare("
+            SELECT b.id, b.amount_due, pt.verified_by, pt.verification_date, r.room_number
+            FROM bills b
+            LEFT JOIN payment_transactions pt ON b.id = pt.bill_id AND pt.payment_status = 'verified'
+            LEFT JOIN rooms r ON b.room_id = r.id
+            WHERE b.tenant_id = :tenant_id 
+            AND b.notes LIKE '%ADVANCE PAYMENT%'
+            AND b.status = 'paid'
+            ORDER BY b.created_at DESC
+            LIMIT 1
+        ");
+        $stmt->execute(['tenant_id' => $tenant_id]);
+        $advance_payment = $stmt->fetch(PDO::FETCH_ASSOC);
+    }
 
 } catch (Exception $e) {
     $error = "Error loading tenant data: " . $e->getMessage();
@@ -172,6 +181,7 @@ try {
     </style>
 </head>
 <body>
+    <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
             <!-- Sidebar -->
@@ -275,7 +285,7 @@ try {
                                 </div>
                             </div>
                         </div>
-                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close" onclick="dismissAdvancePaymentNotification()"></button>
                     </div>
                 <?php endif; ?>
 
@@ -459,5 +469,24 @@ try {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        /**
+         * Dismiss advance payment notification permanently
+         * Calls API to mark the notification as dismissed in the database
+         */
+        function dismissAdvancePaymentNotification() {
+            fetch('api_dismiss_notification.php?action=dismiss_advance_payment')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Notification dismissed successfully in database
+                        console.log('Advance payment notification dismissed permanently');
+                    } else {
+                        console.error('Error dismissing notification:', data.error);
+                    }
+                })
+                .catch(error => console.error('Error:', error));
+        }
+    </script>
 </body>
 </html>

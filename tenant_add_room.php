@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $tenant_id = $_SESSION["tenant_id"];
 $message = '';
@@ -110,6 +111,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                             'tenant_info_address' => $tenant_info_address,
                             'notes' => $notes
                         ]);
+                        
+                        $roomRequestId = $conn->lastInsertId();
 
                         // Save co-tenants if this is a shared/bedspace room with multiple occupants
                         if ($tenant_count > 1) {
@@ -137,6 +140,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         }
 
                         $conn->commit();
+                        
+                        // Notify all admins about the new room request
+                        notifyAdminsNewRoomRequest($conn, $roomRequestId, $tenant_id, $tenant_count);
+                        
                         $message = "Room request submitted successfully! The admin will review your request soon.";
                         $message_type = "success";
                     } catch (Exception $e) {
@@ -342,6 +349,7 @@ try {
     </style>
 </head>
 <body>
+    <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
             <!-- Sidebar -->

@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $action = $_GET['action'] ?? '';
 
@@ -53,6 +54,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'amount_due' => $tenant['rate'],
                         'due_date' => $due_date
                     ]);
+                    
+                    // Get the bill ID for the notification
+                    $bill_id = $conn->lastInsertId();
+                    
+                    // Format the billing month for display
+                    $month_display = date('F Y', strtotime($billing_month));
+                    
+                    // Notify tenant of new bill
+                    createNotification(
+                        $conn,
+                        'tenant',
+                        $tenant['id'],
+                        'new_bill',
+                        'New Bill Generated',
+                        "A new bill for {$month_display} has been created. Amount due: ₱" . number_format($tenant['rate'], 2),
+                        $bill_id,
+                        'bill',
+                        'bills.php'
+                    );
+                    
                     $count++;
                 }
             }
@@ -92,6 +113,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'amount_due' => $amount_due,
                     'due_date' => $due_date
                 ]);
+                
+                // Get the bill ID for the notification
+                $bill_id = $conn->lastInsertId();
+                
+                // Format the billing month for display
+                $month_display = date('F Y', strtotime($billing_month));
+                
+                // Notify tenant of new bill
+                createNotification(
+                    $conn,
+                    'tenant',
+                    $tenant_id,
+                    'new_bill',
+                    'New Bill Generated',
+                    "A new bill for {$month_display} has been created. Amount due: ₱" . number_format($amount_due, 2),
+                    $bill_id,
+                    'bill',
+                    'bills.php'
+                );
                 
                 $_SESSION['message'] = "Bill added successfully!";
             }
@@ -160,6 +200,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'notes' => $notes,
                     'recorded_by' => $_SESSION['id']
                 ]);
+                
+                $paymentId = $conn->lastInsertId();
+                
+                // Notify all admins about the new payment
+                notifyAdminsNewPayment($conn, $id, $bill['tenant_id'], $new_payment);
             }
             
             $conn->commit();

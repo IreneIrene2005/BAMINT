@@ -10,15 +10,18 @@ require_once "db/database.php";
 
 $tenant_id = $_SESSION["tenant_id"];
 $filter_status = isset($_GET['status']) && !empty($_GET['status']) ? $_GET['status'] : '';
+$view = isset($_GET['view']) ? $_GET['view'] : 'active'; // 'active' or 'archive'
 $error = '';
 $bills = [];
+$archive_bills = [];
 $balance = 0;
 $unpaid_count = 0;
 $next_due = null;
 
 try {
-    // Get bills with filtering
+    // Get ACTIVE bills (exclude paid bills older than 6 months)
     $sql = "SELECT * FROM bills WHERE tenant_id = :tenant_id";
+    $sql .= " AND NOT (status = 'paid' AND DATE_ADD(updated_at, INTERVAL 6 MONTH) < NOW())";
     $params = ['tenant_id' => $tenant_id];
     
     if ($filter_status) {
@@ -31,6 +34,14 @@ try {
     $stmt = $conn->prepare($sql);
     $stmt->execute($params);
     $bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // Get ARCHIVED bills (paid bills older than 6 months)
+    $archive_sql = "SELECT * FROM bills WHERE tenant_id = :tenant_id AND status = 'paid' AND DATE_ADD(updated_at, INTERVAL 6 MONTH) < NOW()";
+    $archive_sql .= " ORDER BY billing_month DESC";
+    
+    $archive_stmt = $conn->prepare($archive_sql);
+    $archive_stmt->execute(['tenant_id' => $tenant_id]);
+    $archive_bills = $archive_stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // Get total balance
     $stmt = $conn->prepare("SELECT SUM(amount_due - amount_paid) as balance FROM bills WHERE tenant_id = :tenant_id");
@@ -149,6 +160,7 @@ try {
     </style>
 </head>
 <body>
+    <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
             <!-- Sidebar -->
@@ -257,6 +269,27 @@ try {
                     </div>
                 </div>
 
+                <!-- Archive Tab Navigation -->
+                <div class="mb-4">
+                    <ul class="nav nav-pills" style="gap: 5px;">
+                        <li class="nav-item">
+                            <button type="button" class="nav-link <?php echo $view === 'active' ? 'active' : ''; ?> btn btn-outline-primary" 
+                                    onclick="switchView('active')">
+                                <i class="bi bi-clock-history"></i> Active Bills
+                            </button>
+                        </li>
+                        <li class="nav-item">
+                            <button type="button" class="nav-link <?php echo $view === 'archive' ? 'active' : ''; ?> btn btn-outline-secondary" 
+                                    onclick="switchView('archive')">
+                                <i class="bi bi-archive"></i> Archive 
+                                <?php if (count($archive_bills) > 0): ?>
+                                    <span class="badge bg-secondary ms-2"><?php echo count($archive_bills); ?></span>
+                                <?php endif; ?>
+                            </button>
+                        </li>
+                    </ul>
+                </div>
+
                 <!-- Filter Section -->
                 <div class="card mb-4">
                     <div class="card-body">
@@ -324,12 +357,14 @@ try {
                 </div>
                 <?php endif; ?>
 
-                <!-- Bills List -->
-                <div class="row g-4">
-                    <?php if (!empty($bills)): ?>
-                        <?php foreach ($bills as $bill): ?>
-                            <div class="col-md-6">
-                                <div class="card bill-card">
+                <!-- Active Bills View -->
+                <div id="activeView" style="display: <?php echo $view === 'active' ? 'block' : 'none'; ?>;">
+                    <!-- Bills List -->
+                    <div class="row g-4">
+                        <?php if (!empty($bills)): ?>
+                            <?php foreach ($bills as $bill): ?>
+                                <div class="col-md-6">
+                                    <div class="card bill-card">
                                     <div class="card-body">
                                         <div class="d-flex justify-content-between align-items-start mb-3">
                                             <div>
@@ -393,15 +428,109 @@ try {
                     <?php else: ?>
                         <div class="col-12">
                             <div class="alert alert-info">
-                                <i class="bi bi-info-circle"></i> No bills found.
+                                <i class="bi bi-info-circle"></i> No active bills found.
                             </div>
                         </div>
                     <?php endif; ?>
-                </div>
+                    </div>
+                </div><!-- End activeView -->
+
+                <!-- Archive Bills View -->
+                <div id="archiveView" style="display: <?php echo $view === 'archive' ? 'block' : 'none'; ?>;">
+                    <!-- Archived Bills List -->
+                    <div class="row g-4">
+                        <?php if (!empty($archive_bills)): ?>
+                            <?php foreach ($archive_bills as $bill): ?>
+                                <div class="col-md-6">
+                                    <div class="card bill-card">
+                                        <div class="card-body">
+                                            <div class="d-flex justify-content-between align-items-start mb-3">
+                                                <div>
+                                                    <span class="badge bg-success"><i class="bi bi-check-circle"></i> Archived</span>
+                                                    <h6 class="card-title mt-2">Billing Month: <strong><?php echo date('F Y', strtotime($bill['billing_month'])); ?></strong></h6>
+                                                </div>
+                                            </div>
+
+                                            <hr>
+
+                                            <div class="row mb-3">
+                                                <div class="col-6">
+                                                    <small class="text-muted d-block">Amount Due</small>
+                                                    <strong class="text-dark">₱<?php echo number_format($bill['amount_due'], 2); ?></strong>
+                                                </div>
+                                                <div class="col-6">
+                                                    <small class="text-muted d-block">Amount Paid</small>
+                                                    <strong class="text-success">₱<?php echo number_format($bill['amount_paid'], 2); ?></strong>
+                                                </div>
+                                            </div>
+
+                                            <?php if ($bill['discount'] > 0): ?>
+                                                <div class="row mb-3">
+                                                    <div class="col-12">
+                                                        <small class="text-muted d-block">Discount Applied</small>
+                                                        <strong class="text-info">₱<?php echo number_format($bill['discount'], 2); ?></strong>
+                                                    </div>
+                                                </div>
+                                            <?php endif; ?>
+
+                                            <div class="progress mb-3" style="height: 8px;">
+                                                <div class="progress-bar bg-success" 
+                                                     style="width: 100%"></div>
+                                            </div>
+
+                                            <small class="text-success">
+                                                <i class="bi bi-check-circle"></i> Paid on <?php echo date('M d, Y', strtotime($bill['paid_date'])); ?>
+                                            </small>
+
+                                            <?php if (!empty($bill['notes'])): ?>
+                                                <div class="mt-3 p-2 bg-light rounded">
+                                                    <small class="text-muted">Notes: <?php echo htmlspecialchars($bill['notes']); ?></small>
+                                                </div>
+                                            <?php endif; ?>
+                                        </div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <div class="col-12">
+                                <div class="alert alert-info">
+                                    <i class="bi bi-info-circle"></i> No archived bills found.
+                                </div>
+                            </div>
+                        <?php endif; ?>
+                        </div>
+                    </div><!-- End archiveView -->
             </main>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        function switchView(view) {
+            // Update URL to reflect current view
+            const url = new URL(window.location);
+            url.searchParams.set('view', view);
+            window.history.pushState({}, '', url);
+            
+            // Toggle view display
+            const activeView = document.getElementById('activeView');
+            const archiveView = document.getElementById('archiveView');
+            
+            if (view === 'active') {
+                activeView.style.display = 'block';
+                archiveView.style.display = 'none';
+                // Update active button styling
+                document.querySelectorAll('.nav-link').forEach(btn => btn.classList.remove('active'));
+                event.target.closest('.nav-link').classList.add('active');
+            } else if (view === 'archive') {
+                activeView.style.display = 'none';
+                archiveView.style.display = 'block';
+                // Update active button styling
+                document.querySelectorAll('.nav-link').forEach(btn => btn.classList.remove('active'));
+                event.target.closest('.nav-link').classList.add('active');
+            }
+        }
+    </script>
 </body>
 </html>

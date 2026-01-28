@@ -152,3 +152,24 @@ CREATE TABLE IF NOT EXISTS `co_tenants` (
   CONSTRAINT `co_tenants_ibfk_1` FOREIGN KEY (`primary_tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE,
   CONSTRAINT `co_tenants_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `notifications` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `recipient_type` varchar(50) NOT NULL COMMENT 'admin or tenant',
+  `recipient_id` int(11) NOT NULL COMMENT 'admin_id or tenant_id',
+  `notification_type` varchar(100) NOT NULL COMMENT 'room_added, payment_made, maintenance_approved, room_request_approved, payment_verified',
+  `title` varchar(255) NOT NULL,
+  `message` text,
+  `related_id` int(11) COMMENT 'room_id, bill_id, maintenance_request_id, room_request_id, payment_transaction_id',
+  `related_type` varchar(100) COMMENT 'room, bill, maintenance_request, room_request, payment_transaction',
+  `action_url` varchar(500) COMMENT 'URL to navigate when notification is clicked',
+  `is_read` tinyint(1) DEFAULT 0,
+  `read_at` datetime,
+  `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `recipient_type_id` (`recipient_type`, `recipient_id`),
+  KEY `is_read` (`is_read`),
+  KEY `created_at` (`created_at`),
+  KEY `notification_type` (`notification_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

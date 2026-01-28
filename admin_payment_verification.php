@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $admin_id = $_SESSION["admin_id"];
 $message = '';
@@ -81,6 +82,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                             $occupy_room->execute(['room_id' => $tenant_info['room_id']]);
                         }
                     }
+                    
+                    // Notify tenant about payment verification
+                    notifyTenantPaymentVerification($conn, $payment_info['tenant_id'], $payment_id, 'approved');
                 }
 
                 $message = "✓ Payment verified and recorded successfully!";
@@ -92,6 +96,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     WHERE id = :id AND payment_status = 'pending'
                 ");
                 $stmt->execute(['id' => $payment_id, 'admin_id' => $admin_id]);
+                
+                // Get tenant ID for notification
+                $payment_stmt = $conn->prepare("SELECT tenant_id FROM payment_transactions WHERE id = :id");
+                $payment_stmt->execute(['id' => $payment_id]);
+                $payment_info = $payment_stmt->fetch(PDO::FETCH_ASSOC);
+                
+                if ($payment_info) {
+                    notifyTenantPaymentVerification($conn, $payment_info['tenant_id'], $payment_id, 'rejected');
+                }
+                
                 $message = "✓ Payment rejected. Tenant will be notified.";
             }
             
