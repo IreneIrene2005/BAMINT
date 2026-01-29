@@ -12,15 +12,17 @@ $filter_status = $_GET['status'] ?? 'all';
 $search_query = $_GET['search'] ?? '';
 $success_msg = "";
 $error_msg = "";
+$stats = [];
+$tenants = [];
 
 try {
     // Build query based on filters
     $query = "
-        SELECT t.id, t.name, t.phone, t.id_number, t.status, t.start_date, t.end_date,
+        SELECT t.id, t.name, t.phone, t.id_number, t.status, t.start_date, t.end_date, t.room_id,
                r.room_number, r.room_type, r.rate,
                ta.email,
                COUNT(pt.id) as total_payments,
-               SUM(CASE WHEN pt.date >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN pt.amount ELSE 0 END) as payments_last_30_days
+               SUM(CASE WHEN pt.payment_date >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN pt.payment_amount ELSE 0 END) as payments_last_30_days
         FROM tenants t
         LEFT JOIN tenant_accounts ta ON t.id = ta.tenant_id
         LEFT JOIN rooms r ON t.room_id = r.id
@@ -40,7 +42,7 @@ try {
         $params['search'] = "%$search_query%";
     }
 
-    $query .= " GROUP BY t.id ORDER BY t.created_at DESC";
+    $query .= " GROUP BY t.id, t.name, t.phone, t.id_number, t.status, t.start_date, t.end_date, r.room_number, r.room_type, r.rate, ta.email ORDER BY t.start_date DESC";
 
     $stmt = $conn->prepare($query);
     $stmt->execute($params);
@@ -128,24 +130,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
         body { background-color: #f8f9fa; }
-        .sidebar {
-            background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            min-height: 100vh;
-            padding: 2rem 0;
-        }
-        .sidebar .nav-link {
-            color: rgba(255,255,255,0.7);
-            padding: 1rem 1.5rem;
-            border-left: 3px solid transparent;
-            transition: all 0.3s;
-        }
-        .sidebar .nav-link:hover,
-        .sidebar .nav-link.active {
-            color: white;
-            background: rgba(255,255,255,0.1);
-            border-left-color: white;
-        }
         .header-banner {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -216,51 +200,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
     </style>
 </head>
 <body>
+    <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 sidebar">
-                <div class="position-sticky pt-3">
-                    <div class="user-info" style="padding: 1.5rem; border-bottom: 1px solid rgba(255,255,255,0.2); margin-bottom: 1rem;">
-                        <h5 style="margin-bottom: 0.25rem;"><i class="bi bi-person-circle"></i> Admin</h5>
-                        <p style="font-size: 0.9rem; opacity: 0.8; margin-bottom: 0;"><?php echo htmlspecialchars($_SESSION["username"]); ?></p>
-                    </div>
-
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link" href="dashboard.php">
-                                <i class="bi bi-speedometer2"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="rooms.php">
-                                <i class="bi bi-door-open"></i> Rooms
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link active" href="admin_tenants.php">
-                                <i class="bi bi-people"></i> Tenants
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="bills.php">
-                                <i class="bi bi-receipt"></i> Bills
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="reports.php">
-                                <i class="bi bi-bar-chart"></i> Reports
-                            </a>
-                        </li>
-                    </ul>
-
-                    <form action="logout.php" method="post" style="margin-top: 2rem;">
-                        <button type="submit" class="btn w-100" style="background: #dc3545; color: white; border: none;">
-                            <i class="bi bi-box-arrow-right"></i> Logout
-                        </button>
-                    </form>
-                </div>
-            </nav>
+            <?php include 'templates/sidebar.php'; ?>
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
@@ -368,7 +311,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
 
                                         <div class="tenant-detail">
                                             <span class="detail-label"><i class="bi bi-door-open"></i> Room:</span>
-                                            <span class="detail-value"><?php echo ($tenant['status'] === 'active' && $tenant['room_id']) ? htmlspecialchars($tenant['room_number']) . ' - ' . htmlspecialchars($tenant['room_type']) : '-'; ?></span>
+                                            <span class="detail-value"><?php echo ($tenant['status'] === 'active' && ($tenant['room_id'] ?? null)) ? htmlspecialchars($tenant['room_number']) . ' - ' . htmlspecialchars($tenant['room_type']) : '-'; ?></span>
                                         </div>
 
                                         <?php if ($tenant['status'] === 'active' && $tenant['start_date']): ?>

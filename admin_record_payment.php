@@ -8,7 +8,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 
 require_once "db/database.php";
 
-$admin_id = $_SESSION["admin_id"];
+$admin_id = $_SESSION["id"];
 $message = '';
 $message_type = '';
 $tenant_bills = [];
@@ -137,48 +137,12 @@ try {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
         body { background-color: #f8f9fa; }
-        .sidebar {
-            background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            min-height: 100vh;
-            padding: 2rem 0;
-        }
-        .sidebar .nav-link {
-            color: rgba(255,255,255,0.7);
-            padding: 1rem 1.5rem;
-            border-left: 3px solid transparent;
-            transition: all 0.3s;
-        }
-        .sidebar .nav-link:hover,
-        .sidebar .nav-link.active {
-            color: white;
-            background: rgba(255,255,255,0.1);
-            border-left-color: white;
-        }
-        .user-info {
-            padding: 1.5rem;
-            border-bottom: 1px solid rgba(255,255,255,0.2);
-            margin-bottom: 1rem;
-        }
-        .user-info h5 { margin-bottom: 0.25rem; }
-        .user-info p { font-size: 0.9rem; opacity: 0.8; margin-bottom: 0; }
         .header-banner {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             padding: 2rem;
             border-radius: 8px;
             margin-bottom: 2rem;
-        }
-        .btn-logout {
-            background: #dc3545;
-            color: white;
-            border: none;
-            margin-top: 1rem;
-            width: 100%;
-        }
-        .btn-logout:hover {
-            background: #c82333;
-            color: white;
         }
         .tenant-card {
             border: 1px solid #ddd;
@@ -269,61 +233,10 @@ try {
     </style>
 </head>
 <body>
+    <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 sidebar">
-                <div class="position-sticky pt-3">
-                    <div class="user-info">
-                        <h5><i class="bi bi-shield-lock"></i> Admin</h5>
-                        <p><?php echo htmlspecialchars($_SESSION["name"]); ?></p>
-                    </div>
-
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link" href="dashboard.php">
-                                <i class="bi bi-house-door"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenants.php">
-                                <i class="bi bi-people"></i> Tenants
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="rooms.php">
-                                <i class="bi bi-door-closed"></i> Rooms
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="bills.php">
-                                <i class="bi bi-receipt"></i> Bills
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="admin_payment_verification.php">
-                                <i class="bi bi-check-circle"></i> Payment Verification
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link active" href="admin_record_payment.php">
-                                <i class="bi bi-cash-coin"></i> Record Cash Payment
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="payment_history.php">
-                                <i class="bi bi-clock-history"></i> Payment History
-                            </a>
-                        </li>
-                    </ul>
-
-                    <form action="logout.php" method="post">
-                        <button type="submit" class="btn btn-logout">
-                            <i class="bi bi-box-arrow-right"></i> Logout
-                        </button>
-                    </form>
-                </div>
-            </nav>
+            <?php include 'templates/sidebar.php'; ?>
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">

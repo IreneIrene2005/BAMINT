@@ -145,23 +145,6 @@ try {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
         body { background-color: #f8f9fa; }
-        .sidebar {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            min-height: 100vh;
-            padding: 2rem 0;
-        }
-        .sidebar .nav-link {
-            color: rgba(255,255,255,0.8);
-            transition: all 0.3s ease;
-        }
-        .sidebar .nav-link:hover,
-        .sidebar .nav-link.active {
-            color: white;
-            background: rgba(255,255,255,0.1);
-            border-left: 3px solid white;
-            padding-left: calc(1rem - 3px);
-        }
         .stat-card {
             background: white;
             border: none;
@@ -203,52 +186,10 @@ try {
     </style>
 </head>
 <body>
+    <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 sidebar">
-                <div class="position-sticky pt-3">
-                    <h5 class="px-3 mb-4"><i class="bi bi-building"></i> BAMINT</h5>
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link" href="dashboard.php">
-                                <i class="bi bi-house-door"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link active" href="admin_resident_list.php">
-                                <i class="bi bi-people"></i> Resident List
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="admin_tenants.php">
-                                <i class="bi bi-person-check"></i> Tenant Management
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="rooms.php">
-                                <i class="bi bi-door-open"></i> Rooms
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="bills.php">
-                                <i class="bi bi-receipt"></i> Bills
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="occupancy_reports.php">
-                                <i class="bi bi-bar-chart"></i> Reports
-                            </a>
-                        </li>
-                    </ul>
-                    <hr class="my-4" style="border-color: rgba(255,255,255,0.2);">
-                    <form action="logout.php" method="post" class="px-3">
-                        <button type="submit" class="btn btn-outline-light w-100">
-                            <i class="bi bi-box-arrow-right"></i> Logout
-                        </button>
-                    </form>
-                </div>
-            </nav>
+            <?php include 'templates/sidebar.php'; ?>
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">

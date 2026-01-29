@@ -9,7 +9,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 require_once "db/database.php";
 require_once "db/notifications.php";
 
-$admin_id = $_SESSION["admin_id"];
+$admin_id = $_SESSION["id"];
 $message = '';
 $message_type = '';
 
@@ -144,7 +144,7 @@ try {
     $stmt = $conn->prepare("
         SELECT pt.*, t.name as tenant_name, t.email as tenant_email, t.phone as tenant_phone,
                b.billing_month, b.amount_due, b.amount_paid,
-               a.name as recorded_by_name
+               a.username as recorded_by_name
         FROM payment_transactions pt
         JOIN tenants t ON pt.tenant_id = t.id
         JOIN bills b ON pt.bill_id = b.id
@@ -182,7 +182,7 @@ try {
 // Fetch recent verified payments (last 30 days)
 try {
     $stmt = $conn->prepare("
-        SELECT pt.*, t.name as tenant_name, b.billing_month, a.name as verified_by_name
+        SELECT pt.*, t.name as tenant_name, b.billing_month, a.username as verified_by_name
         FROM payment_transactions pt
         JOIN tenants t ON pt.tenant_id = t.id
         JOIN bills b ON pt.bill_id = b.id
@@ -326,61 +326,10 @@ try {
     </style>
 </head>
 <body>
+    <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 sidebar">
-                <div class="position-sticky pt-3">
-                    <div class="user-info">
-                        <h5><i class="bi bi-shield-lock"></i> Admin</h5>
-                        <p><?php echo htmlspecialchars($_SESSION["name"]); ?></p>
-                    </div>
-
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link" href="dashboard.php">
-                                <i class="bi bi-house-door"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenants.php">
-                                <i class="bi bi-people"></i> Tenants
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="rooms.php">
-                                <i class="bi bi-door-closed"></i> Rooms
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="bills.php">
-                                <i class="bi bi-receipt"></i> Bills
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link active" href="admin_payment_verification.php">
-                                <i class="bi bi-check-circle"></i> Payment Verification
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="admin_record_payment.php">
-                                <i class="bi bi-cash-coin"></i> Record Cash Payment
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="payment_history.php">
-                                <i class="bi bi-clock-history"></i> Payment History
-                            </a>
-                        </li>
-                    </ul>
-
-                    <form action="logout.php" method="post">
-                        <button type="submit" class="btn btn-logout">
-                            <i class="bi bi-box-arrow-right"></i> Logout
-                        </button>
-                    </form>
-                </div>
-            </nav>
+            <?php include 'templates/sidebar.php'; ?>
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">

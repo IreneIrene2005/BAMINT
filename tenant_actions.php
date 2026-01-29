@@ -155,7 +155,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <tbody>
                         <?php foreach ($bills as $bill): ?>
                             <tr>
-                                <td><?php echo date('M Y', strtotime($bill['month'])); ?></td>
+                                <td><?php echo date('M Y', strtotime($bill['billing_month'])); ?></td>
                                 <td>₱<?php echo number_format($bill['amount_due'], 2); ?></td>
                                 <td><span class="badge bg-<?php echo $bill['status'] === 'paid' ? 'success' : ($bill['status'] === 'pending' ? 'warning' : 'danger'); ?>"><?php echo ucfirst($bill['status']); ?></span></td>
                             </tr>
