@@ -315,50 +315,45 @@ try {
             <!-- Billing Summary Cards (Live Data) -->
             <div class="row mb-4">
                 <?php
-                // Get summary for all active bills
-                // Real-time summary calculation to match table logic
-                $room_count_stmt = $conn->prepare("
-                    SELECT COUNT(DISTINCT room_id) FROM bills WHERE status IN ('pending','partial','unpaid','overdue')
-                ");
+                // Cache table rows and sum Grand Total Due for summary card
+                $room_count_stmt = $conn->prepare("SELECT COUNT(DISTINCT room_id) FROM bills WHERE status IN ('pending','partial','unpaid','overdue')");
                 $room_count_stmt->execute();
                 $room_count = $room_count_stmt->fetchColumn();
 
-                // Calculate Grand Total Due and Total Paid for all tenants (real-time)
-                $bills_stmt = $conn->prepare("
-                    SELECT tenant_id FROM bills WHERE status IN ('pending','partial','unpaid','overdue') GROUP BY tenant_id
-                ");
-                $bills_stmt->execute();
-                $tenants = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
+                $table_rows = [];
+                $grand_total_due_sum = 0.0;
+                $grand_total_paid_sum = 0.0;
 
-                $grand_total_due = 0.0;
-                $grand_total_paid = 0.0;
-                foreach ($tenants as $tenant_row) {
-                    $tenant_id = $tenant_row['tenant_id'];
-                    // Unpaid room total for this tenant
-                    $room_bills_stmt = $conn->prepare("SELECT id, amount_due FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending','partial','unpaid','overdue')");
-                    $room_bills_stmt->execute(['tenant_id' => $tenant_id]);
-                    $room_bills = $room_bills_stmt->fetchAll(PDO::FETCH_ASSOC);
-                    $unpaid_room_total = 0.0;
-                    $paid_total = 0.0;
-                    foreach ($room_bills as $bill) {
-                        $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                        $sum_stmt->execute(['bill_id' => $bill['id']]);
-                        $live_paid = floatval($sum_stmt->fetchColumn());
-                        $unpaid_room_total += max(0, floatval($bill['amount_due']) - $live_paid);
-                        $paid_total += $live_paid;
-                    }
-                    // Additional charges for this tenant
-                    $amenities_stmt = $conn->prepare("SELECT cost FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
-                    $amenities_stmt->execute(['tenant_id' => $tenant_id]);
-                    $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
-                    $total_amenities = 0.0;
-                    foreach ($amenities as $a) {
-                        $total_amenities += floatval($a['cost']);
-                    }
-                    $grand_total_due += $unpaid_room_total + $total_amenities;
-                    $grand_total_paid += $paid_total;
+                $bills->execute();
+                while($row = $bills->fetch(PDO::FETCH_ASSOC)) {
+                    $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                    $room_req_stmt->execute(['tenant_id' => $row['tenant_id'], 'room_id' => $row['room_id']]);
+                    $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                    $checkin = $dates ? $dates['checkin_date'] : null;
+                    $checkout = $dates ? $dates['checkout_date'] : null;
+                    $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
+                    $sum_stmt->execute(['bill_id' => $row['id']]);
+                    $amount_paid = floatval($sum_stmt->fetchColumn());
+                    $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
+                    $charges_stmt->execute(['tenant_id' => $row['tenant_id']]);
+                    $total_charges = $charges_stmt->fetchColumn();
+                    $total_charges = $total_charges ? floatval($total_charges) : 0.0;
+                    $grand_total_due = $amount_paid + $total_charges;
+                    $grand_total_due_sum += $grand_total_due;
+                    $grand_total_paid_sum += $amount_paid;
+                    $table_rows[] = [
+                        'checkin' => $checkin,
+                        'checkout' => $checkout,
+                        'name' => $row['name'],
+                        'room_number' => $row['room_number'],
+                        'grand_total_due' => $grand_total_due,
+                        'amount_paid' => $amount_paid,
+                        'total_charges' => $total_charges,
+                        'status' => $row['status'],
+                        'bill_id' => $row['id'],
+                        'tenant_id' => $row['tenant_id']
+                    ];
                 }
-                $remaining_balance = $grand_total_due - $grand_total_paid;
                 ?>
                 <div class="col-md-3 col-sm-6 mb-3">
                     <div class="card metric-card bg-primary bg-opacity-10 h-100">
@@ -372,7 +367,7 @@ try {
                     <div class="card metric-card bg-warning bg-opacity-10 h-100">
                         <div class="card-body text-center">
                             <div class="metric-label">Total Due</div>
-                            <div class="metric-value text-warning">₱<?php echo number_format($grand_total_due, 2); ?></div>
+                            <div class="metric-value text-warning">₱<?php echo number_format($grand_total_due_sum, 2); ?></div>
                         </div>
                     </div>
                 </div>
@@ -380,7 +375,7 @@ try {
                     <div class="card metric-card bg-info bg-opacity-10 h-100">
                         <div class="card-body text-center">
                             <div class="metric-label">Total Paid</div>
-                            <div class="metric-value text-info">₱<?php echo number_format($grand_total_paid, 2); ?></div>
+                            <div class="metric-value text-info">₱<?php echo number_format($grand_total_paid_sum, 2); ?></div>
                         </div>
                     </div>
                 </div>
@@ -607,61 +602,29 @@ try {
                         </tr>
                     </thead>
                     <tbody>
-                        <?php while($row = $bills->fetch(PDO::FETCH_ASSOC)) : 
-                            // Fetch check-in and check-out dates from room_requests (if available)
-                            $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
-                            $room_req_stmt->execute(['tenant_id' => $row['tenant_id'], 'room_id' => $row['room_id']]);
-                            $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                            $checkin = $dates ? $dates['checkin_date'] : null;
-                            $checkout = $dates ? $dates['checkout_date'] : null;
-                            // Calculate Grand Total Due as (Amount Paid for this bill) + (Total Additional Charges for this tenant)
-                            $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                            $sum_stmt->execute(['bill_id' => $row['id']]);
-                            $amount_paid = floatval($sum_stmt->fetchColumn());
-                            $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
-                            $charges_stmt->execute(['tenant_id' => $row['tenant_id']]);
-                            $total_charges = $charges_stmt->fetchColumn();
-                            $total_charges = $total_charges ? floatval($total_charges) : 0.0;
-                            $grand_total_due = $amount_paid + $total_charges;
-                        ?>
+                        <?php foreach($table_rows as $row) : ?>
                         <tr>
                             <td>
-                                <?php if ($checkin && $checkout): ?>
-                                    <?php echo date('M d, Y', strtotime($checkin)); ?> - <?php echo date('M d, Y', strtotime($checkout)); ?>
+                                <?php if ($row['checkin'] && $row['checkout']): ?>
+                                    <?php echo date('M d, Y', strtotime($row['checkin'])); ?> - <?php echo date('M d, Y', strtotime($row['checkout'])); ?>
                                 <?php else: ?>
                                     <span class="text-muted">N/A</span>
                                 <?php endif; ?>
                             </td>
                             <td><?php echo htmlspecialchars($row['name']); ?></td>
                             <td><?php echo htmlspecialchars($row['room_number']); ?></td>
-                            <td><?php echo htmlspecialchars(number_format($grand_total_due, 2)); ?></td>
-                            <td>
-                                <?php 
-                                // Always show live sum of all payments for this bill
-                                $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                                $sum_stmt->execute(['bill_id' => $row['id']]);
-                                $live_paid = $sum_stmt->fetchColumn();
-                                echo htmlspecialchars(number_format($live_paid, 2));
-                                ?>
-                            </td>
-                            <td>
-                                <?php
-                                // Fetch total additional charges for this tenant (matches admin_additional_charges.php)
-                                $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
-                                $charges_stmt->execute(['tenant_id' => $row['tenant_id']]);
-                                $total_charges = $charges_stmt->fetchColumn();
-                                echo htmlspecialchars(number_format($total_charges, 2));
-                                ?>
-                            </td>
+                            <td><?php echo htmlspecialchars(number_format($row['grand_total_due'], 2)); ?></td>
+                            <td><?php echo htmlspecialchars(number_format($row['amount_paid'], 2)); ?></td>
+                            <td><?php echo htmlspecialchars(number_format($row['total_charges'], 2)); ?></td>
                             <td>
                                 <?php
                                 // Calculate live status based on verified/approved payments
                                 $status_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
-                                $status_stmt->execute(['bill_id' => $row['id']]);
+                                $status_stmt->execute(['bill_id' => $row['bill_id']]);
                                 $verified_paid = floatval($status_stmt->fetchColumn());
                                 $status_label = '';
                                 $status_class = '';
-                                if ($verified_paid >= floatval($row['amount_due'])) {
+                                if ($verified_paid >= floatval($row['amount_paid'])) {
                                     $status_label = 'Paid';
                                     $status_class = 'success';
                                 } elseif ($verified_paid > 0) {
@@ -680,12 +643,12 @@ try {
                                 </span>
                             </td>
                             <td>
-                                <a href="bill_actions.php?action=edit&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-primary" title="Edit"><i class="bi bi-pencil-square"></i></a>
-                                <a href="bill_actions.php?action=view&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-info" title="View Details"><i class="bi bi-eye"></i></a>
-                                <a href="bill_actions.php?action=delete&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-danger" title="Delete" onclick="return confirm('Are you sure?');"><i class="bi bi-trash"></i></a>
+                                <a href="bill_actions.php?action=edit&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-primary" title="Edit"><i class="bi bi-pencil-square"></i></a>
+                                <a href="bill_actions.php?action=view&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-info" title="View Details"><i class="bi bi-eye"></i></a>
+                                <a href="bill_actions.php?action=delete&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-danger" title="Delete" onclick="return confirm('Are you sure?');"><i class="bi bi-trash"></i></a>
                             </td>
                         </tr>
-                        <?php endwhile; ?>
+                        <?php endforeach; ?>
                     </tbody>
                 </table>
                 </div>
