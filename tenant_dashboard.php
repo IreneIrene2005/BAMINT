@@ -46,13 +46,19 @@ try {
         }
     }
 
-    // Get current bills (exclude bills that are only additional charges billed from maintenance_requests)
-    // Get all active bills for this tenant (should be only one after merge)
+    // Get current bills (EXCLUDE bills that are only for amenities, i.e., bills where amount_due equals the sum of maintenance_requests costs referenced in notes)
     $stmt = $conn->prepare("
-        SELECT * FROM bills 
-        WHERE tenant_id = :customer_id
-        AND (status != 'paid' OR DATE_ADD(updated_at, INTERVAL 7 DAY) >= NOW())
-        ORDER BY billing_month DESC
+        SELECT b.* FROM bills b
+        WHERE b.tenant_id = :customer_id
+        AND (b.status != 'paid' OR DATE_ADD(b.updated_at, INTERVAL 7 DAY) >= NOW())
+        AND NOT (
+            b.notes REGEXP 'Request #[0-9]+'
+            AND (
+                SELECT COALESCE(SUM(mr.cost),0) FROM maintenance_requests mr
+                WHERE b.notes LIKE CONCAT('%Request #', mr.id, '%')
+            ) = b.amount_due
+        )
+        ORDER BY b.billing_month DESC
         LIMIT 5
     ");
     $stmt->execute(['customer_id' => $customer_id]);
@@ -465,12 +471,11 @@ try {
                     <div class="col-md-6 col-lg-3">
                         <div class="card metric-card <?php echo $remaining_balance > 0 ? 'border-danger' : 'border-success'; ?>">
                             <div class="card-body">
-                                <p class="text-muted mb-2"><i class="bi bi-exclamation-circle"></i> Remaining Balance</p>
+                                <p class="text-muted mb-2"><i class="bi bi-exclamation-circle"></i> Balance</p>
                                 <p class="metric-value <?php echo $remaining_balance > 0 ? 'text-danger' : 'text-success'; ?>">
                                     <?php
-                                    // Remaining Balance = sum of displayed Balance from Recent Bills + Remaining from Additional Charges
+                                    // Room balance only
                                     $final_remaining_balance = 0.0;
-                                    // Add up all bill balances (room)
                                     foreach ($bills as $bill) {
                                         $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
                                         $sum_stmt->execute(['bill_id' => $bill['id']]);
@@ -478,14 +483,10 @@ try {
                                         $balance = max(0, floatval($bill['amount_due']) - $live_paid);
                                         $final_remaining_balance += $balance;
                                     }
-                                    // Add up all amenity balances (Remaining column in Additional Charges)
-                                    foreach ($additional_items as $ai) {
-                                        $final_remaining_balance += max(0, floatval($ai['unpaid_alloc']));
-                                    }
                                     echo '₱' . number_format($final_remaining_balance, 2);
                                     ?>
                                 </p>
-                                <small class="text-muted"><?php echo ($final_remaining_balance > 0) ? 'Amount due (downpayment + amenities)' : 'All paid up!'; ?></small>
+                                <small class="text-muted">Room balance + amenities</small>
                             </div>
                         </div>
                     </div>
@@ -513,7 +514,7 @@ try {
                                     <thead>
                                         <tr>
                                             <th>Month</th>
-                                            <th class="text-end">Amount Due</th>
+                                            <th class="text-end">Total Cost Room</th>
                                             <th class="text-end">Paid</th>
                                             <th class="text-end">Balance</th>
                                             <th>Status</th>
@@ -573,10 +574,21 @@ try {
                                                 $due_ts = null;
                                             }
 
-                                            // Show only the room cost as Amount Due
-                                            $display_amount_due = floatval($bill['amount_due']);
-                                            $paid_on_base = $live_paid;
-                                            $base_balance = $display_amount_due - $paid_on_base;
+                                            // Show only the room cost as Total Cost Room (room rate x nights)
+                                            $room_rate = isset($customer['rate']) ? floatval($customer['rate']) : 0.0;
+                                            $nights = 1;
+                                            if ($checkin && $checkout) {
+                                                $dt1 = new DateTime($checkin);
+                                                $dt2 = new DateTime($checkout);
+                                                $interval = $dt1->diff($dt2);
+                                                $nights = max(1, (int)$interval->format('%a'));
+                                            }
+                                            $room_total = $room_rate * $nights;
+                                            $display_amount_due = $room_total;
+                                            // Paid and balance should be based on room only (not amenities)
+                                            // If payments exceed room_total, cap paid at room_total for display
+                                            $paid_on_base = min($live_paid, $room_total);
+                                            $base_balance = $room_total - $paid_on_base;
 
                                             // Recompute status based on full bill totals (keeps status accurate for overall bill)
                                             $overall_balance = floatval($bill['amount_due']) - $live_paid;
@@ -598,18 +610,7 @@ try {
                                                 <td>
                                                     <?php echo $month_display; ?>
                                                     <?php
-                                                    // Debug marker: show if this bill includes additional charges (maintenance requests)
-                                                    $has_additional_flag = false;
-                                                    if (!empty($bill['notes']) && preg_match('/Request #(\d+)/', $bill['notes'])) {
-                                                        $has_additional_flag = true;
-                                                    } else {
-                                                        foreach ($additional_items as $ai_check) {
-                                                            if (!empty($ai_check['bill_id']) && $ai_check['bill_id'] == $bill['id']) { $has_additional_flag = true; break; }
-                                                        }
-                                                    }
-                                                    if ($has_additional_flag) {
-                                                        echo '<div><small class="text-muted">(Contains additional charges)</small></div>';
-                                                    }
+                                                    // ...existing code...
                                                     ?>
                                                     <!-- Includes suppressed here to avoid duplication. See Additional Charges section below for amenity details. -->
                                                 </td>
@@ -693,7 +694,7 @@ try {
         function dismissAdvancePaymentNotification() {
             fetch('api_dismiss_notification.php?action=dismiss_advance_payment')
                 .then(response => response.json())
-                .then(data => {
+                .then data => {
                     if (data.success) {
                         // Notification dismissed successfully in database
                         console.log('Advance payment notification dismissed permanently');

@@ -430,6 +430,7 @@ try {
                                         <label for="bill_id" class="form-label">Bill to Pay <span class="text-danger">*</span></label>
                                         <select class="form-control" id="bill_id" name="bill_id" required onchange="updateBillAmount()">
                                             <?php
+                                            // Always show Grand Total Due (Room + Amenities) as a payment option
                                             $today = date('Y-m-d');
                                             $show_advance_payment = false;
                                             // Check for any pending/pending_payment room request for this tenant
@@ -449,32 +450,44 @@ try {
                                                 echo 'Advance Payment - ₱' . number_format($advance_bill['amount_due'], 2);
                                                 echo '</option>';
                                             }
-                                            if (!$show_advance_payment) {
-                                                // Show grand total due (default)
-                                                // 1. Get all unpaid/active bills (room only)
-                                                $bills_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending','partial','unpaid','overdue')");
-                                                $bills_stmt->execute(['tenant_id' => $tenant_id]);
-                                                $bills = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
-                                                $unpaid_room_total = 0.0;
-                                                foreach ($bills as $bill) {
-                                                    $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                                                    $sum_stmt->execute(['bill_id' => $bill['id']]);
-                                                    $live_paid = floatval($sum_stmt->fetchColumn());
-                                                    $unpaid_room_total += max(0, floatval($bill['amount_due']) - $live_paid);
-                                                }
-                                                // 2. Get all unpaid amenities (completed, not yet paid)
-                                                $amenities_stmt = $conn->prepare("SELECT id, category, cost FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0 ORDER BY submitted_date DESC");
-                                                $amenities_stmt->execute(['tenant_id' => $tenant_id]);
-                                                $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
-                                                $total_amenities = 0.0;
-                                                foreach ($amenities as $a) {
-                                                    $total_amenities += floatval($a['cost']);
-                                                }
-                                                $grand_total_due = $unpaid_room_total + $total_amenities;
-                                                echo '<option value="grand_total_due" data-amount="' . $grand_total_due . '">';
-                                                echo 'Grand Total Due (Room + Amenities) - ₱' . number_format($grand_total_due, 2);
-                                                echo '</option>';
+                                            // Always show Grand Total Due (Room + Amenities)
+                                            // 1. Get all unpaid/active bills (room only)
+                                            $bills_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending','partial','unpaid','overdue')");
+                                            $bills_stmt->execute(['tenant_id' => $tenant_id]);
+                                            $bills = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                            $unpaid_room_total = 0.0;
+                                            foreach ($bills as $bill) {
+                                                $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                                                $sum_stmt->execute(['bill_id' => $bill['id']]);
+                                                $live_paid = floatval($sum_stmt->fetchColumn());
+                                                $unpaid_room_total += max(0, floatval($bill['amount_due']) - $live_paid);
                                             }
+                                            // 2. Get all unpaid amenities (completed, not yet paid, and not fully paid in their bill)
+                                            $amenities_stmt = $conn->prepare("SELECT id, category, cost, billed, billed_bill_id FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0 ORDER BY submitted_date DESC");
+                                            $amenities_stmt->execute(['tenant_id' => $tenant_id]);
+                                            $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                            $additional_total_unpaid = 0.0;
+                                            foreach ($amenities as $a) {
+                                                $bill_id = $a['billed'] && $a['billed_bill_id'] ? $a['billed_bill_id'] : null;
+                                                $bill_remaining = null;
+                                                if ($bill_id) {
+                                                    $billLookupStmt = $conn->prepare("SELECT id, amount_due FROM bills WHERE id = :bill_id LIMIT 1");
+                                                    $billLookupStmt->execute(['bill_id' => $bill_id]);
+                                                    $bill = $billLookupStmt->fetch(PDO::FETCH_ASSOC);
+                                                    if ($bill) {
+                                                        $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                                                        $sum_stmt->execute(['bill_id' => $bill['id']]);
+                                                        $paid = floatval($sum_stmt->fetchColumn());
+                                                        $bill_remaining = max(0, floatval($bill['amount_due']) - $paid);
+                                                    }
+                                                }
+                                                $alloc = $bill_remaining !== null ? min(floatval($a['cost']), $bill_remaining) : 0;
+                                                if ($alloc > 0) $additional_total_unpaid += $alloc;
+                                            }
+                                            $grand_total_due = $unpaid_room_total + $additional_total_unpaid;
+                                            echo '<option value="grand_total_due" data-amount="' . $grand_total_due . '">';
+                                            echo 'Grand Total Due (Room + Amenities) - ₱' . number_format($grand_total_due, 2);
+                                            echo '</option>';
                                             ?>
                                         </select>
                                         <small class="text-muted">

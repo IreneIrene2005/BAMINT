@@ -304,8 +304,10 @@ try {
                                 <div class="mb-2">
                                     <small class="text-muted d-block">Remaining Balance for Stay (Room Only)</small>
                                     <?php
-                                    // Show the remaining balance for the most recent unpaid bill (room only, no amenities), regardless of stay validity
+                                    // Show the remaining balance for the most recent unpaid bill (room only, no amenities), as half the room cost if downpayment is paid
                                     $recent_bill_balance = 0.0;
+                                    $room_rate = null;
+                                    $nights = 1;
                                     if (!empty($bills)) {
                                         usort($bills, function($a, $b) {
                                             $a_time = strtotime($a['billing_month']);
@@ -316,10 +318,34 @@ try {
                                             return $b_time - $a_time;
                                         });
                                         foreach ($bills as $bill) {
+                                            // Try to get room rate from joined room or from bill notes if available
+                                            if (!isset($room_rate)) {
+                                                // Try to get from session or DB
+                                                $room_stmt = $conn->prepare("SELECT r.rate FROM rooms r JOIN tenants t ON t.room_id = r.id WHERE t.id = :tenant_id LIMIT 1");
+                                                $room_stmt->execute(['tenant_id' => $customer_id]);
+                                                $room_row = $room_stmt->fetch(PDO::FETCH_ASSOC);
+                                                $room_rate = $room_row && isset($room_row['rate']) ? floatval($room_row['rate']) : 0.0;
+                                            }
+                                            // Calculate nights from checkin/checkout if available
+                                            $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                            $room_req_stmt->execute(['tenant_id' => $bill['tenant_id'], 'room_id' => $bill['room_id']]);
+                                            $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                            if ($dates && $dates['checkin_date'] && $dates['checkout_date']) {
+                                                $dt1 = new DateTime($dates['checkin_date']);
+                                                $dt2 = new DateTime($dates['checkout_date']);
+                                                $interval = $dt1->diff($dt2);
+                                                $nights = max(1, (int)$interval->format('%a'));
+                                            }
+                                            $room_total = $room_rate * $nights;
+                                            // If downpayment is paid, remaining is half
                                             $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
                                             $sum_stmt->execute(['bill_id' => $bill['id']]);
                                             $live_paid = floatval($sum_stmt->fetchColumn());
-                                            $recent_bill_balance = floatval($bill['amount_due']) - $live_paid;
+                                            if ($live_paid > 0 && $live_paid < $room_total) {
+                                                $recent_bill_balance = $room_total - $live_paid;
+                                            } else {
+                                                $recent_bill_balance = $room_total;
+                                            }
                                             if ($recent_bill_balance < 0) $recent_bill_balance = 0.0;
                                             break;
                                         }
