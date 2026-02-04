@@ -158,43 +158,33 @@ $available_rooms = $conn->query($sql_available_rooms);
                             <td><?php echo htmlspecialchars($row['phone']); ?></td>
                             <td>
                                 <?php
-                                    $displayRoom = $row['room_number'];
-                                    $tenantStatus = $row['status'];
-                                    if (empty($displayRoom)) {
-                                        try {
-                                            $stmt2 = $conn->prepare("SELECT b.room_id, r.room_number FROM bills b JOIN rooms r ON b.room_id = r.id LEFT JOIN payment_transactions pt ON pt.bill_id = b.id AND pt.payment_status IN ('verified','approved') WHERE b.tenant_id = :tenant_id AND (b.amount_paid > 0 OR b.status IN ('partial','paid') OR pt.id IS NOT NULL) ORDER BY b.id DESC LIMIT 1");
-                                            $stmt2->execute(['tenant_id' => $row['id']]);
-                                            $brow = $stmt2->fetch(PDO::FETCH_ASSOC);
-                                            if ($brow && !empty($brow['room_id'])) {
-                                                // persist assignment so it is consistent across pages
-                                                $updateTenantRoom = $conn->prepare("UPDATE tenants SET room_id = :room_id, status = 'active' WHERE id = :tenant_id");
-                                                $updateTenantRoom->execute(['room_id' => $brow['room_id'], 'tenant_id' => $row['id']]);
-                                                $displayRoom = $brow['room_number'];
-                                                $tenantStatus = 'active';
-                                            }
-                                        } catch (Exception $e) {
-                                            // ignore and fallback to empty
-                                        }
+                                    // Only show room if latest room_request is approved or occupied
+                                    $room_req_stmt = $conn->prepare("SELECT status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                    $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
+                                    $room_req = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                    if ($room_req && in_array($room_req['status'], ['approved', 'occupied'])) {
+                                        echo htmlspecialchars($row['room_number']);
+                                    } else {
+                                        echo '-';
                                     }
-                                    echo htmlspecialchars($displayRoom ?: '-');
                                 ?>
                             </td>
                             <td>
                                 <?php
-                                // Show stay duration from room_requests if approved/occupied
+                                // Only show stay duration if latest room_request is approved or occupied
                                 $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                                 $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
                                 $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
                                 if ($dates && $dates['checkin_date'] && $dates['checkout_date'] && in_array($dates['status'], ['approved', 'occupied'])) {
                                     echo htmlspecialchars(date('M d, Y', strtotime($dates['checkin_date'])) . ' - ' . date('M d, Y', strtotime($dates['checkout_date'])));
                                 } else {
-                                    echo htmlspecialchars($row['start_date']);
+                                    echo '-';
                                 }
                                 ?>
                             </td>
                             <td>
                                 <span class="badge <?php echo $row['status'] === 'active' ? 'bg-success' : 'bg-danger'; ?>">
-                                    <?php echo ucfirst($tenantStatus); ?>
+                                    <?php echo ucfirst($row['status']); ?>
                                 </span>
                             </td>
                             <td>

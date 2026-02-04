@@ -186,11 +186,8 @@ $summary = $conn->query($sql_summary)->fetch(PDO::FETCH_ASSOC);
                         <tr>
                             <th>Date</th>
                             <th>Tenant</th>
-                            <th>Billing Month</th>
                             <th>Payment Amount (₱)</th>
                             <th>Payment Method</th>
-                            <th>Notes</th>
-                            <th>Recorded By</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -201,26 +198,15 @@ $summary = $conn->query($sql_summary)->fetch(PDO::FETCH_ASSOC);
                                 <strong><?php echo htmlspecialchars($row['name']); ?></strong><br>
                                 <small class="text-muted"><?php echo htmlspecialchars($row['email']); ?></small>
                             </td>
-                            <td><?php echo $row['billing_month'] ? htmlspecialchars(date('F Y', strtotime($row['billing_month']))) : '-'; ?></td>
                             <td><strong>₱<?php echo htmlspecialchars(number_format($row['payment_amount'], 2)); ?></strong></td>
                             <td>
-                                <?php if ($row['payment_method']): ?>
-                                    <span class="badge bg-info"><?php echo ucfirst(str_replace('_', ' ', $row['payment_method'])); ?></span>
-                                <?php else: ?>
-                                    <span class="text-muted">-</span>
-                                <?php endif; ?>
-                            </td>
-                            <td><?php echo $row['notes'] ? htmlspecialchars(substr($row['notes'], 0, 50)) . '...' : '-'; ?></td>
-                            <td>
                                 <?php 
-                                // Get admin name from recorded_by
-                                if ($row['recorded_by']) {
-                                    $stmt2 = $conn->prepare("SELECT username FROM admins WHERE id = :id");
-                                    $stmt2->execute(['id' => $row['recorded_by']]);
-                                    $admin = $stmt2->fetch(PDO::FETCH_ASSOC);
-                                    echo htmlspecialchars($admin['username'] ?? 'Unknown');
+                                $method = strtolower($row['payment_method']);
+                                $allowed_methods = ['cash', 'gcash', 'paymaya', 'bank_transfer'];
+                                if (in_array($method, $allowed_methods)) {
+                                    echo '<span class="badge bg-info">' . ucfirst(str_replace('_', ' ', $method)) . '</span>';
                                 } else {
-                                    echo '-';
+                                    echo '<span class="text-muted">-</span>';
                                 }
                                 ?>
                             </td>
