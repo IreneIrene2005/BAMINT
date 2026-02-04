@@ -11,7 +11,7 @@ require_once "db/database.php";
 $tenant_id = $_SESSION["tenant_id"];
 $success_msg = "";
 
-// Handle new maintenance request submission
+// Handle new amenity request submission
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_request'])) {
     $category = trim($_POST['category'] ?? '');
     $description = trim($_POST['description'] ?? '');
@@ -24,16 +24,18 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_request'])) {
             $stmt->execute(['tenant_id' => $tenant_id]);
             $room = $stmt->fetch(PDO::FETCH_ASSOC);
             $room_id = $room['room_id'] ?? 0;
-            // determine cost server-side for accuracy
+            // determine cost server-side for accuracy (amenities)
             $category_prices = [
-                'Door/Lock' => 150,
-                'Walls/Paint' => 200,
-                'Furniture' => 200,
-                'Cleaning' => 100,
-                'Light/Bulb' => 50,
-                'Leak/Water' => 150,
-                'Pest/Bedbugs' => 100,
-                'Appliances' => 200,
+                'Extra pillow' => 150,
+                'Extra blanket' => 200,
+                'Extra towel' => 100,
+                'Extra bed / rollaway bed' => 1000,
+                'Extra toiletries set' => 100,
+                'Room cleaning on request' => 300,
+                'Laundry service (per load)' => 400,
+                'Drinking water refill' => 50,
+                'Iron & ironing board rental' => 200,
+                'Electric kettle rental' => 250,
                 'Other' => null
             ];
             $cost = array_key_exists($category, $category_prices) ? $category_prices[$category] : null;
@@ -49,7 +51,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_request'])) {
                 'cost' => $cost
             ]);
 
-            $success_msg = "Maintenance request submitted successfully!";
+            $success_msg = "Amenity request submitted successfully!";
         } catch (Exception $e) {
             $error = "Error submitting request: " . $e->getMessage();
         }
@@ -57,33 +59,33 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_request'])) {
 }
 
 try {
-    // Get maintenance requests
+    // Get amenity requests
     $stmt = $conn->prepare("
-        SELECT * FROM maintenance_requests 
-        WHERE tenant_id = :tenant_id
+            SELECT * FROM maintenance_requests 
+            WHERE tenant_id = :tenant_id
         ORDER BY submitted_date DESC
     ");
-    $stmt->execute(['tenant_id' => $tenant_id]);
+        $stmt->execute(['tenant_id' => $tenant_id]);
     $requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // Get pending count
-    $result = $conn->query("SELECT COUNT(*) as count FROM maintenance_requests WHERE tenant_id = $tenant_id AND status = 'pending'");
+        $result = $conn->query("SELECT COUNT(*) as count FROM maintenance_requests WHERE tenant_id = $tenant_id AND status = 'pending'");
     $pending_count = $result->fetch(PDO::FETCH_ASSOC)['count'];
 
     // Get completed count
-    $result = $conn->query("SELECT COUNT(*) as count FROM maintenance_requests WHERE tenant_id = $tenant_id AND status = 'completed'");
+        $result = $conn->query("SELECT COUNT(*) as count FROM maintenance_requests WHERE tenant_id = $tenant_id AND status = 'completed'");
     $completed_count = $result->fetch(PDO::FETCH_ASSOC)['count'];
 
 } catch (Exception $e) {
-    $error = "Error loading maintenance data: " . $e->getMessage();
-}
+    $error = "Error loading amenity data: " . $e->getMessage();
+} 
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Maintenance Requests - BAMINT</title>
+    <title>Extra Amenities - BAMINT</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
@@ -180,7 +182,7 @@ try {
                         </li>
                         <li class="nav-item">
                             <a class="nav-link active" href="tenant_maintenance.php">
-                                <i class="bi bi-tools"></i> Maintenance
+                                <i class="bi bi-gift"></i> Amenities
                             </a>
                         </li>
                         <li class="nav-item">
@@ -202,8 +204,8 @@ try {
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
                 <!-- Header -->
                 <div class="header-banner">
-                    <h1><i class="bi bi-tools"></i> Maintenance Requests</h1>
-                    <p class="mb-0">Submit and track maintenance issues in your room</p>
+                    <h1><i class="bi bi-gift"></i> Extra Amenities</h1>
+                    <p class="mb-0">Request and track extra amenities for your room</p>
                 </div>
 
                 <?php if (!empty($success_msg)): ?>
@@ -265,7 +267,7 @@ try {
                 <!-- Submit New Request -->
                 <div class="card mb-4">
                     <div class="card-header bg-success bg-opacity-10">
-                        <h6 class="mb-0"><i class="bi bi-plus-circle"></i> Submit New Request</h6>
+                        <h6 class="mb-0"><i class="bi bi-plus-circle"></i> Request Extra Amenity</h6>
                     </div>
                     <div class="card-body">
                         <form method="POST">
@@ -273,16 +275,18 @@ try {
                                 <div class="col-md-6">
                                     <label for="category" class="form-label">Category</label>
                                     <select class="form-select" id="category" name="category" required onchange="updateCostDisplay()">
-                                        <option value="">Select category...</option>
-                                        <option value="Door/Lock">Door/Lock – Broken lock, stuck door ₱150</option>
-                                        <option value="Walls/Paint">Walls/Paint – Scratches, peeling paint ₱200</option>
-                                        <option value="Furniture">Furniture – Bedframe/furniture repair ₱200</option>
-                                        <option value="Cleaning">Cleaning – Deep cleaning, carpet/fan cleaning ₱100</option>
-                                        <option value="Light/Bulb">Light/Bulb – Bulb replacement, fixture issues ₱50</option>
-                                        <option value="Leak/Water">Leak/Water – Faucet drips, small pipe leak ₱150</option>
-                                        <option value="Pest/Bedbugs">Pest/Bedbugs – Cockroaches, ants, bedbugs ₱100</option>
-                                        <option value="Appliances">Appliances – Fan, fridge, microwave repair ₱200</option>
-                                        <option value="Other">Other – Describe your issue (Cost determined by admin)</option>
+                                        <option value="">Select amenity...</option>
+                                        <option value="Extra pillow">🛌 Extra pillow – ₱150</option>
+                                        <option value="Extra blanket">🛌 Extra blanket – ₱200</option>
+                                        <option value="Extra towel">🛁 Extra towel – ₱100</option>
+                                        <option value="Extra bed / rollaway bed">🛏️ Extra bed / rollaway bed – ₱1,000</option>
+                                        <option value="Extra toiletries set">🧴 Extra toiletries set – ₱100</option>
+                                        <option value="Room cleaning on request">🧹 Room cleaning on request – ₱300</option>
+                                        <option value="Laundry service (per load)">🧺 Laundry service (per load) – ₱400</option>
+                                        <option value="Drinking water refill">💧 Drinking water refill – ₱50</option>
+                                        <option value="Iron & ironing board rental">🧺 Iron & ironing board rental – ₱200</option>
+                                        <option value="Electric kettle rental">☕ Electric kettle rental – ₱250</option>
+                                        <option value="Other">Other – Describe your request (Cost determined by admin)</option>
                                     </select>
                                 </div>
 
@@ -309,7 +313,7 @@ try {
 
                                 <div class="col-12">
                                     <button type="submit" name="submit_request" class="btn btn-success">
-                                        <i class="bi bi-send"></i> Submit Request
+                                        <i class="bi bi-send"></i> Request Amenity
                                     </button>
                                 </div>
                             </div>
@@ -318,7 +322,7 @@ try {
                 </div>
 
                 <!-- Requests List -->
-                <h5 class="mb-3"><i class="bi bi-list"></i> Your Requests</h5>
+                <h5 class="mb-3"><i class="bi bi-list"></i> Your Amenity Requests</h5>
                 <div class="row g-4">
                     <?php if (!empty($requests)): ?>
                         <?php foreach ($requests as $request): ?>
@@ -384,14 +388,16 @@ try {
                                                 $display_cost = $request['cost'];
                                             } else {
                                                 $category_prices = [
-                                                    'Door/Lock' => 150,
-                                                    'Walls/Paint' => 200,
-                                                    'Furniture' => 200,
-                                                    'Cleaning' => 100,
-                                                    'Light/Bulb' => 50,
-                                                    'Leak/Water' => 150,
-                                                    'Pest/Bedbugs' => 100,
-                                                    'Appliances' => 200,
+                                                    'Extra pillow' => 150,
+                                                    'Extra blanket' => 200,
+                                                    'Extra towel' => 100,
+                                                    'Extra bed / rollaway bed' => 1000,
+                                                    'Extra toiletries set' => 100,
+                                                    'Room cleaning on request' => 300,
+                                                    'Laundry service (per load)' => 400,
+                                                    'Drinking water refill' => 50,
+                                                    'Iron & ironing board rental' => 200,
+                                                    'Electric kettle rental' => 250,
                                                     'Other' => null
                                                 ];
                                                 if (!empty($request['category']) && array_key_exists($request['category'], $category_prices)) {
@@ -416,7 +422,7 @@ try {
                     <?php else: ?>
                         <div class="col-12">
                             <div class="alert alert-info">
-                                <i class="bi bi-info-circle"></i> No maintenance requests yet.
+                                <i class="bi bi-info-circle"></i> No amenity requests yet.
                             </div>
                         </div>
                     <?php endif; ?>
@@ -428,14 +434,16 @@ try {
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         const categoryPrices = {
-            'Door/Lock': 150,
-            'Walls/Paint': 200,
-            'Furniture': 200,
-            'Cleaning': 100,
-            'Light/Bulb': 50,
-            'Leak/Water': 150,
-            'Pest/Bedbugs': 100,
-            'Appliances': 200,
+            'Extra pillow': 150,
+            'Extra blanket': 200,
+            'Extra towel': 100,
+            'Extra bed / rollaway bed': 1000,
+            'Extra toiletries set': 100,
+            'Room cleaning on request': 300,
+            'Laundry service (per load)': 400,
+            'Drinking water refill': 50,
+            'Iron & ironing board rental': 200,
+            'Electric kettle rental': 250,
             'Other': null
         };
 

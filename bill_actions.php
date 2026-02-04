@@ -415,8 +415,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <div class="col-md-6 text-end">
                                 <p>
                                     <strong>Billing Period:</strong> <?php echo date('F Y', strtotime($bill['billing_month'])); ?><br>
-                                    <strong>Invoice Date:</strong> <?php echo date('M d, Y', strtotime($bill['created_at'])); ?><br>
-                                    <strong>Due Date:</strong> <?php echo $bill['due_date'] ? date('M d, Y', strtotime($bill['due_date'])) : 'Not Set'; ?><br>
+                                    <strong>Invoice Date:</strong> <?php echo date('M d, Y'); ?><br>
+                                    <strong>Stay Duration:</strong> <?php
+                                        // Fetch stay duration, room rate, and calculate total cost
+                                        $stay_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                        $stay_stmt->execute(['tenant_id' => $bill['tenant_id'], 'room_id' => $bill['room_id']]);
+                                        $stay = $stay_stmt->fetch(PDO::FETCH_ASSOC);
+                                        $room_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
+                                        $room_stmt->execute(['room_id' => $bill['room_id']]);
+                                        $room = $room_stmt->fetch(PDO::FETCH_ASSOC);
+                                        $room_rate = $room ? floatval($room['rate']) : 0;
+                                        $total_cost = null;
+                                        $nights = null;
+                                        if ($stay && $stay['checkin_date'] && $stay['checkout_date']) {
+                                            echo date('M d, Y', strtotime($stay['checkin_date'])) . ' - ' . date('M d, Y', strtotime($stay['checkout_date']));
+                                            $checkin = new DateTime($stay['checkin_date']);
+                                            $checkout = new DateTime($stay['checkout_date']);
+                                            $nights = $checkin->diff($checkout)->days;
+                                            $total_cost = $nights * $room_rate;
+                                        } else {
+                                            echo 'N/A';
+                                        }
+                                    ?><br>
                                     <strong>Status:</strong> <span class="badge bg-<?php 
                                         if ($bill['status'] == 'paid') echo 'success';
                                         elseif ($bill['status'] == 'partial') echo 'warning';
@@ -429,16 +449,71 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <table class="table">
                             <tbody>
                                 <tr>
-                                    <td><strong>Monthly Rent</strong></td>
-                                    <td class="text-end"><strong>₱<?php echo number_format($bill['amount_due'], 2); ?></strong></td>
+                                    <td><strong>Total Cost (Room Only)</strong></td>
+                                    <td class="text-end">
+                                        <?php
+                                        if ($total_cost !== null) {
+                                            echo '<strong>₱' . number_format($total_cost, 2) . '</strong>';
+                                        } else {
+                                            echo 'N/A';
+                                        }
+                                        ?>
+                                    </td>
                                 </tr>
                                 <tr>
-                                    <td><strong>Amount Paid</strong></td>
-                                    <td class="text-end">₱<?php echo number_format($bill['amount_paid'], 2); ?></td>
+                                    <td><strong>Downpayment</strong></td>
+                                    <td class="text-end">
+                                        <?php
+                                        // Fetch downpayment (first payment transaction for this bill)
+                                        $dp_stmt = $conn->prepare("SELECT payment_amount FROM payment_transactions WHERE bill_id = :bill_id ORDER BY payment_date ASC, id ASC LIMIT 1");
+                                        $dp_stmt->execute(['bill_id' => $bill['id']]);
+                                        $downpayment = $dp_stmt->fetchColumn();
+                                        $downpayment = $downpayment ? floatval($downpayment) : 0.0;
+                                        echo '₱' . number_format($downpayment, 2);
+                                        ?>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Room Balance After Downpayment</strong></td>
+                                    <td class="text-end">
+                                        <?php
+                                        $room_balance = ($total_cost !== null ? $total_cost : 0) - $downpayment;
+                                        echo '<strong>₱' . number_format($room_balance, 2) . '</strong>';
+                                        ?>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Total Additional Charges</strong></td>
+                                    <td class="text-end">
+                                        <?php
+                                        $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
+                                        $charges_stmt->execute(['tenant_id' => $bill['tenant_id']]);
+                                        $total_charges = $charges_stmt->fetchColumn();
+                                        $total_charges = $total_charges ? floatval($total_charges) : 0.0;
+                                        echo '₱' . number_format($total_charges, 2);
+                                        ?>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Grand Total Due</strong></td>
+                                    <td class="text-end">
+                                        <?php
+                                        $grand_total_due = $room_balance + $total_charges;
+                                        echo '<strong>₱' . number_format($grand_total_due, 2) . '</strong>';
+                                        ?>
+                                    </td>
                                 </tr>
                                 <tr class="table-active">
-                                    <td><strong>Balance Due</strong></td>
-                                    <td class="text-end"><strong>₱<?php echo number_format($balance, 2); ?></strong></td>
+                                    <td><strong>Status</strong></td>
+                                    <td class="text-end">
+                                        <?php
+                                        if ($bill['status'] === 'paid') {
+                                            echo '<span class="badge bg-success">Paid</span> ₱' . number_format($grand_total_due, 2);
+                                        } else {
+                                            echo '<span class="badge bg-warning text-dark">Unpaid</span>';
+                                        }
+                                        ?>
+                                    </td>
                                 </tr>
                             </tbody>
                         </table>
@@ -451,7 +526,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <?php endif; ?>
                         
                         <div class="invoice-footer text-muted" style="font-size: 0.9em;">
-                            <p>Thank you for your business. Please make payment by the due date.</p>
+                            <p>Thank you for your business.</p>
                             <?php if ($bill['paid_date']): ?>
                             <p>Paid on: <?php echo date('M d, Y', strtotime($bill['paid_date'])); ?></p>
                             <?php endif; ?>

@@ -1,14 +1,15 @@
 <?php
 session_start();
 
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "tenant") {
+
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array($_SESSION["role"], ["tenant", "customer"])) {
     header("location: index.php?role=tenant");
     exit;
 }
 
 require_once "db/database.php";
 
-$tenant_id = $_SESSION["tenant_id"];
+$customer_id = isset($_SESSION["customer_id"]) ? $_SESSION["customer_id"] : (isset($_SESSION["tenant_id"]) ? $_SESSION["tenant_id"] : null);
 $filter_status = isset($_GET['status']) && !empty($_GET['status']) ? $_GET['status'] : '';
 $view = isset($_GET['view']) ? $_GET['view'] : 'active'; // 'active' or 'archive'
 $error = '';
@@ -20,9 +21,9 @@ $next_due = null;
 
 try {
     // Get ACTIVE bills (exclude paid bills older than 6 months)
-    $sql = "SELECT * FROM bills WHERE tenant_id = :tenant_id";
+    $sql = "SELECT * FROM bills WHERE tenant_id = :customer_id";
     $sql .= " AND NOT (status = 'paid' AND DATE_ADD(updated_at, INTERVAL 6 MONTH) < NOW())";
-    $params = ['tenant_id' => $tenant_id];
+    $params = ['customer_id' => $customer_id];
     
     if ($filter_status) {
         $sql .= " AND status = :status";
@@ -36,28 +37,27 @@ try {
     $bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // Get ARCHIVED bills (paid bills older than 6 months)
-    $archive_sql = "SELECT * FROM bills WHERE tenant_id = :tenant_id AND status = 'paid' AND DATE_ADD(updated_at, INTERVAL 6 MONTH) < NOW()";
+    $archive_sql = "SELECT * FROM bills WHERE tenant_id = :customer_id AND status = 'paid' AND DATE_ADD(updated_at, INTERVAL 6 MONTH) < NOW()";
     $archive_sql .= " ORDER BY billing_month DESC";
-    
     $archive_stmt = $conn->prepare($archive_sql);
-    $archive_stmt->execute(['tenant_id' => $tenant_id]);
+    $archive_stmt->execute(['customer_id' => $customer_id]);
     $archive_bills = $archive_stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // Get total balance
-    $stmt = $conn->prepare("SELECT SUM(amount_due - amount_paid) as balance FROM bills WHERE tenant_id = :tenant_id");
-    $stmt->execute(['tenant_id' => $tenant_id]);
+    $stmt = $conn->prepare("SELECT SUM(amount_due - amount_paid) as balance FROM bills WHERE tenant_id = :customer_id");
+    $stmt->execute(['customer_id' => $customer_id]);
     $result = $stmt->fetch(PDO::FETCH_ASSOC);
     $balance = ($result && $result['balance'] !== null) ? (float)$result['balance'] : 0;
 
     // Get unpaid bills count
-    $stmt = $conn->prepare("SELECT COUNT(*) as count FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending', 'unpaid', 'overdue')");
-    $stmt->execute(['tenant_id' => $tenant_id]);
+    $stmt = $conn->prepare("SELECT COUNT(*) as count FROM bills WHERE tenant_id = :customer_id AND status IN ('pending', 'unpaid', 'overdue')");
+    $stmt->execute(['customer_id' => $customer_id]);
     $result = $stmt->fetch(PDO::FETCH_ASSOC);
     $unpaid_count = ($result && $result['count']) ? (int)$result['count'] : 0;
 
     // Get next due date
-    $stmt = $conn->prepare("SELECT MIN(due_date) as next_due FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending', 'unpaid')");
-    $stmt->execute(['tenant_id' => $tenant_id]);
+    $stmt = $conn->prepare("SELECT MIN(due_date) as next_due FROM bills WHERE tenant_id = :customer_id AND status IN ('pending', 'unpaid')");
+    $stmt->execute(['customer_id' => $customer_id]);
     $result = $stmt->fetch(PDO::FETCH_ASSOC);
     $next_due = ($result && $result['next_due']) ? $result['next_due'] : null;
 
@@ -79,10 +79,10 @@ try {
             b.amount_due
         FROM payment_transactions pt
         JOIN bills b ON pt.bill_id = b.id
-        WHERE pt.tenant_id = :tenant_id AND pt.payment_status = 'pending'
+        WHERE pt.tenant_id = :customer_id AND pt.payment_status = 'pending'
         ORDER BY pt.payment_date DESC
     ");
-    $pending_stmt->execute(['tenant_id' => $tenant_id]);
+    $pending_stmt->execute(['customer_id' => $customer_id]);
     $pending_payments = $pending_stmt->fetchAll(PDO::FETCH_ASSOC);
     $pending_count = count($pending_payments);
 } catch (Exception $e) {
@@ -209,6 +209,23 @@ try {
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
+                        <!-- Always show Remaining Balance card at the top -->
+                        <?php
+                        // Calculate unpaid room balance (verified/approved payments only)
+                        $bills_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :customer_id AND status IN ('pending','partial','unpaid','overdue')");
+                        $bills_stmt->execute(['customer_id' => $customer_id]);
+                        $bills = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
+                        $unpaid_room_total = 0.0;
+                        foreach ($bills as $bill) {
+                            $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                            $sum_stmt->execute(['bill_id' => $bill['id']]);
+                            $live_paid = floatval($sum_stmt->fetchColumn());
+                            $unpaid_room_total += max(0, floatval($bill['amount_due']) - $live_paid);
+                        }
+                        ?>
+                        <div class="row mb-4">
+                            <!-- Removed duplicate Remaining Balance card at the top -->
+                        </div>
                 <!-- Header -->
                 <div class="header-banner">
                     <div class="d-flex justify-content-between align-items-start">
@@ -219,103 +236,141 @@ try {
                         <a href="tenant_make_payment.php" class="btn btn-light btn-lg">
                             <i class="bi bi-credit-card"></i> Make a Payment
                         </a>
+					</div>
+				</div>
+
+                <!-- Additional Charges Card (with accurate remaining balance calculation) -->
+                <?php
+                // Use $bills from the main query at the top of the file (already filtered for active/unpaid)
+
+                // Fetch all completed amenities for this tenant
+                $amenities_stmt = $conn->prepare("SELECT id, category, cost, billed, billed_bill_id FROM maintenance_requests WHERE tenant_id = :customer_id AND status = 'completed' AND cost > 0 ORDER BY submitted_date DESC");
+                $amenities_stmt->execute(['customer_id' => $customer_id]);
+                $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                // Prepare Additional Charges (amenities that were completed and billed)
+                $additional_items = [];
+                $additional_total_unpaid = 0.0;
+                foreach ($amenities as $a) {
+                    $bill_id = $a['billed'] && $a['billed_bill_id'] ? $a['billed_bill_id'] : null;
+                    $billing_month = null;
+                    $bill_status = 'not_billed';
+                    $bill_remaining = null;
+                    if ($bill_id) {
+                        $billLookupStmt = $conn->prepare("SELECT id, billing_month, amount_due, amount_paid, status FROM bills WHERE id = :bill_id LIMIT 1");
+                        $billLookupStmt->execute(['bill_id' => $bill_id]);
+                        $bill = $billLookupStmt->fetch(PDO::FETCH_ASSOC);
+                        if ($bill) {
+                            $billing_month = $bill['billing_month'];
+                            $bill_status = $bill['status'];
+                            // Use live sum of verified/approved payments for this bill
+                            $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                            $sum_stmt->execute(['bill_id' => $bill['id']]);
+                            $paid = floatval($sum_stmt->fetchColumn());
+                            $bill_remaining = max(0, floatval($bill['amount_due']) - $paid);
+                        }
+                    }
+                    $alloc = $bill_remaining !== null ? min(floatval($a['cost']), $bill_remaining) : 0;
+                    if ($alloc > 0) $additional_total_unpaid += $alloc;
+                    $additional_items[] = [
+                        'request_id' => $a['id'],
+                        'category' => $a['category'],
+                        'cost' => floatval($a['cost']),
+                        'bill_id' => $bill_id,
+                        'billing_month' => $billing_month,
+                        'bill_status' => $bill_status,
+                        'bill_remaining' => $bill_remaining,
+                        'unpaid_alloc' => $alloc
+                    ];
+                }
+
+                // Calculate unpaid room balance (verified/approved payments only)
+                $unpaid_room_total = 0.0;
+                foreach ($bills as $bill) {
+                    $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                    $sum_stmt->execute(['bill_id' => $bill['id']]);
+                    $live_paid = floatval($sum_stmt->fetchColumn());
+                    $unpaid_room_total += max(0, floatval($bill['amount_due']) - $live_paid);
+                }
+
+                // Grand Total Due = unpaid room + unpaid amenities (unpaid_alloc)
+                $grand_total_due = $unpaid_room_total + $additional_total_unpaid;
+                ?>
+                <div class="row g-4 mb-4">
+                    <div class="col-12">
+                        <div class="card bill-card border-info mb-4">
+                            <div class="card-body">
+                                <h5 class="card-title mb-1 text-info"><i class="bi bi-cart-plus"></i> Additional Charges & Remaining Balance</h5>
+                                <div class="mb-2">
+                                    <small class="text-muted d-block">Remaining Balance for Stay (Room Only)</small>
+                                    <?php
+                                    // Show the remaining balance for the most recent unpaid bill (room only, no amenities), regardless of stay validity
+                                    $recent_bill_balance = 0.0;
+                                    if (!empty($bills)) {
+                                        usort($bills, function($a, $b) {
+                                            $a_time = strtotime($a['billing_month']);
+                                            $b_time = strtotime($b['billing_month']);
+                                            if ($b_time === $a_time) {
+                                                return intval($b['id']) - intval($a['id']);
+                                            }
+                                            return $b_time - $a_time;
+                                        });
+                                        foreach ($bills as $bill) {
+                                            $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                                            $sum_stmt->execute(['bill_id' => $bill['id']]);
+                                            $live_paid = floatval($sum_stmt->fetchColumn());
+                                            $recent_bill_balance = floatval($bill['amount_due']) - $live_paid;
+                                            if ($recent_bill_balance < 0) $recent_bill_balance = 0.0;
+                                            break;
+                                        }
+                                    }
+                                    ?>
+                                    <span class="fw-bold">Remaining Balance: </span>
+                                    <strong class="text-dark">₱<?php echo number_format($recent_bill_balance, 2); ?></strong>
+                                    <?php
+                                    // Calculate Grand Total Due as remaining balance + additional charges
+                                    $grand_total_due = $recent_bill_balance;
+                                    foreach ($additional_items as $ai) {
+                                        $grand_total_due += floatval($ai['cost']);
+                                    }
+                                    ?>
+                                </div>
+                                <?php if (count($amenities) > 0): ?>
+                                    <ul class="list-group mb-3">
+                                        <?php foreach ($amenities as $a): ?>
+                                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                                <span><?php echo htmlspecialchars($a['category']); ?></span>
+                                                <span class="fw-bold">₱<?php echo number_format($a['cost'], 2); ?></span>
+                                            </li>
+                                        <?php endforeach; ?>
+                                    </ul>
+                                    <?php
+                                    // Fix: define $total_amenities as the sum of all amenity costs (matches $additional_items)
+                                    $total_amenities = 0.0;
+                                    foreach ($additional_items as $ai) {
+                                        $total_amenities += floatval($ai['cost']);
+                                    }
+                                    ?>
+                                    <div class="d-flex justify-content-end mb-2">
+                                        <span class="me-2 fw-bold">Total Additional Charges:</span>
+                                        <span class="fw-bold text-primary">₱<?php echo number_format($total_amenities, 2); ?></span>
+                                    </div>
+                                <?php else: ?>
+                                    <div class="alert alert-info mb-0">No additional charges found.</div>
+                                <?php endif; ?>
+                                <hr>
+                                <div class="d-flex justify-content-end">
+                                    <span class="me-2 fw-bold">Grand Total Due:</span>
+                                    <span class="fw-bold text-danger">₱<?php echo number_format($grand_total_due, 2); ?></span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
                 <?php if (isset($error)): ?>
                     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
-                <?php endif; ?>
 
-                <!-- Key Metrics -->
-                <div class="row g-4 mb-4">
-                    <div class="col-md-6 col-lg-3">
-                        <div class="card metric-card bg-danger bg-opacity-10">
-                            <div class="card-body">
-                                <p class="text-muted mb-2"><i class="bi bi-exclamation-circle"></i> Current Balance</p>
-                                <p class="metric-value text-danger">₱<?php echo number_format(abs($balance), 2); ?></p>
-                                <small class="text-muted"><?php echo $balance >= 0 ? 'Amount due' : 'Credit'; ?></small>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-md-6 col-lg-3">
-                        <div class="card metric-card bg-warning bg-opacity-10">
-                            <div class="card-body">
-                                <p class="text-muted mb-2"><i class="bi bi-clock"></i> Unpaid Bills</p>
-                                <p class="metric-value text-warning"><?php echo $unpaid_count; ?></p>
-                                <small class="text-muted">Pending payment</small>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-md-6 col-lg-3">
-                        <div class="card metric-card bg-info bg-opacity-10">
-                            <div class="card-body">
-                                <p class="text-muted mb-2"><i class="bi bi-calendar"></i> Next Due Date</p>
-                                <p class="metric-value text-info"><?php echo $next_due ? date('M d', strtotime($next_due)) : 'N/A'; ?></p>
-                                <small class="text-muted"><?php echo $next_due ? date('Y', strtotime($next_due)) : ''; ?></small>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-md-6 col-lg-3">
-                        <div class="card metric-card bg-success bg-opacity-10">
-                            <div class="card-body">
-                                <p class="text-muted mb-2"><i class="bi bi-check-circle"></i> Total Bills</p>
-                                <p class="metric-value text-success"><?php echo count($bills); ?></p>
-                                <small class="text-muted">All time</small>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Archive Tab Navigation -->
-                <div class="mb-4">
-                    <ul class="nav nav-pills" style="gap: 5px;">
-                        <li class="nav-item">
-                            <button type="button" class="nav-link <?php echo $view === 'active' ? 'active' : ''; ?> btn btn-outline-primary" 
-                                    onclick="switchView('active')">
-                                <i class="bi bi-clock-history"></i> Active Bills
-                            </button>
-                        </li>
-                        <li class="nav-item">
-                            <button type="button" class="nav-link <?php echo $view === 'archive' ? 'active' : ''; ?> btn btn-outline-secondary" 
-                                    onclick="switchView('archive')">
-                                <i class="bi bi-archive"></i> Archive 
-                                <?php if (count($archive_bills) > 0): ?>
-                                    <span class="badge bg-secondary ms-2"><?php echo count($archive_bills); ?></span>
-                                <?php endif; ?>
-                            </button>
-                        </li>
-                    </ul>
-                </div>
-
-                <!-- Filter Section -->
-                <div class="card mb-4">
-                    <div class="card-body">
-                        <form method="GET" class="row g-3">
-                            <div class="col-md-6">
-                                <label for="status" class="form-label">Filter by Status</label>
-                                <select class="form-select" id="status" name="status">
-                                    <option value="">All Statuses</option>
-                                    <option value="pending" <?php echo $filter_status === 'pending' ? 'selected' : ''; ?>>Pending</option>
-                                    <option value="unpaid" <?php echo $filter_status === 'unpaid' ? 'selected' : ''; ?>>Unpaid</option>
-                                    <option value="partial" <?php echo $filter_status === 'partial' ? 'selected' : ''; ?>>Partial</option>
-                                    <option value="paid" <?php echo $filter_status === 'paid' ? 'selected' : ''; ?>>Paid</option>
-                                    <option value="overdue" <?php echo $filter_status === 'overdue' ? 'selected' : ''; ?>>Overdue</option>
-                                </select>
-                            </div>
-                            <div class="col-md-6 d-flex align-items-end gap-2">
-                                <button type="submit" class="btn btn-primary">
-                                    <i class="bi bi-filter"></i> Filter
-                                </button>
-                                <a href="tenant_bills.php" class="btn btn-secondary">
-                                    <i class="bi bi-arrow-clockwise"></i> Reset
-                                </a>
-                            </div>
-                        </form>
-                    </div>
-                </div>
 
                 <!-- Pending Payments Section -->
                 <?php if ($pending_count > 0): ?>
@@ -352,45 +407,54 @@ try {
                                 </div>
                             </div>
                         </div>
-                        <?php endforeach; ?>
                     </div>
                 </div>
-                <?php endif; ?>
 
                 <!-- Active Bills View -->
                 <div id="activeView" style="display: <?php echo $view === 'active' ? 'block' : 'none'; ?>;">
                     <!-- Bills List -->
                     <div class="row g-4">
-                        <?php if (!empty($bills)): ?>
-                            <?php foreach ($bills as $bill): ?>
-                                <div class="col-md-6">
-                                    <div class="card bill-card">
-                                    <div class="card-body">
-                                        <div class="d-flex justify-content-between align-items-start mb-3">
-                                            <div>
-                                                <h5 class="card-title mb-1">
-                                                    <?php echo date('F Y', strtotime($bill['billing_month'])); ?>
-                                                </h5>
-                                                <small class="text-muted">
-                                                    Due: <?php echo date('M d, Y', strtotime($bill['due_date'])); ?>
-                                                </small>
-                                            </div>
-                                            <span class="badge bg-<?php 
-                                                $status = $bill['status'];
-                                                echo $status === 'paid' ? 'success' : ($status === 'overdue' ? 'danger' : ($status === 'partial' ? 'info' : 'warning'));
-                                            ?>">
-                                                <?php echo ucfirst($bill['status']); ?>
-                                            </span>
+                        <?php
+                        // Calculate total additional charges (all amenities)
+                        // Fetch all amenities for this tenant
+                        $amenities_stmt = $conn->prepare("SELECT category, cost FROM maintenance_requests WHERE tenant_id = :customer_id AND status = 'completed' AND cost > 0 ORDER BY submitted_date DESC");
+                        $amenities_stmt->execute(['customer_id' => $customer_id]);
+                        $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
+                        $total_amenities = 0.0;
+                        foreach ($amenities as $a) {
+                            $total_amenities += floatval($a['cost']);
+                        }
+                        ?>
+                        <div class="col-12">
+                            <div class="card bill-card border-info mb-4">
+                                <div class="card-body">
+                                    <h5 class="card-title mb-1 text-info"><i class="bi bi-cart-plus"></i> Additional Charges</h5>
+                                    <?php if (count($amenities) > 0): ?>
+                                        <ul class="list-group mb-3">
+                                            <?php foreach ($amenities as $a): ?>
+                                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                                    <span><?php echo htmlspecialchars($a['category']); ?></span>
+                                                    <span class="fw-bold">₱<?php echo number_format($a['cost'], 2); ?></span>
+                                                </li>
+                                            <?php endforeach; ?>
+                                        </ul>
+                                        <div class="d-flex justify-content-end">
+                                            <span class="me-2 fw-bold">Total:</span>
+                                            <span class="fw-bold text-primary">₱<?php echo number_format($total_amenities, 2); ?></span>
                                         </div>
-
-                                        <div class="row mb-3">
-                                            <div class="col-6">
-                                                <small class="text-muted d-block">Amount Due</small>
-                                                <strong class="text-dark">₱<?php echo number_format($bill['amount_due'], 2); ?></strong>
+                                    <?php else: ?>
+                                        <div class="alert alert-info mb-0">No additional charges found.</div>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        </div>
+                                                <?php if ($checkin && $checkout): ?>
+                                                    <br><small class="text-muted">Stay: <?php echo date('M d, Y', strtotime($checkin)); ?> - <?php echo date('M d, Y', strtotime($checkout)); ?></small>
+                                                <?php endif; ?>
                                             </div>
                                             <div class="col-6">
                                                 <small class="text-muted d-block">Amount Paid</small>
-                                                <strong class="text-success">₱<?php echo number_format($bill['amount_paid'], 2); ?></strong>
+                                                <strong class="text-success">₱<?php echo number_format($amount_paid_live, 2); ?></strong>
                                             </div>
                                         </div>
 
@@ -417,20 +481,22 @@ try {
                                         <?php endif; ?>
 
                                         <?php if (!empty($bill['notes'])): ?>
-                                            <div class="mt-3 p-2 bg-light rounded">
-                                                <small class="text-muted">Notes: <?php echo htmlspecialchars($bill['notes']); ?></small>
-                                            </div>
+                                            <?php if (
+                                                ($bill['status'] === 'pending' || $bill['status'] === 'pending_payment') &&
+                                                stripos($bill['notes'], 'ADVANCE PAYMENT') !== false
+                                            ): ?>
+                                                <div class="mt-3">
+                                                    <a href="tenant_make_payment.php?bill_id=<?php echo $bill['id']; ?>" class="btn btn-primary w-100">
+                                                        <i class="bi bi-credit-card"></i> Pay Downpayment
+                                                    </a>
+                                                </div>
+                                            <?php endif; ?>
                                         <?php endif; ?>
                                     </div>
                                 </div>
                             </div>
                         <?php endforeach; ?>
                     <?php else: ?>
-                        <div class="col-12">
-                            <div class="alert alert-info">
-                                <i class="bi bi-info-circle"></i> No active bills found.
-                            </div>
-                        </div>
                     <?php endif; ?>
                     </div>
                 </div><!-- End activeView -->
@@ -500,6 +566,7 @@ try {
                         <?php endif; ?>
                         </div>
                     </div><!-- End archiveView -->
+                <?php endif; ?>
             </main>
         </div>
     </div>

@@ -13,7 +13,7 @@ $tenant_id = $_SESSION["tenant_id"];
 try {
     // Get payment history (excluding $0 transactions used for tracking)
     $stmt = $conn->prepare("
-        SELECT pt.*, b.billing_month, b.amount_due
+        SELECT pt.*, b.billing_month, b.amount_due, b.room_id as bill_room_id
         FROM payment_transactions pt
         JOIN bills b ON pt.bill_id = b.id
         WHERE pt.tenant_id = :tenant_id AND pt.payment_amount > 0
@@ -322,7 +322,7 @@ try {
                                     <thead>
                                         <tr>
                                             <th>Date</th>
-                                            <th>Bill Month</th>
+                                            <th>Stay Duration</th>
                                             <th class="text-end">Amount</th>
                                             <th>Method</th>
                                             <th>Notes</th>
@@ -334,7 +334,22 @@ try {
                                                 <td>
                                                     <strong><?php echo date('M d, Y', strtotime($payment['payment_date'])); ?></strong>
                                                 </td>
-                                                <td><?php echo date('F Y', strtotime($payment['billing_month'])); ?></td>
+                                                <td>
+                                                    <?php
+                                                    // Fetch stay duration from room_requests
+                                                    $room_id = isset($payment['room_id']) ? $payment['room_id'] : (isset($payment['bill_room_id']) ? $payment['bill_room_id'] : null);
+                                                    $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                                    $room_req_stmt->execute(['tenant_id' => $payment['tenant_id'], 'room_id' => $room_id]);
+                                                    $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                                    $checkin = $dates ? $dates['checkin_date'] : null;
+                                                    $checkout = $dates ? $dates['checkout_date'] : null;
+                                                    if ($checkin && $checkout) {
+                                                        echo date('M d, Y', strtotime($checkin)) . ' - ' . date('M d, Y', strtotime($checkout));
+                                                    } else {
+                                                        echo date('F Y', strtotime($payment['billing_month']));
+                                                    }
+                                                    ?>
+                                                </td>
                                                 <td class="text-end">
                                                     <span class="badge bg-success">₱<?php echo number_format($payment['payment_amount'], 2); ?></span>
                                                 </td>

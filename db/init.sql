@@ -1,3 +1,7 @@
+-- DATA CLEANUP: Approve all pending/awaiting review payment transactions (run once if needed)
+UPDATE payment_transactions
+SET payment_status = 'approved'
+WHERE payment_status IN ('pending', 'awaiting review', 'awaiting_approval', 'awaiting verification');
 CREATE DATABASE IF NOT EXISTS bamint;
 USE bamint;
 
@@ -21,7 +25,6 @@ CREATE TABLE IF NOT EXISTS `rooms` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE IF NOT EXISTS `tenants` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `name` varchar(255) NOT NULL,
   `email` varchar(255) NOT NULL,
@@ -33,12 +36,52 @@ CREATE TABLE IF NOT EXISTS `tenants` (
   `status` varchar(50) NOT NULL DEFAULT 'active',
   PRIMARY KEY (`id`),
   KEY `room_id` (`room_id`),
-  CONSTRAINT `tenants_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`)
+  CONSTRAINT `customers_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Hotel Maintenance Management Tables
+CREATE TABLE IF NOT EXISTS maintenance_requests (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  room_id INT NOT NULL,
+  guest_id INT NOT NULL,
+  category ENUM('Plumbing','Electrical','AC','Furniture','Other') NOT NULL,
+  description TEXT NOT NULL,
+  image VARCHAR(255),
+  urgency ENUM('Low','Medium','High') NOT NULL DEFAULT 'Low',
+  status ENUM('Pending','In Progress','Completed') NOT NULL DEFAULT 'Pending',
+  assigned_staff_id INT,
+  notes TEXT,
+  estimated_cost DECIMAL(10,2),
+  actual_cost DECIMAL(10,2),
+  materials_used TEXT,
+  chargeable_to ENUM('guest','hotel') DEFAULT 'hotel',
+  date_submitted DATETIME DEFAULT CURRENT_TIMESTAMP,
+  date_completed DATETIME,
+  FOREIGN KEY (room_id) REFERENCES rooms(id),
+  FOREIGN KEY (guest_id) REFERENCES customers(id),
+  FOREIGN KEY (assigned_staff_id) REFERENCES admins(id)
+);
+
+CREATE TABLE IF NOT EXISTS maintenance_history (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  maintenance_request_id INT NOT NULL,
+  moved_to_history_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (maintenance_request_id) REFERENCES maintenance_requests(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS guest_additional_charges (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  guest_id INT NOT NULL,
+  description VARCHAR(255) NOT NULL,
+  amount DECIMAL(10,2) NOT NULL,
+  is_paid TINYINT(1) DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (guest_id) REFERENCES customers(id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS `bills` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
-  `tenant_id` int(11) NOT NULL,
+  `customer_id` int(11) NOT NULL,
   `room_id` int(11) NOT NULL,
   `billing_month` date NOT NULL,
   `amount_due` decimal(10,2) NOT NULL,
@@ -51,18 +94,18 @@ CREATE TABLE IF NOT EXISTS `bills` (
   `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `tenant_id` (`tenant_id`),
+  KEY `customer_id` (`customer_id`),
   KEY `room_id` (`room_id`),
   KEY `billing_month` (`billing_month`),
   KEY `status` (`status`),
-  CONSTRAINT `bills_ibfk_1` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `bills_ibfk_1` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`) ON DELETE CASCADE,
   CONSTRAINT `bills_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `payment_transactions` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `bill_id` int(11) NOT NULL,
-  `tenant_id` int(11) NOT NULL,
+  `customer_id` int(11) NOT NULL,
   `payment_amount` decimal(10,2) NOT NULL,
   `payment_method` varchar(100),
   `payment_type` varchar(50) DEFAULT 'cash',
@@ -76,17 +119,17 @@ CREATE TABLE IF NOT EXISTS `payment_transactions` (
   `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `bill_id` (`bill_id`),
-  KEY `tenant_id` (`tenant_id`),
+  KEY `customer_id` (`customer_id`),
   KEY `payment_date` (`payment_date`),
   KEY `payment_status` (`payment_status`),
   CONSTRAINT `payment_transactions_ibfk_1` FOREIGN KEY (`bill_id`) REFERENCES `bills` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `payment_transactions_ibfk_2` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `payment_transactions_ibfk_2` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`) ON DELETE CASCADE,
   CONSTRAINT `payment_transactions_ibfk_3` FOREIGN KEY (`verified_by`) REFERENCES `admins` (`id`) ON SET NULL,
   CONSTRAINT `payment_transactions_ibfk_4` FOREIGN KEY (`recorded_by`) REFERENCES `admins` (`id`) ON SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS `maintenance_requests` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
-  `tenant_id` int(11) NOT NULL,
+  `customer_id` int(11) NOT NULL,
   `room_id` int(11) NOT NULL,
   `category` varchar(100) NOT NULL,
   `description` text NOT NULL,
@@ -101,25 +144,25 @@ CREATE TABLE IF NOT EXISTS `maintenance_requests` (
   `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `tenant_id` (`tenant_id`),
+  KEY `customer_id` (`customer_id`),
   KEY `room_id` (`room_id`),
   KEY `assigned_to` (`assigned_to`),
   KEY `status` (`status`),
   KEY `priority` (`priority`),
-  CONSTRAINT `maintenance_requests_ibfk_1` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `maintenance_requests_ibfk_1` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`) ON DELETE CASCADE,
   CONSTRAINT `maintenance_requests_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
   CONSTRAINT `maintenance_requests_ibfk_3` FOREIGN KEY (`assigned_to`) REFERENCES `admins` (`id`) ON SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `room_requests` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
-  `tenant_id` int(11) NOT NULL,
+  `customer_id` int(11) NOT NULL,
   `room_id` int(11) NOT NULL,
-  `tenant_count` int(11) DEFAULT 1,
-  `tenant_info_name` varchar(255),
-  `tenant_info_email` varchar(255),
-  `tenant_info_phone` varchar(20),
-  `tenant_info_address` text,
+  `customer_count` int(11) DEFAULT 1,
+  `customer_info_name` varchar(255),
+  `customer_info_email` varchar(255),
+  `customer_info_phone` varchar(20),
+  `customer_info_address` text,
   `request_date` timestamp DEFAULT CURRENT_TIMESTAMP,
   `status` varchar(50) NOT NULL DEFAULT 'pending',
   `notes` text,
@@ -127,17 +170,17 @@ CREATE TABLE IF NOT EXISTS `room_requests` (
   `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `approved_date` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
-  KEY `tenant_id` (`tenant_id`),
+  KEY `customer_id` (`customer_id`),
   KEY `room_id` (`room_id`),
   KEY `status` (`status`),
   KEY `request_date` (`request_date`),
-  CONSTRAINT `room_requests_ibfk_1` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `room_requests_ibfk_1` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`) ON DELETE CASCADE,
   CONSTRAINT `room_requests_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE IF NOT EXISTS `co_tenants` (
+CREATE TABLE IF NOT EXISTS `co_customers` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
-  `primary_tenant_id` int(11) NOT NULL,
+  `primary_customer_id` int(11) NOT NULL,
   `room_id` int(11) NOT NULL,
   `name` varchar(255) NOT NULL,
   `email` varchar(255),
@@ -147,16 +190,16 @@ CREATE TABLE IF NOT EXISTS `co_tenants` (
   `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `primary_tenant_id` (`primary_tenant_id`),
+  KEY `primary_customer_id` (`primary_customer_id`),
   KEY `room_id` (`room_id`),
-  CONSTRAINT `co_tenants_ibfk_1` FOREIGN KEY (`primary_tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `co_tenants_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE
+  CONSTRAINT `co_customers_ibfk_1` FOREIGN KEY (`primary_customer_id`) REFERENCES `customers` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `co_customers_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `notifications` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
-  `recipient_type` varchar(50) NOT NULL COMMENT 'admin or tenant',
-  `recipient_id` int(11) NOT NULL COMMENT 'admin_id or tenant_id',
+  `recipient_type` varchar(50) NOT NULL COMMENT 'admin or customer',
+  `recipient_id` int(11) NOT NULL COMMENT 'admin_id or customer_id',
   `notification_type` varchar(100) NOT NULL COMMENT 'room_added, payment_made, maintenance_approved, room_request_approved, payment_verified',
   `title` varchar(255) NOT NULL,
   `message` text,
@@ -176,10 +219,10 @@ CREATE TABLE IF NOT EXISTS `notifications` (
 
 CREATE TABLE IF NOT EXISTS `messages` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
-  `sender_type` varchar(50) NOT NULL COMMENT 'admin or tenant',
-  `sender_id` int(11) NOT NULL COMMENT 'admin_id or tenant_id',
-  `recipient_type` varchar(50) NOT NULL COMMENT 'admin or tenant',
-  `recipient_id` int(11) NOT NULL COMMENT 'admin_id or tenant_id',
+  `sender_type` varchar(50) NOT NULL COMMENT 'admin or customer',
+  `sender_id` int(11) NOT NULL COMMENT 'admin_id or customer_id',
+  `recipient_type` varchar(50) NOT NULL COMMENT 'admin or customer',
+  `recipient_id` int(11) NOT NULL COMMENT 'admin_id or customer_id',
   `subject` varchar(255) NOT NULL,
   `message` text NOT NULL,
   `related_type` varchar(100) COMMENT 'bill, payment_transaction, maintenance_request, etc',
@@ -195,3 +238,89 @@ CREATE TABLE IF NOT EXISTS `messages` (
   KEY `created_at` (`created_at`),
   KEY `related_type_id` (`related_type`, `related_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Payment Management Tables
+CREATE TABLE IF NOT EXISTS `payments` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `customer_id` int(11) NOT NULL,
+  `bill_id` int(11) NOT NULL,
+  `amount` decimal(10,2) NOT NULL,
+  `payment_date` date NOT NULL,
+  `payment_method` varchar(100),
+  `payment_status` varchar(50) DEFAULT 'pending',
+  `proof_of_payment` varchar(255),
+  `verified_by` int(11),
+  `verification_date` datetime,
+  `notes` text,
+  `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `customer_id` (`customer_id`),
+  KEY `bill_id` (`bill_id`),
+  KEY `payment_status` (`payment_status`),
+  CONSTRAINT `payments_ibfk_1` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `payments_ibfk_2` FOREIGN KEY (`bill_id`) REFERENCES `bills` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `payments_ibfk_3` FOREIGN KEY (`verified_by`) REFERENCES `admins` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `guest_balances` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `customer_id` int(11) NOT NULL,
+  `balance` decimal(10,2) NOT NULL DEFAULT 0,
+  `last_updated` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `customer_id` (`customer_id`),
+  CONSTRAINT `guest_balances_ibfk_1` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `customers` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) NOT NULL,
+  `email` varchar(255) NOT NULL,
+  `phone` varchar(20) NOT NULL,
+  `id_number` varchar(255),
+  `room_id` int(11) NOT NULL,
+  `start_date` date NOT NULL,
+  `end_date` date DEFAULT NULL,
+  `status` varchar(50) NOT NULL DEFAULT 'active',
+  PRIMARY KEY (`id`),
+  KEY `room_id` (`room_id`),
+  CONSTRAINT `customers_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `bookings` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `customer_id` int(11) NOT NULL,
+  `room_id` int(11) NOT NULL,
+  `checkin_date` date DEFAULT NULL,
+  `checkout_date` date DEFAULT NULL,
+  `status` varchar(50) DEFAULT 'booked',
+  `amount_due` decimal(10,2) DEFAULT 0,
+  `amount_paid` decimal(10,2) DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `customer_id` (`customer_id`),
+  KEY `room_id` (`room_id`),
+  CONSTRAINT `bookings_ibfk_1` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `bookings_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Migration: Add bill_items table and maintenance_requests billed fields
+-- Add this section if you want the schema to include itemized billing for amenity/maintenance charges
+CREATE TABLE IF NOT EXISTS `bill_items` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `bill_id` int(11) NOT NULL,
+  `request_id` int(11) DEFAULT NULL,
+  `tenant_id` int(11) NOT NULL,
+  `description` text,
+  `amount` decimal(10,2) NOT NULL,
+  `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `bill_id` (`bill_id`),
+  KEY `request_id` (`request_id`),
+  CONSTRAINT `bill_items_ibfk_1` FOREIGN KEY (`bill_id`) REFERENCES `bills` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Add billed flags to maintenance_requests (MySQL 8+ supports IF NOT EXISTS; if your server is older, run the ALTERs only when necessary)
+ALTER TABLE `maintenance_requests` ADD COLUMN IF NOT EXISTS `billed` TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE `maintenance_requests` ADD COLUMN IF NOT EXISTS `billed_bill_id` INT(11) DEFAULT NULL;
+
+-- End of init additions

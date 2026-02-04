@@ -1,34 +1,34 @@
 <?php
 session_start();
 
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "tenant") {
-    header("location: index.php?role=tenant");
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "customer") {
+    header("location: index.php?role=customer");
     exit;
 }
 
 require_once "db/database.php";
 
-$tenant_id = $_SESSION["tenant_id"];
+$customer_id = $_SESSION["customer_id"];
 $success_msg = "";
 $error_msg = "";
 
 try {
-    // Get tenant information
+    // Get customer information
     $stmt = $conn->prepare("
         SELECT t.*, r.room_number, r.room_type, r.rate
         FROM tenants t
         LEFT JOIN rooms r ON t.room_id = r.id
-        WHERE t.id = :tenant_id
+        WHERE t.id = :customer_id
     ");
-    $stmt->execute(['tenant_id' => $tenant_id]);
-    $tenant = $stmt->fetch(PDO::FETCH_ASSOC);
+    $stmt->execute(['customer_id' => $customer_id]);
+    $customer = $stmt->fetch(PDO::FETCH_ASSOC);
 
     // Get account info
     $stmt = $conn->prepare("
-        SELECT email FROM tenant_accounts
-        WHERE tenant_id = :tenant_id
+        SELECT email FROM customer_accounts
+        WHERE customer_id = :customer_id
     ");
-    $stmt->execute(['tenant_id' => $tenant_id]);
+    $stmt->execute(['customer_id' => $customer_id]);
     $account = $stmt->fetch(PDO::FETCH_ASSOC);
 
 } catch (Exception $e) {
@@ -61,10 +61,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
     } else {
         // Check if email is already taken by another account
         $stmt = $conn->prepare("
-            SELECT id FROM tenant_accounts 
-            WHERE email = :email AND tenant_id != :tenant_id
+            SELECT id FROM customer_accounts 
+            WHERE email = :email AND customer_id != :customer_id
         ");
-        $stmt->execute(['email' => $email, 'tenant_id' => $tenant_id]);
+        $stmt->execute(['email' => $email, 'customer_id' => $customer_id]);
         if ($stmt->rowCount() > 0) {
             $validation_errors[] = "This email is already registered to another account.";
         }
@@ -72,28 +72,28 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
 
     if (empty($validation_errors)) {
         try {
-            // Update tenant info
+            // Update customer info
             $stmt = $conn->prepare("
                 UPDATE tenants 
                 SET name = :name, phone = :phone
-                WHERE id = :tenant_id
+                WHERE id = :customer_id
             ");
             $stmt->execute([
                 'name' => $name,
                 'phone' => $phone,
-                'tenant_id' => $tenant_id
+                'customer_id' => $customer_id
             ]);
 
-            // Update email in tenant_accounts
+            // Update email in customer_accounts
             $stmt = $conn->prepare("
-                UPDATE tenant_accounts 
+                UPDATE customer_accounts 
                 SET email = :email
-                WHERE tenant_id = :tenant_id
+                WHERE customer_id = :customer_id
             ");
             
             $stmt->execute([
                 'email' => $email,
-                'tenant_id' => $tenant_id
+                'customer_id' => $customer_id
             ]);
 
             // Update session
@@ -102,21 +102,21 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
 
             $success_msg = "Profile updated successfully!";
 
-            // Refresh tenant data
+            // Refresh customer data
             $stmt = $conn->prepare("
                 SELECT t.*, r.room_number, r.room_type, r.rate
                 FROM tenants t
                 LEFT JOIN rooms r ON t.room_id = r.id
-                WHERE t.id = :tenant_id
+                WHERE t.id = :customer_id
             ");
-            $stmt->execute(['tenant_id' => $tenant_id]);
-            $tenant = $stmt->fetch(PDO::FETCH_ASSOC);
+            $stmt->execute(['customer_id' => $customer_id]);
+            $customer = $stmt->fetch(PDO::FETCH_ASSOC);
 
             $stmt = $conn->prepare("
-                SELECT email FROM tenant_accounts
-                WHERE tenant_id = :tenant_id
+                SELECT email FROM customer_accounts
+                WHERE customer_id = :customer_id
             ");
-            $stmt->execute(['tenant_id' => $tenant_id]);
+            $stmt->execute(['customer_id' => $customer_id]);
             $account = $stmt->fetch(PDO::FETCH_ASSOC);
 
         } catch (Exception $e) {

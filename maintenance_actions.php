@@ -120,7 +120,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             // If status changed to completed and cost exists, add to tenant's next bill
             if ($status === 'completed' && $cost && $maintenance) {
-                addMaintenanceCostToBill($conn, $maintenance['tenant_id'], $cost);
+                // Include request id and category so the bill notes include the reference
+                addMaintenanceCostToBill($conn, $maintenance['tenant_id'], $cost, $id, $category);
             }
             
             // Notify tenant about maintenance status change

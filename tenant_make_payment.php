@@ -23,19 +23,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
     // Validate input
     $errors = [];
-    if ($bill_id <= 0) $errors[] = "Please select a bill";
+    if ($bill_id < 0) $errors[] = "Please select a bill";
     if (!in_array($payment_type, ['online', 'cash'])) $errors[] = "Invalid payment type";
     if ($payment_amount <= 0) $errors[] = "Payment amount must be greater than 0";
     if (empty($payment_method)) $errors[] = "Please select a payment method";
 
-    // Validate bill exists and belongs to tenant
-    if ($bill_id > 0) {
+    // If bill_id is 0, allow payment for advance payment (room request not yet admin approved)
+    if ($bill_id == 0 && isset($_GET['room_request_id'])) {
+        // Will create bill on the fly below if payment is submitted
+        $bill = null;
+    } elseif ($bill_id > 0) {
         $bill_stmt = $conn->prepare("SELECT * FROM bills WHERE id = :id AND tenant_id = :tenant_id");
         $bill_stmt->execute(['id' => $bill_id, 'tenant_id' => $tenant_id]);
         $bill = $bill_stmt->fetch(PDO::FETCH_ASSOC);
         if (!$bill) {
             $errors[] = "Bill not found or does not belong to you";
         }
+    } else {
+        $errors[] = "Invalid bill selection.";
     }
 
     // Additional validation for online payments
@@ -69,6 +74,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $message_type = "danger";
     } else {
         try {
+            // If bill_id is 0, create the bill first
+            if ($bill_id == 0 && isset($_GET['room_request_id'])) {
+                $room_request_id = intval($_GET['room_request_id']);
+                $rr_stmt = $conn->prepare("SELECT * FROM room_requests WHERE id = :id AND tenant_id = :tenant_id");
+                $rr_stmt->execute(['id' => $room_request_id, 'tenant_id' => $tenant_id]);
+                $rr = $rr_stmt->fetch(PDO::FETCH_ASSOC);
+                if ($rr) {
+                    $room_id = $rr['room_id'];
+                    $rate_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
+                    $rate_stmt->execute(['room_id' => $room_id]);
+                    $rate = $rate_stmt->fetchColumn();
+                    $checkin = $rr['checkin_date'];
+                    $checkout = $rr['checkout_date'];
+                    $nights = 0;
+                    if ($checkin && $checkout) {
+                        $checkin_dt = new DateTime($checkin);
+                        $checkout_dt = new DateTime($checkout);
+                        $interval = $checkin_dt->diff($checkout_dt);
+                        $nights = (int)$interval->days;
+                    }
+                    $total_cost = $rate * $nights;
+                    // Insert bill
+                    $bill_insert = $conn->prepare("INSERT INTO bills (tenant_id, room_id, amount_due, notes, status, amount_paid, created_at) VALUES (:tenant_id, :room_id, :amount_due, :notes, 'pending', 0, NOW())");
+                    $bill_insert->execute([
+                        'tenant_id' => $tenant_id,
+                        'room_id' => $room_id,
+                        'amount_due' => $total_cost,
+                        'notes' => 'ADVANCE PAYMENT for Room Request #' . $room_request_id
+                    ]);
+                    $bill_id = $conn->lastInsertId();
+                    // Fetch the new bill for later use
+                    $bill_stmt = $conn->prepare("SELECT * FROM bills WHERE id = :id AND tenant_id = :tenant_id");
+                    $bill_stmt->execute(['id' => $bill_id, 'tenant_id' => $tenant_id]);
+                    $bill = $bill_stmt->fetch(PDO::FETCH_ASSOC);
+                } else {
+                    throw new Exception("Room request not found.");
+                }
+            }
+
             // Handle file upload for online payments
             $proof_filename = null;
             if ($payment_type === 'online' && isset($_FILES['proof_of_payment'])) {
@@ -76,19 +120,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 if (!is_dir($upload_dir)) {
                     mkdir($upload_dir, 0755, true);
                 }
-                
                 $file_ext = pathinfo($_FILES['proof_of_payment']['name'], PATHINFO_EXTENSION);
                 $proof_filename = "proof_" . $bill_id . "_" . $tenant_id . "_" . time() . "." . $file_ext;
                 $upload_path = $upload_dir . "/" . $proof_filename;
-                
                 if (!move_uploaded_file($_FILES['proof_of_payment']['tmp_name'], $upload_path)) {
                     throw new Exception("Failed to upload proof of payment");
                 }
             }
 
             // Insert payment transaction
-            $status = ($payment_type === 'online') ? 'pending' : 'approved';
-            
+            // All payments require admin approval first
+            $status = 'pending';
             $stmt = $conn->prepare("
                 INSERT INTO payment_transactions 
                 (bill_id, tenant_id, payment_amount, payment_method, payment_type, payment_status, 
@@ -97,7 +139,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 (:bill_id, :tenant_id, :payment_amount, :payment_method, :payment_type, :payment_status,
                  :proof_of_payment, CURDATE(), :notes, NOW())
             ");
-            
             $stmt->execute([
                 'bill_id' => $bill_id,
                 'tenant_id' => $tenant_id,
@@ -109,30 +150,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 'notes' => $notes
             ]);
 
-            // Update bill status if it's cash payment
-            if ($payment_type === 'cash') {
-                $total_paid = $bill['amount_paid'] + $payment_amount;
-                $bill_status = ($total_paid >= $bill['amount_due']) ? 'paid' : 'partial';
-                
-                $update_stmt = $conn->prepare("
-                    UPDATE bills 
-                    SET amount_paid = amount_paid + :amount, status = :status
-                    WHERE id = :id
-                ");
-                $update_stmt->execute([
-                    'amount' => $payment_amount,
-                    'id' => $bill_id,
-                    'status' => $bill_status
-                ]);
-
-                $message = "✓ Cash payment recorded successfully! Admin will verify it shortly.";
-            } else {
-                $message = "✓ Online payment submitted! We'll verify your proof of payment and update your account.";
-            }
-            
+            // Update bill status and amount_paid for all payment types
+            $message = "Downpayment/Full payment submitted. Please wait for admin approval.";
             $message_type = "success";
-            // Redirect after 2 seconds to clear form data and prevent unsaved changes warning
-            echo '<script>setTimeout(function() { window.location.href = "tenant_payments.php"; }, 2000);</script>';
+            // Do not redirect after payment, just show the message
         } catch (Exception $e) {
             $message = "Error processing payment: " . $e->getMessage();
             $message_type = "danger";
@@ -140,15 +161,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
-// Fetch pending bills
+// Fetch pending bills, or filter by room_request_id if provided
+$pending_bills = [];
 try {
-    $stmt = $conn->prepare("
-        SELECT * FROM bills 
-        WHERE tenant_id = :tenant_id AND status IN ('pending', 'partial')
-        ORDER BY billing_month DESC
-    ");
-    $stmt->execute(['tenant_id' => $tenant_id]);
-    $pending_bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    if (isset($_GET['room_request_id']) && is_numeric($_GET['room_request_id'])) {
+        $room_request_id = intval($_GET['room_request_id']);
+        // Find the advance payment bill for this room request
+        $stmt = $conn->prepare("
+            SELECT b.* FROM bills b
+            JOIN room_requests rr ON b.room_id = rr.room_id AND b.tenant_id = rr.tenant_id
+            WHERE rr.id = :room_request_id AND b.notes LIKE '%ADVANCE PAYMENT%' AND b.status IN ('pending','partial')
+            LIMIT 1
+        ");
+        $stmt->execute(['room_request_id' => $room_request_id]);
+        $pending_bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // If no bill yet, calculate the total cost for the stay and show as the bill to pay
+        if (count($pending_bills) === 0) {
+            $rr_stmt = $conn->prepare("SELECT * FROM room_requests WHERE id = :id");
+            $rr_stmt->execute(['id' => $room_request_id]);
+            $rr = $rr_stmt->fetch(PDO::FETCH_ASSOC);
+            if ($rr) {
+                $room_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
+                $room_stmt->execute(['room_id' => $rr['room_id']]);
+                $rate = $room_stmt->fetchColumn();
+                $checkin = $rr['checkin_date'];
+                $checkout = $rr['checkout_date'];
+                $nights = 0;
+                if ($checkin && $checkout) {
+                    $checkin_dt = new DateTime($checkin);
+                    $checkout_dt = new DateTime($checkout);
+                    $interval = $checkin_dt->diff($checkout_dt);
+                    $nights = (int)$interval->days;
+                }
+                $total_cost = $rate * $nights;
+                $pending_bills = [[
+                    'id' => 0,
+                    'amount_due' => $total_cost,
+                    'notes' => 'Advance Payment (not yet approved)',
+                ]];
+            }
+        }
+    } else {
+        $stmt = $conn->prepare("
+            SELECT * FROM bills 
+            WHERE tenant_id = :tenant_id AND status IN ('pending', 'partial')
+            ORDER BY billing_month DESC
+        ");
+        $stmt->execute(['tenant_id' => $tenant_id]);
+        $pending_bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
 } catch (Exception $e) {
     $message = "Error loading bills: " . $e->getMessage();
     $message_type = "danger";
@@ -327,36 +389,7 @@ try {
                     </div>
                 <?php endif; ?>
 
-                <!-- Pending Online Payments Verification Status -->
-                <?php if (!empty($pending_online)): ?>
-                    <div class="card mb-4 border-warning">
-                        <div class="card-header bg-warning bg-opacity-10">
-                            <h6 class="mb-0"><i class="bi bi-hourglass-split"></i> Pending Verification</h6>
-                        </div>
-                        <div class="card-body">
-                            <p class="text-muted mb-3">Your online payments are awaiting admin verification:</p>
-                            <div class="row">
-                                <?php foreach ($pending_online as $payment): ?>
-                                    <div class="col-md-6 mb-3">
-                                        <div class="card bg-light">
-                                            <div class="card-body">
-                                                <h6><?php echo date('F Y', strtotime($payment['billing_month'])); ?></h6>
-                                                <p class="mb-2">
-                                                    Amount: <strong>₱<?php echo number_format($payment['payment_amount'], 2); ?></strong>
-                                                </p>
-                                                <p class="mb-0">
-                                                    <span class="pending-badge">
-                                                        <i class="bi bi-clock"></i> Awaiting Verification
-                                                    </span>
-                                                </p>
-                                            </div>
-                                        </div>
-                                    </div>
-                                <?php endforeach; ?>
-                            </div>
-                        </div>
-                    </div>
-                <?php endif; ?>
+                <!-- Pending Online Payments Verification Status removed -->
 
                 <!-- Payment Methods Selection -->
                 <div class="row mb-4">
@@ -394,19 +427,98 @@ try {
                                     <input type="hidden" id="payment_type" name="payment_type" value="">
 
                                     <div class="mb-3">
-                                        <label for="bill_id" class="form-label">Select Bill <span class="text-danger">*</span></label>
+                                        <label for="bill_id" class="form-label">Bill to Pay <span class="text-danger">*</span></label>
                                         <select class="form-control" id="bill_id" name="bill_id" required onchange="updateBillAmount()">
-                                            <option value="">-- Choose a bill --</option>
-                                            <?php foreach ($pending_bills as $bill): ?>
-                                                <option value="<?php echo $bill['id']; ?>" data-amount="<?php echo $bill['amount_due'] - $bill['amount_paid']; ?>">
-                                                    <?php echo date('F Y', strtotime($bill['billing_month'])); ?> - 
-                                                    ₱<?php echo number_format($bill['amount_due'] - $bill['amount_paid'], 2); ?>
-                                                </option>
-                                            <?php endforeach; ?>
+                                            <?php
+                                            $today = date('Y-m-d');
+                                            $show_advance_payment = false;
+                                            // Check for any pending/pending_payment room request for this tenant
+                                            $advance_bill_stmt = $conn->prepare("
+                                                SELECT b.* FROM bills b
+                                                JOIN room_requests rr ON b.room_id = rr.room_id AND b.tenant_id = rr.tenant_id
+                                                WHERE rr.tenant_id = :tenant_id
+                                                  AND rr.status IN ('pending', 'pending_payment')
+                                                  AND b.notes LIKE '%ADVANCE PAYMENT%'
+                                                  AND b.status IN ('pending','partial')
+                                                LIMIT 1");
+                                            $advance_bill_stmt->execute(['tenant_id' => $tenant_id]);
+                                            $advance_bill = $advance_bill_stmt->fetch(PDO::FETCH_ASSOC);
+                                            if ($advance_bill) {
+                                                $show_advance_payment = true;
+                                                echo '<option value="' . $advance_bill['id'] . '" data-amount="' . $advance_bill['amount_due'] . '">';
+                                                echo 'Advance Payment - ₱' . number_format($advance_bill['amount_due'], 2);
+                                                echo '</option>';
+                                            }
+                                            if (!$show_advance_payment) {
+                                                // Show grand total due (default)
+                                                // 1. Get all unpaid/active bills (room only)
+                                                $bills_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending','partial','unpaid','overdue')");
+                                                $bills_stmt->execute(['tenant_id' => $tenant_id]);
+                                                $bills = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                                $unpaid_room_total = 0.0;
+                                                foreach ($bills as $bill) {
+                                                    $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
+                                                    $sum_stmt->execute(['bill_id' => $bill['id']]);
+                                                    $live_paid = floatval($sum_stmt->fetchColumn());
+                                                    $unpaid_room_total += max(0, floatval($bill['amount_due']) - $live_paid);
+                                                }
+                                                // 2. Get all unpaid amenities (completed, not yet paid)
+                                                $amenities_stmt = $conn->prepare("SELECT id, category, cost FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0 ORDER BY submitted_date DESC");
+                                                $amenities_stmt->execute(['tenant_id' => $tenant_id]);
+                                                $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                                $total_amenities = 0.0;
+                                                foreach ($amenities as $a) {
+                                                    $total_amenities += floatval($a['cost']);
+                                                }
+                                                $grand_total_due = $unpaid_room_total + $total_amenities;
+                                                echo '<option value="grand_total_due" data-amount="' . $grand_total_due . '">';
+                                                echo 'Grand Total Due (Room + Amenities) - ₱' . number_format($grand_total_due, 2);
+                                                echo '</option>';
+                                            }
+                                            ?>
                                         </select>
-                                        <small class="text-muted">Showing bills with pending balance</small>
+                                        <small class="text-muted">
+                                            <?php
+                                            if (isset($_GET['room_request_id']) && $show_advance_payment) {
+                                                echo 'This is your advance payment for your stay duration. The Grand Total Due will appear on your checkout date.';
+                                            } else {
+                                                echo 'This is your Grand Total Due including all charges and amenities.';
+                                            }
+                                            // Fetch payment history for this tenant
+                                            $payment_history = [];
+                                            try {
+                                                $stmt = $conn->prepare("
+                                                    SELECT pt.*, b.notes, b.amount_due, b.room_id, b.status as bill_status
+                                                    FROM payment_transactions pt
+                                                    JOIN bills b ON pt.bill_id = b.id
+                                                    WHERE pt.tenant_id = :tenant_id
+                                                    ORDER BY pt.created_at DESC
+                                                ");
+                                                $stmt->execute(['tenant_id' => $tenant_id]);
+                                                $payment_history = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                                            } catch (Exception $e) {
+                                                $payment_history = [];
+                                            }
+                                            ?>
+                                        </small>
                                     </div>
 
+                                    <div class="mb-3">
+                                        <label for="payment_option" class="form-label">Payment Option <span class="text-danger">*</span></label>
+                                        <select class="form-control" id="payment_option" name="payment_option" required onchange="updatePaymentOption()">
+                                            <?php
+                                            // Set this variable to true when the customer is checking out
+                                            $is_checkout = false; // <-- Set to true for checkout scenario
+                                            if ($is_checkout) {
+                                                echo '<option value="full" selected>Full Payment</option>';
+                                            } else {
+                                                echo '<option value="">-- Select option --</option>';
+                                                echo '<option value="downpayment">Downpayment (e.g. 50%)</option>';
+                                                echo '<option value="full">Full Payment</option>';
+                                            }
+                                            ?>
+                                        </select>
+                                    </div>
                                     <div class="mb-3">
                                         <label for="payment_amount" class="form-label">Payment Amount <span class="text-danger">*</span></label>
                                         <div class="input-group">
@@ -419,14 +531,37 @@ try {
 
                                     <div class="mb-3">
                                         <label for="payment_method" class="form-label">Payment Method <span class="text-danger">*</span></label>
-                                        <select class="form-control" id="payment_method" name="payment_method" required>
+                                        <select class="form-control" id="payment_method" name="payment_method" required onchange="showQRCode()">
                                             <option value="">-- Select method --</option>
                                             <option value="GCash">GCash</option>
-                                            <option value="Bank Transfer">Bank Transfer</option>
                                             <option value="PayMaya">PayMaya</option>
-                                            <option value="Check">Check</option>
-                                            <option value="Cash">Cash</option>
                                         </select>
+                                        <div id="qr_demo" style="margin-top:15px; display:none; text-align:center;">
+                                            <label class="form-label">Scan to Pay (Demo QR)</label><br>
+                                            <img id="qr_img" src="" alt="QR Code" style="max-width:180px;">
+                                            <div id="qr_text" style="font-size:14px; margin-top:5px;"></div>
+                                        </div>
+                                        <script>
+                                            function showQRCode() {
+                                                var method = document.getElementById('payment_method').value;
+                                                var qrDiv = document.getElementById('qr_demo');
+                                                var qrImg = document.getElementById('qr_img');
+                                                var qrText = document.getElementById('qr_text');
+                                                if (method === 'GCash') {
+                                                    qrDiv.style.display = 'block';
+                                                    qrImg.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=GCASH-09171234567';
+                                                    qrText.textContent = 'GCash Number: 0917-123-4567';
+                                                } else if (method === 'PayMaya') {
+                                                    qrDiv.style.display = 'block';
+                                                    qrImg.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=PAYMAYA-09181234567';
+                                                    qrText.textContent = 'PayMaya Number: 0918-123-4567';
+                                                } else {
+                                                    qrDiv.style.display = 'none';
+                                                    qrImg.src = '';
+                                                    qrText.textContent = '';
+                                                }
+                                            }
+                                        </script>
                                     </div>
 
                                     <!-- Online Payment File Upload -->
@@ -451,26 +586,66 @@ try {
                         </div>
                     </div>
                 </div>
+            <!-- Payment History Section -->
+            <div class="card mt-4">
+                <div class="card-header bg-secondary bg-opacity-10">
+                    <h6 class="mb-0"><i class="bi bi-clock-history"></i> Payment History</h6>
+                </div>
+                <div class="card-body">
+                    <?php if (count($payment_history) === 0): ?>
+                        <div class="text-muted">No payment history yet.</div>
+                    <?php else: ?>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-bordered align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Amount</th>
+                                        <th>Method</th>
+                                        <th>Status</th>
+                                        <th>Bill Notes</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($payment_history as $ph): ?>
+                                        <tr>
+                                            <td><?php echo htmlspecialchars(date('M d, Y H:i', strtotime($ph['created_at']))); ?></td>
+                                            <td>₱<?php echo number_format($ph['payment_amount'], 2); ?></td>
+                                            <td><?php echo htmlspecialchars($ph['payment_method']); ?></td>
+                                            <td>
+                                                <?php
+                                                    $status_map = [
+                                                        'pending' => '<span class="badge bg-warning text-dark">Pending</span>',
+                                                        'approved' => '<span class="badge bg-success">Approved</span>',
+                                                        'verified' => '<span class="badge bg-success">Verified</span>',
+                                                        'rejected' => '<span class="badge bg-danger">Rejected</span>',
+                                                    ];
+                                                    echo $status_map[$ph['payment_status']] ?? htmlspecialchars($ph['payment_status']);
+                                                ?>
+                                            </td>
+                                            <td><?php echo htmlspecialchars($ph['notes']); ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
             </main>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Make payment method cards always clickable and update payment_type
         function selectMethod(element) {
-            // Remove previous selection
             document.querySelectorAll('.payment-method-card').forEach(card => {
                 card.classList.remove('selected');
             });
-            
-            // Add selection to clicked card
             element.classList.add('selected');
-            
-            // Set payment type
             const method = element.dataset.method;
             document.getElementById('payment_type').value = method;
-            
-            // Toggle file upload for online payments
             if (method === 'online') {
                 document.getElementById('proof_upload_div').style.display = 'block';
                 document.getElementById('proof_of_payment').required = true;
@@ -478,49 +653,57 @@ try {
                 document.getElementById('proof_upload_div').style.display = 'none';
                 document.getElementById('proof_of_payment').required = false;
             }
-            
             enableSubmitButton();
         }
 
-        function updateBillAmount() {
-            const select = document.getElementById('bill_id');
-            const selected = select.options[select.selectedIndex];
-            const amount = selected.dataset.amount;
-            
-            if (amount) {
-                document.getElementById('payment_amount').placeholder = amount;
-                document.getElementById('amount_hint').textContent = 'Bill balance: ₱' + parseFloat(amount).toFixed(2);
+        // Update payment amount when bill or payment option changes
+        function updatePaymentOption() {
+            const option = document.getElementById('payment_option').value;
+            const billSelect = document.getElementById('bill_id');
+            const selected = billSelect.options[billSelect.selectedIndex];
+            const billAmount = parseFloat(selected.dataset.amount) || 0;
+            const amountInput = document.getElementById('payment_amount');
+            const amountHint = document.getElementById('amount_hint');
+            if (option === 'downpayment') {
+                const half = (billAmount / 2).toFixed(2);
+                amountInput.value = half;
+                amountHint.textContent = 'You are paying 50% of the total bill as downpayment.';
+            } else if (option === 'full') {
+                amountInput.value = billAmount.toFixed(2);
+                amountHint.textContent = 'You are paying the full amount of the bill.';
+            } else {
+                amountInput.value = '';
+                amountHint.textContent = '';
             }
-            
             enableSubmitButton();
         }
 
+        // Update payment amount if bill changes
+        function updateBillAmount() {
+            updatePaymentOption();
+        }
+
+        // Enable/disable submit button based on form state
         function enableSubmitButton() {
             const paymentType = document.getElementById('payment_type').value;
             const billId = document.getElementById('bill_id').value;
             const amount = parseFloat(document.getElementById('payment_amount').value) || 0;
             const method = document.getElementById('payment_method').value;
             const proofFile = document.getElementById('proof_of_payment').files.length;
-            
-            // For online payments, require file upload
+            let canSubmit = false;
             if (paymentType === 'online') {
-                const canSubmit = paymentType && billId && amount > 0 && method && proofFile > 0;
-                document.getElementById('submit_btn').disabled = !canSubmit;
+                canSubmit = paymentType && billId && amount > 0 && method && proofFile > 0;
             } else {
-                const canSubmit = paymentType && billId && amount > 0 && method;
-                document.getElementById('submit_btn').disabled = !canSubmit;
+                canSubmit = paymentType && billId && amount > 0 && method;
             }
+            document.getElementById('submit_btn').disabled = !canSubmit;
         }
 
-        // Add event listener to file input to enable/disable submit button
-        document.getElementById('proof_of_payment').addEventListener('change', function() {
-            enableSubmitButton();
-        });
-
-        // Add event listener to amount input
-        document.getElementById('payment_amount').addEventListener('input', function() {
-            enableSubmitButton();
-        });
+        // Add event listeners
+        document.getElementById('proof_of_payment').addEventListener('change', enableSubmitButton);
+        document.getElementById('payment_amount').addEventListener('input', enableSubmitButton);
+        document.getElementById('payment_option').addEventListener('change', updatePaymentOption);
+        document.getElementById('bill_id').addEventListener('change', updateBillAmount);
 
         // Form submission validation
         document.querySelector('form').addEventListener('submit', function(e) {
@@ -529,31 +712,26 @@ try {
             const amount = parseFloat(document.getElementById('payment_amount').value) || 0;
             const method = document.getElementById('payment_method').value;
             const proofFile = document.getElementById('proof_of_payment').files.length;
-            
             if (!paymentType) {
                 e.preventDefault();
                 alert('Please select a payment method (Online or Walk-in/Cash)');
                 return false;
             }
-            
             if (!billId) {
                 e.preventDefault();
                 alert('Please select a bill to pay');
                 return false;
             }
-            
             if (amount <= 0) {
                 e.preventDefault();
                 alert('Please enter a valid payment amount greater than 0');
                 return false;
             }
-            
             if (!method) {
                 e.preventDefault();
                 alert('Please select a payment method (e.g., GCash, Bank Transfer, etc.)');
                 return false;
             }
-            
             if (paymentType === 'online' && proofFile === 0) {
                 e.preventDefault();
                 alert('For online payments, please upload proof of payment');

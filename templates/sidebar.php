@@ -8,7 +8,13 @@
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'rooms.php') ? 'active' : ''; ?>" href="rooms.php">
+                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_reports.php') ? 'active' : ''; ?>" href="admin_reports.php">
+                    <i class="bi bi-bar-chart"></i>
+                    Reports & Analytics
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_rooms.php') ? 'active' : ''; ?>" href="admin_rooms.php">
                     <i class="bi bi-building"></i>
                     Rooms
                 </a>
@@ -17,6 +23,12 @@
                 <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'tenants.php') ? 'active' : ''; ?>" href="tenants.php">
                     <i class="bi bi-people"></i>
                     Tenants
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_bookings.php') ? 'active' : ''; ?>" href="admin_bookings.php">
+                    <i class="bi bi-calendar-check"></i>
+                    Booking
                 </a>
             </li>
             <li class="nav-item">
@@ -46,7 +58,7 @@
             <li class="nav-item">
                 <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_payment_verification.php') ? 'active' : ''; ?>" href="admin_payment_verification.php">
                     <i class="bi bi-check-circle"></i>
-                    Payment Verification
+                    Payment
                 </a>
             </li>
             <li class="nav-item">
@@ -59,6 +71,12 @@
                 <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_maintenance_queue.php') ? 'active' : ''; ?>" href="admin_maintenance_queue.php">
                     <i class="bi bi-tools"></i>
                     Maintenance Queue
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_additional_charges.php') ? 'active' : ''; ?>" href="admin_additional_charges.php">
+                    <i class="bi bi-cart-plus"></i>
+                    Additional Charges
                 </a>
             </li>
             <li class="nav-item">
@@ -83,6 +101,12 @@
                 <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_tenants.php') ? 'active' : ''; ?>" href="admin_tenants.php">
                     <i class="bi bi-person-vcard"></i>
                     Tenant Management
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_checkin_checkout.php') ? 'active' : ''; ?>" href="admin_checkin_checkout.php">
+                    <i class="bi bi-door-open"></i>
+                    Check-in / Check-out
                 </a>
             </li>
             <li class="nav-item border-top mt-3 pt-3">

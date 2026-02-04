@@ -1,0 +1,272 @@
+<?php
+session_start();
+
+if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true) {
+  header('Location: index.php');
+  exit;
+}
+
+require_once 'db_connect.php';
+
+// Prepare metrics
+$total_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms")->fetch_row()[0];
+$occupied_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'booked'")->fetch_row()[0];
+$vacant_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'available'")->fetch_row()[0];
+$maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'under maintenance'")->fetch_row()[0];
+
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rooms - BAMINT</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link rel="stylesheet" href="public/css/style.css">
+  <style>
+    .metric-card { border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.06); }
+    .metric-value { font-size:1.6rem; font-weight:700; }
+    .last-updated { font-size:0.85rem; color:#666; text-align:right; }
+  </style>
+</head>
+<body>
+
+<?php include 'templates/header.php'; ?>
+
+<div class="container-fluid">
+  <div class="row">
+    <?php include 'templates/sidebar.php'; ?>
+
+    <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+      <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+        <h1 class="h2"><i class="bi bi-building"></i> Room Management</h1>
+        <div>
+          <button class="btn btn-outline-secondary btn-sm" onclick="location.reload();"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+          <button class="btn btn-primary btn-sm ms-2" data-bs-toggle="modal" data-bs-target="#addRoomModal"><i class="bi bi-plus-circle"></i> Add Room</button>
+        </div>
+      </div>
+
+      <!-- Metrics -->
+      <div class="row mb-4">
+        <div class="col-md-3 mb-3">
+          <div class="card metric-card bg-success text-white h-100">
+            <div class="card-body text-center">
+              <div class="metric-icon"><i class="bi bi-building"></i></div>
+              <div class="metric-label">Total Rooms</div>
+              <div class="metric-value"><?= $total_rooms ?></div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3 mb-3">
+          <div class="card metric-card bg-info text-white h-100">
+            <div class="card-body text-center">
+              <div class="metric-icon"><i class="bi bi-door-open"></i></div>
+              <div class="metric-label">Occupied</div>
+              <div class="metric-value"><?= $occupied_rooms ?></div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3 mb-3">
+          <div class="card metric-card bg-primary text-white h-100">
+            <div class="card-body text-center">
+              <div class="metric-icon"><i class="bi bi-door-closed"></i></div>
+              <div class="metric-label">Vacant</div>
+              <div class="metric-value"><?= $vacant_rooms ?></div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3 mb-3">
+          <div class="card metric-card bg-warning text-white h-100">
+            <div class="card-body text-center">
+              <div class="metric-icon"><i class="bi bi-tools"></i></div>
+              <div class="metric-label">Under Maintenance</div>
+              <div class="metric-value"><?= $maintenance_rooms ?></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Rooms table -->
+      <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header bg-light d-flex justify-content-between align-items-center">
+          <span class="fw-semibold"><i class="bi bi-table"></i> Room List</span>
+          <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addRoomModal"><i class="bi bi-plus-circle"></i> Add Room</button>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>ID</th>
+                  <th>Room Number</th>
+                  <th>Category</th>
+                  <th>Status</th>
+                  <th>Rate/Night</th>
+                  <th>Description</th>
+                  <th>Image</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="roomTableBody">
+                <?php
+                $res = $conn->query("SELECT * FROM rooms ORDER BY id DESC");
+                while ($r = $res->fetch_assoc()):
+                  $status = htmlspecialchars(ucfirst($r['status']));
+                  $badge = ($r['status'] === 'available') ? 'success' : (($r['status'] === 'booked') ? 'warning text-dark' : 'secondary');
+                ?>
+                <tr>
+                  <td class="fw-bold text-secondary"><?= htmlspecialchars($r['id']) ?></td>
+                  <td><?= htmlspecialchars($r['room_number']) ?></td>
+                  <td><?= htmlspecialchars($r['room_type']) ?></td>
+                  <td><span class="badge bg-<?= $badge ?>"><?= $status ?></span></td>
+                  <td>₱<?= htmlspecialchars(number_format($r['rate'], 2)) ?></td>
+                  <td><?= htmlspecialchars($r['description']) ?></td>
+                  <td><?= $r['image'] ? "<img src='".htmlspecialchars($r['image'])."' width='60' class='rounded border'>" : '<span class="text-muted">No image</span>' ?></td>
+                  <td>
+                    <button class="btn btn-sm btn-warning me-1" onclick='openEditModal(<?= json_encode($r, JSON_HEX_APOS|JSON_HEX_QUOT) ?>)'><i class="bi bi-pencil"></i> Edit</button>
+                    <button class="btn btn-sm btn-danger" onclick="confirmDelete(<?= (int)$r['id'] ?>)"><i class="bi bi-trash"></i> Delete</button>
+                  </td>
+                </tr>
+                <?php endwhile; ?>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="last-updated mb-4">Last updated: <span id="updateTime"><?= date('M d, Y H:i:s') ?></span></div>
+
+    </main>
+  </div>
+</div>
+
+<!-- Add / Edit Modal -->
+<div class="modal fade" id="addRoomModal" tabindex="-1" aria-labelledby="addRoomModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form id="addRoomForm" enctype="multipart/form-data">
+        <input type="hidden" name="id" id="roomId">
+        <div class="modal-header">
+          <h5 class="modal-title" id="addRoomModalLabel">Add Room</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label for="roomNumber" class="form-label">Room Number</label>
+            <input type="text" class="form-control" id="roomNumber" name="room_number" required>
+          </div>
+          <div class="mb-3">
+            <label for="roomCategory" class="form-label">Category</label>
+            <select class="form-select" id="roomCategory" name="category" required>
+              <option value="single">Single</option>
+              <option value="double">Double</option>
+              <option value="suite">Suite</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label for="roomStatus" class="form-label">Status</label>
+            <select class="form-select" id="roomStatus" name="status" required>
+              <option value="available">Available</option>
+              <option value="booked">Booked</option>
+              <option value="under maintenance">Under Maintenance</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label for="roomRate" class="form-label">Rate per Night</label>
+            <input type="number" step="0.01" class="form-control" id="roomRate" name="rate_per_night" required>
+          </div>
+          <div class="mb-3">
+            <label for="roomDescription" class="form-label">Description</label>
+            <textarea class="form-control" id="roomDescription" name="description"></textarea>
+          </div>
+          <div class="mb-3">
+            <label for="roomImage" class="form-label">Image</label>
+            <input type="file" class="form-control" id="roomImage" name="image">
+            <input type="hidden" id="existingImage" name="existing_image">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+function loadRooms() {
+  fetch('rooms_api.php?action=list')
+    .then(res => res.json())
+    .then(data => {
+      if (data.success) {
+        const tbody = document.getElementById('roomTableBody');
+        tbody.innerHTML = '';
+        data.rooms.forEach(r => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td class="fw-bold text-secondary">${r.id}</td>
+            <td>${r.room_number}</td>
+            <td>${r.room_type || ''}</td>
+            <td><span class="badge bg-${r.status === 'available' ? 'success' : (r.status === 'booked' ? 'warning text-dark' : 'secondary')}">${r.status}</span></td>
+            <td>₱${Number(r.rate).toFixed(2)}</td>
+            <td>${r.description || ''}</td>
+            <td>${r.image ? `<img src='${r.image}' width='60' class='rounded border'>` : '<span class="text-muted">No image</span>'}</td>
+            <td>
+              <button class="btn btn-sm btn-warning me-1" onclick='openEditModal(${JSON.stringify(r)})'>Edit</button>
+              <button class="btn btn-sm btn-danger" onclick="confirmDelete(${r.id})">Delete</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }
+    });
+}
+
+function confirmDelete(id) {
+  if (!confirm('Delete this room?')) return;
+  const fd = new FormData(); fd.append('id', id);
+  fetch('rooms_api.php?action=delete', { method: 'POST', body: fd })
+    .then(res => res.json()).then(d => { if (d.success) loadRooms(); else alert('Delete failed'); });
+}
+
+function openEditModal(room) {
+  const modalEl = document.getElementById('addRoomModal');
+  const modal = new bootstrap.Modal(modalEl);
+  document.getElementById('addRoomModalLabel').textContent = 'Edit Room';
+  document.getElementById('roomId').value = room.id;
+  document.getElementById('roomNumber').value = room.room_number;
+  document.getElementById('roomCategory').value = room.room_type || '';
+  document.getElementById('roomStatus').value = room.status;
+  document.getElementById('roomRate').value = room.rate;
+  document.getElementById('roomDescription').value = room.description || '';
+  document.getElementById('existingImage').value = room.image || '';
+  modal.show();
+}
+
+// Form submit handles both add and edit depending on id
+document.getElementById('addRoomForm').addEventListener('submit', function(e) {
+  e.preventDefault();
+  const form = e.target;
+  const fd = new FormData(form);
+  const id = form.id.value;
+  const action = id ? 'edit' : 'add';
+  fetch('rooms_api.php?action=' + action, { method: 'POST', body: fd })
+    .then(res => res.json()).then(d => {
+      if (d.success) {
+        form.reset();
+        var m = bootstrap.Modal.getOrCreateInstance(document.getElementById('addRoomModal'));
+        m.hide();
+        loadRooms();
+      } else {
+        alert('Save failed');
+      }
+    });
+});
+
+window.addEventListener('load', function() {
+  loadRooms();
+});
+</script>

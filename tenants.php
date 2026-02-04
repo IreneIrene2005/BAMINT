@@ -14,7 +14,14 @@ $filter_status = isset($_GET['status']) ? $_GET['status'] : '';
 $filter_room = isset($_GET['room']) ? $_GET['room'] : '';
 
 // Build the SQL query with search and filter
-$sql = "SELECT tenants.*, rooms.room_number FROM tenants LEFT JOIN rooms ON tenants.room_id = rooms.id WHERE 1=1";
+$sql = "SELECT tenants.*, COALESCE(rooms.room_number, (
+            SELECT r2.room_number FROM bills b 
+            JOIN rooms r2 ON b.room_id = r2.id 
+            LEFT JOIN payment_transactions pt ON pt.bill_id = b.id AND pt.payment_status IN ('verified','approved')
+            WHERE b.tenant_id = tenants.id AND (
+                b.amount_paid > 0 OR b.status IN ('partial','paid') OR pt.id IS NOT NULL
+            ) ORDER BY b.id DESC LIMIT 1
+        )) as room_number FROM tenants LEFT JOIN rooms ON tenants.room_id = rooms.id WHERE 1=1";
 
 if ($search) {
     $sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR tenants.phone LIKE :search OR tenants.id_number LIKE :search)";
@@ -48,6 +55,8 @@ if ($filter_room) {
 $stmt->execute();
 $tenants = $stmt;
 
+
+
 // Fetch all rooms for filter dropdown
 $sql_rooms = "SELECT * FROM rooms ORDER BY room_number ASC";
 $all_rooms = $conn->query($sql_rooms);
@@ -73,15 +82,20 @@ $available_rooms = $conn->query($sql_available_rooms);
 
 <div class="container-fluid">
     <div class="row">
-        <?php include 'templates/sidebar.php'; ?>
+        <?php
+        ob_start();
+        include 'templates/sidebar.php';
+        $sidebar = ob_get_clean();
+        echo str_replace('Tenants', 'Customers', $sidebar);
+        ?>
 
         <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
             <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-                <h1 class="h2">Tenants</h1>
+                <h1 class="h2">Customers</h1>
                 <div class="btn-toolbar mb-2 mb-md-0">
                     <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#addTenantModal">
                         <i class="bi bi-plus-circle"></i>
-                        Add New Tenant
+                        Add New Customer
                     </button>
                 </div>
             </div>
@@ -131,7 +145,7 @@ $available_rooms = $conn->query($sql_available_rooms);
                             <th>Email</th>
                             <th>Phone</th>
                             <th>Room</th>
-                            <th>Start Date</th>
+                            <th>Stay Duration</th>
                             <th>Status</th>
                             <th>Actions</th>
                         </tr>
@@ -142,11 +156,45 @@ $available_rooms = $conn->query($sql_available_rooms);
                             <td><?php echo htmlspecialchars($row['name']); ?></td>
                             <td><?php echo htmlspecialchars($row['email']); ?></td>
                             <td><?php echo htmlspecialchars($row['phone']); ?></td>
-                            <td><?php echo htmlspecialchars($row['room_number']); ?></td>
-                            <td><?php echo htmlspecialchars($row['start_date']); ?></td>
+                            <td>
+                                <?php
+                                    $displayRoom = $row['room_number'];
+                                    $tenantStatus = $row['status'];
+                                    if (empty($displayRoom)) {
+                                        try {
+                                            $stmt2 = $conn->prepare("SELECT b.room_id, r.room_number FROM bills b JOIN rooms r ON b.room_id = r.id LEFT JOIN payment_transactions pt ON pt.bill_id = b.id AND pt.payment_status IN ('verified','approved') WHERE b.tenant_id = :tenant_id AND (b.amount_paid > 0 OR b.status IN ('partial','paid') OR pt.id IS NOT NULL) ORDER BY b.id DESC LIMIT 1");
+                                            $stmt2->execute(['tenant_id' => $row['id']]);
+                                            $brow = $stmt2->fetch(PDO::FETCH_ASSOC);
+                                            if ($brow && !empty($brow['room_id'])) {
+                                                // persist assignment so it is consistent across pages
+                                                $updateTenantRoom = $conn->prepare("UPDATE tenants SET room_id = :room_id, status = 'active' WHERE id = :tenant_id");
+                                                $updateTenantRoom->execute(['room_id' => $brow['room_id'], 'tenant_id' => $row['id']]);
+                                                $displayRoom = $brow['room_number'];
+                                                $tenantStatus = 'active';
+                                            }
+                                        } catch (Exception $e) {
+                                            // ignore and fallback to empty
+                                        }
+                                    }
+                                    echo htmlspecialchars($displayRoom ?: '-');
+                                ?>
+                            </td>
+                            <td>
+                                <?php
+                                // Show stay duration from room_requests if approved/occupied
+                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
+                                $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                if ($dates && $dates['checkin_date'] && $dates['checkout_date'] && in_array($dates['status'], ['approved', 'occupied'])) {
+                                    echo htmlspecialchars(date('M d, Y', strtotime($dates['checkin_date'])) . ' - ' . date('M d, Y', strtotime($dates['checkout_date'])));
+                                } else {
+                                    echo htmlspecialchars($row['start_date']);
+                                }
+                                ?>
+                            </td>
                             <td>
                                 <span class="badge <?php echo $row['status'] === 'active' ? 'bg-success' : 'bg-danger'; ?>">
-                                    <?php echo ucfirst($row['status']); ?>
+                                    <?php echo ucfirst($tenantStatus); ?>
                                 </span>
                             </td>
                             <td>

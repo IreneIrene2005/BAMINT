@@ -254,76 +254,18 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                 </div>
             </div>
 
-            <!-- CHARTS SECTION -->
+            <!-- Reports & Analytics Quick Link -->
             <div class="row">
-                <!-- Revenue Trend Chart -->
-                <div class="col-lg-6 mb-4">
+                <div class="col-lg-12 mb-4">
                     <div class="card">
                         <div class="card-header bg-primary text-white">
-                            <i class="bi bi-graph-up"></i> Revenue Trend (Last 6 Months)
+                            <i class="bi bi-bar-chart"></i> Reports & Analytics
                         </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="revenueChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Room Occupancy Chart -->
-                <div class="col-lg-6 mb-4">
-                    <div class="card">
-                        <div class="card-header bg-info text-white">
-                            <i class="bi bi-pie-chart"></i> Room Occupancy Status
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="occupancyChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Room Types Chart -->
-            <div class="row">
-                <div class="col-lg-6 mb-4">
-                    <div class="card">
-                        <div class="card-header bg-success text-white">
-                            <i class="bi bi-columns-gap"></i> Room Distribution by Type
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="roomTypesChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Quick Actions -->
-                <div class="col-lg-6 mb-4">
-                    <div class="card">
-                        <div class="card-header bg-secondary text-white">
-                            <i class="bi bi-lightning"></i> Quick Actions
-                        </div>
-                        <div class="card-body">
-                            <div class="list-group">
-                                <a href="tenants.php" class="list-group-item list-group-item-action">
-                                    <i class="bi bi-people"></i> Manage Tenants
-                                </a>
-                                <a href="rooms.php" class="list-group-item list-group-item-action">
-                                    <i class="bi bi-building"></i> Manage Rooms
-                                </a>
-                                <a href="bills.php" class="list-group-item list-group-item-action">
-                                    <i class="bi bi-receipt"></i> Manage Bills
-                                </a>
-                                <a href="maintenance_requests.php" class="list-group-item list-group-item-action">
-                                    <i class="bi bi-tools"></i> Maintenance Requests
-                                </a>
-                                <a href="overdue_reminders.php" class="list-group-item list-group-item-action">
-                                    <i class="bi bi-exclamation-triangle"></i> Overdue Accounts
-                                </a>
-                            </div>
+                        <div class="card-body text-center">
+                            <p>Generate detailed reports and view analytics for bookings, revenue, occupancy, and payments.</p>
+                            <a href="admin_reports.php" class="btn btn-lg btn-success">
+                                <i class="bi bi-bar-chart"></i> Go to Reports & Analytics
+                            </a>
                         </div>
                     </div>
                 </div>

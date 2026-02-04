@@ -1,9 +1,13 @@
+
 <?php
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 require_once __DIR__ . "/../db/notifications.php";
 
 // Get current user info for notifications
-$recipientType = $_SESSION["role"] ?? null;
-$recipientId = ($_SESSION["role"] === "admin") ? ($_SESSION["admin_id"] ?? null) : ($_SESSION["tenant_id"] ?? null);
+$recipientType = isset($_SESSION["role"]) ? $_SESSION["role"] : null;
+$recipientId = ($recipientType === "admin") ? ($_SESSION["admin_id"] ?? null) : (isset($_SESSION["tenant_id"]) ? $_SESSION["tenant_id"] : null);
 $unreadCount = 0;
 
 if ($recipientType && $recipientId) {
@@ -13,7 +17,7 @@ if ($recipientType && $recipientId) {
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
 <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
     <div class="container-fluid">
-        <a class="navbar-brand" href="<?php echo $_SESSION['role'] === 'admin' ? 'dashboard.php' : 'tenant_dashboard.php'; ?>">BAMINT</a>
+        <a class="navbar-brand" href="<?php echo (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') ? 'dashboard.php' : 'tenant_dashboard.php'; ?>">BAMINT</a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
             <span class="navbar-toggler-icon"></span>
         </button>

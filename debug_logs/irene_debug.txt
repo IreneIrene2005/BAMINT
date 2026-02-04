@@ -1,0 +1,108 @@
+DEBUG TENANT (irene):
+Array
+(
+    [id] => 15
+    [name] => irene
+    [email] => irene@gmail.com
+    [phone] => 0000000000
+    [id_number] => PENDING
+    [room_id] => 
+    [start_date] => 2026-02-02
+    [end_date] => 
+    [advance_payment_dismissed] => 0
+    [status] => active
+    [verification_notes] => 
+    [verification_date] => 
+    [verified_by] => 
+)
+
+BILLS:
+Array
+(
+    [0] => Array
+        (
+            [id] => 14
+            [tenant_id] => 15
+            [room_id] => 21
+            [billing_month] => 0000-00-00
+            [amount_due] => 1500.00
+            [amount_paid] => 0.00
+            [discount] => 0.00
+            [status] => pending
+            [due_date] => 2026-02-04
+            [paid_date] => 
+            [notes] => ADVANCE PAYMENT - Move-in fee (1 night, ₱1,500.00/night)
+            [created_at] => 2026-02-03 00:17:14
+            [updated_at] => 2026-02-03 00:17:14
+        )
+
+)
+
+PAYMENTS:
+Array
+(
+    [0] => Array
+        (
+            [id] => 12
+            [bill_id] => 14
+            [tenant_id] => 15
+            [payment_amount] => 750.00
+            [payment_method] => GCash
+            [payment_type] => online
+            [payment_status] => approved
+            [proof_of_payment] => proof_14_15_1770049081.JPG
+            [verified_by] => 
+            [verification_date] => 
+            [payment_date] => 2026-02-03
+            [notes] => 
+            [recorded_by] => 
+            [created_at] => 2026-02-03 00:18:01
+        )
+
+)
+
+ROOM_REQUESTS:
+Array
+(
+    [0] => Array
+        (
+            [id] => 15
+            [tenant_id] => 15
+            [room_id] => 21
+            [tenant_count] => 1
+            [tenant_info_name] => irene
+            [tenant_info_email] => irene@gmail.com
+            [tenant_info_phone] => 09014204404
+            [tenant_info_address] => cdo
+            [request_date] => 2026-02-03 00:15:52
+            [status] => pending_payment
+            [notes] => 
+            [created_at] => 2026-02-03 00:15:52
+            [updated_at] => 2026-02-03 00:17:14
+            [approved_date] => 
+            [checkin_date] => 2026-02-04
+            [checkout_date] => 2026-02-05
+        )
+
+    [1] => Array
+        (
+            [id] => 14
+            [tenant_id] => 15
+            [room_id] => 21
+            [tenant_count] => 1
+            [tenant_info_name] => irene
+            [tenant_info_email] => irene@gmail.com
+            [tenant_info_phone] => 09014204404
+            [tenant_info_address] => cdo
+            [request_date] => 2026-02-03 00:00:38
+            [status] => rejected
+            [notes] => 
+            [created_at] => 2026-02-03 00:00:38
+            [updated_at] => 2026-02-03 00:14:27
+            [approved_date] => 
+            [checkin_date] => 
+            [checkout_date] => 
+        )
+
+)
+

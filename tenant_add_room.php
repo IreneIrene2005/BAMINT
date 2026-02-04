@@ -10,34 +10,35 @@ require_once "db/database.php";
 require_once "db/notifications.php";
 
 $tenant_id = $_SESSION["tenant_id"];
+// Alias for compatibility: tenant_id and customer_id are the same
+if (!isset($_SESSION["customer_id"])) {
+    $_SESSION["customer_id"] = $tenant_id;
+}
+$customer_id = $_SESSION["customer_id"];
 $message = '';
 $message_type = '';
 
 // Get tenant status and check if they already have a room
-$is_account_pending = true;
 $tenant_has_room = false;
 try {
-    $status_stmt = $conn->prepare("SELECT status, room_id FROM tenants WHERE id = :tenant_id");
+    $status_stmt = $conn->prepare("SELECT room_id FROM tenants WHERE id = :tenant_id");
     $status_stmt->execute(['tenant_id' => $tenant_id]);
     $tenant_status = $status_stmt->fetch(PDO::FETCH_ASSOC);
-    $is_account_pending = ($tenant_status && $tenant_status['status'] !== 'active');
     $tenant_has_room = ($tenant_status && !empty($tenant_status['room_id']));
 } catch (Exception $e) {
-    $is_account_pending = true; // Default to pending if can't check
+    $tenant_has_room = false;
 }
 
 // Handle room request submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'request_room') {
+    // Debug: Log received POST data for troubleshooting
+    file_put_contents('room_request_debug.log', date('Y-m-d H:i:s') . "\n" . print_r($_POST, true) . "\n\n", FILE_APPEND);
     // Check if tenant already has a room
     if ($tenant_has_room) {
         $message = "⚠️ You already have a room assigned. You cannot request another room while you have an active room.";
         $message_type = "warning";
     }
-    // Check if account is still pending
-    elseif ($is_account_pending) {
-        $message = "⚠️ Your account is still pending admin approval. You cannot request a room until your account is verified. Please wait for admin confirmation.";
-        $message_type = "warning";
-    } else {
+    else {
         $room_id = isset($_POST['room_id']) ? intval($_POST['room_id']) : 0;
         $tenant_count = isset($_POST['tenant_count']) ? intval($_POST['tenant_count']) : 1;
         $tenant_info_name = isset($_POST['tenant_info_name']) ? trim($_POST['tenant_info_name']) : '';
@@ -97,9 +98,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $conn->beginTransaction();
                     try {
                         // Insert room request with occupancy info
+                        $checkin_date = isset($_POST['checkin_date']) ? $_POST['checkin_date'] : null;
+                        $checkout_date = isset($_POST['checkout_date']) ? $_POST['checkout_date'] : null;
                         $stmt = $conn->prepare("
-                            INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status) 
-                            VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending')
+                            INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status, checkin_date, checkout_date)
+                            VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending_payment', :checkin_date, :checkout_date)
                         ");
                         $stmt->execute([
                             'tenant_id' => $tenant_id,
@@ -109,10 +112,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                             'tenant_info_email' => $tenant_info_email,
                             'tenant_info_phone' => $tenant_info_phone,
                             'tenant_info_address' => $tenant_info_address,
-                            'notes' => $notes
+                            'notes' => $notes,
+                            'checkin_date' => $checkin_date,
+                            'checkout_date' => $checkout_date
                         ]);
-                        
                         $roomRequestId = $conn->lastInsertId();
+
+                        // Immediately create advance payment bill for this request
+                        $rate_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
+                        $rate_stmt->execute(['room_id' => $room_id]);
+                        $rate = $rate_stmt->fetchColumn();
+                        $nights = 0;
+                        if ($checkin_date && $checkout_date) {
+                            $checkin_dt = new DateTime($checkin_date);
+                            $checkout_dt = new DateTime($checkout_date);
+                            $interval = $checkin_dt->diff($checkout_dt);
+                            $nights = (int)$interval->days;
+                        }
+                        $total_cost = $rate * $nights;
+                        $bill_notes = "ADVANCE PAYMENT - Move-in fee (" . $nights . " night" . ($nights > 1 ? "s" : "") . ", ₱" . number_format($rate, 2) . "/night)";
+                        $billing_month = $checkin_date ? (new DateTime($checkin_date))->format('Y-m') : date('Y-m');
+                        $due_date = $checkin_date ? (new DateTime($checkin_date))->format('Y-m-d') : date('Y-m-d');
+                        $bill_stmt = $conn->prepare("
+                            INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, created_at, updated_at)
+                            VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, NOW(), NOW())
+                        ");
+                        $bill_stmt->execute([
+                            'tenant_id' => $tenant_id,
+                            'room_id' => $room_id,
+                            'billing_month' => $billing_month,
+                            'amount_due' => $total_cost,
+                            'due_date' => $due_date,
+                            'notes' => $bill_notes
+                        ]);
 
                         // Save co-tenants if this is a shared/bedspace room with multiple occupants
                         if ($tenant_count > 1) {
@@ -141,10 +173,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
                         $conn->commit();
                         
-                        // Notify all admins about the new room request
-                        notifyAdminsNewRoomRequest($conn, $roomRequestId, $tenant_id, $tenant_count);
-                        
-                        $message = "Room request submitted successfully! The admin will review your request soon.";
+                        // Do NOT notify admins yet; wait for payment
+                        $message = "Room request submitted! Please proceed to payment to complete your booking.";
                         $message_type = "success";
                     } catch (Exception $e) {
                         $conn->rollBack();
@@ -160,7 +190,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
-// Fetch all rooms with availability status (including co-tenants)
+// Fetch all rooms with availability status (including co-tenants) and image
 try {
     $stmt = $conn->prepare("
         SELECT 
@@ -170,6 +200,7 @@ try {
             r.description,
             r.rate,
             r.status,
+            r.image AS image_url,
             COALESCE(COUNT(DISTINCT t.id), 0) as tenant_count,
             COALESCE(COUNT(DISTINCT ct.id), 0) as co_tenant_count
         FROM rooms r
@@ -385,7 +416,7 @@ try {
                         </li>
                         <li class="nav-item">
                             <a class="nav-link active" href="tenant_add_room.php">
-                                <i class="bi bi-plus-square"></i> Add Room
+                                <i class="bi bi-search"></i> Browse Room
                             </a>
                         </li>
                         <li class="nav-item">
@@ -408,8 +439,8 @@ try {
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
                 <!-- Header -->
                 <div class="header-banner">
-                    <h1><i class="bi bi-plus-square"></i> Room Request</h1>
-                    <p class="mb-0">Browse and request available rooms</p>
+                    <h1><i class="bi bi-search"></i> Browse Room</h1>
+                    <p class="mb-0">View available rooms, see details, and request a booking. Fill in your information and select check-in/check-out dates. The system will check availability.</p>
                 </div>
 
                 <?php if ($message): ?>
@@ -421,13 +452,43 @@ try {
 
                 <!-- Two Column Layout -->
                 <div class="row">
+                    <!-- Filters Section -->
+                    <div class="col-lg-4 mb-4">
+                        <div class="card">
+                            <div class="card-header bg-info text-white">
+                                <i class="bi bi-funnel"></i> Filter Rooms
+                            </div>
+                            <div class="card-body">
+                                <form id="roomFilterForm">
+                                    <div class="mb-3">
+                                        <label for="filterType" class="form-label">Room Type</label>
+                                        <select class="form-select" id="filterType" name="type">
+                                            <option value="">All</option>
+                                            <option value="Single">Single</option>
+                                            <option value="Shared">Shared</option>
+                                            <option value="Bedspace">Bedspace</option>
+                                        </select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="filterPrice" class="form-label">Max Price (₱)</label>
+                                        <input type="number" class="form-control" id="filterPrice" name="price" min="0" placeholder="No limit">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="filterGuests" class="form-label">Max Guests</label>
+                                        <input type="number" class="form-control" id="filterGuests" name="guests" min="1" placeholder="No limit">
+                                    </div>
+                                    <button type="button" class="btn btn-primary w-100" onclick="filterRooms()"><i class="bi bi-search"></i> Apply Filters</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
                     <!-- Available Rooms Section -->
                     <div class="col-lg-8">
                         <div class="card">
                             <div class="card-header bg-light">
                                 <h5 class="mb-0"><i class="bi bi-building"></i> Available Rooms</h5>
                             </div>
-                            <div class="card-body">
+                            <div class="card-body" id="roomsContainer">
                                 <?php if (empty($rooms)): ?>
                                     <div class="alert alert-info">No rooms available at the moment.</div>
                                 <?php else: ?>
@@ -451,40 +512,31 @@ try {
                                         elseif ($room_type === 'shared') $max_occupancy = 2;
                                         elseif ($room_type === 'bedspace') $max_occupancy = 4;
                                         ?>
+                                        <?php if ($actual_status === 'available'): ?>
                                         <div class="room-card <?php echo htmlspecialchars(strtolower($actual_status)); ?>">
-                                            <div class="room-info">
-                                                <div class="room-details">
-                                                    <h5><?php echo htmlspecialchars($room['room_number']); ?></h5>
-                                                    <?php if ($room['room_type']): ?>
-                                                        <p><strong>Type:</strong> <?php echo htmlspecialchars($room['room_type']); ?></p>
-                                                    <?php endif; ?>
-                                                    <?php if ($room['description']): ?>
-                                                        <p><strong>Description:</strong> <?php echo htmlspecialchars($room['description']); ?></p>
-                                                    <?php endif; ?>
-                                                    <p><strong>Current Occupancy:</strong> <?php echo $total_occupancy; ?> person(s)</p>
-                                                    <p><strong>Max Occupancy:</strong> <?php echo $max_occupancy; ?> person(s)</p>
+                                            <div class="room-info row" data-rate="<?php echo htmlspecialchars($room['rate']); ?>">
+                                                <div class="col-md-4">
+                                                    <!-- Room Images Placeholder -->
+                                                    <img src="<?php echo !empty($room['image_url']) ? htmlspecialchars($room['image_url']) : 'public/img/room-placeholder.png'; ?>" class="img-fluid rounded mb-2" alt="Room Image">
                                                 </div>
-                                                <div class="text-end">
-                                                    <div class="rate">₱<?php echo number_format($room['rate'], 2); ?></div>
+                                                <div class="col-md-8">
+                                                    <h5><?php echo htmlspecialchars($room['room_number']); ?></h5>
+                                                    <p><strong>Type:</strong> <?php echo htmlspecialchars($room['room_type']); ?></p>
+                                                    <p><strong>Price per Night:</strong> ₱<?php echo number_format($room['rate'], 2); ?></p>
+                                                    <p><strong>Description:</strong> <?php echo htmlspecialchars($room['description']); ?></p>
+                                                    <p><strong>Max Guests:</strong> <?php echo $max_occupancy; ?></p>
                                                     <div class="status-badge status-<?php echo htmlspecialchars(strtolower($actual_status)); ?>">
                                                         <?php echo htmlspecialchars($status_label); ?>
                                                     </div>
                                                 </div>
                                             </div>
 
-                                            <!-- Collapsible Form - Only show for available rooms -->
-                                            <?php if ($actual_status === 'available'): ?>
+                                            <!-- Collapsible Form for available rooms -->
                                                 <?php if ($tenant_has_room): ?>
                                                     <div class="alert alert-warning mt-3 mb-0">
                                                         <i class="bi bi-exclamation-triangle"></i> 
                                                         <strong>Room Already Assigned</strong><br>
                                                         You already have a room assigned to you. You cannot request another room while your current room is active. Please contact admin if you need to change rooms.
-                                                    </div>
-                                                <?php elseif ($is_account_pending): ?>
-                                                    <div class="alert alert-warning mt-3 mb-0">
-                                                        <i class="bi bi-exclamation-triangle"></i> 
-                                                        <strong>Account Pending Approval</strong><br>
-                                                        Your account is still pending admin approval. You will be able to request a room once your account is verified. Please check your email or dashboard for approval updates.
                                                     </div>
                                                 <?php else: ?>
                                                     <button class="btn btn-sm btn-outline-primary mt-3 w-100" type="button" data-bs-toggle="collapse" data-bs-target="#room-form-<?php echo htmlspecialchars($room['id']); ?>" aria-expanded="false">
@@ -496,7 +548,7 @@ try {
                                                     <input type="hidden" name="action" value="request_room">
                                                     <input type="hidden" name="room_id" value="<?php echo htmlspecialchars($room['id']); ?>">
 
-                                                    <h6 class="mb-3"><i class="bi bi-person-check"></i> Occupant Information</h6>
+                                                    <h6 class="mb-3"><i class="bi bi-person-check"></i> Guest Information</h6>
 
                                                     <div class="mb-3">
                                                         <label for="name_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Full Name <span class="text-danger">*</span></label>
@@ -518,18 +570,35 @@ try {
                                                         <textarea class="form-control" id="address_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_info_address" rows="2" required placeholder="Enter your address"></textarea>
                                                     </div>
 
+
                                                     <div class="mb-3">
-                                                        <label for="tenant_count_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Number of Occupants <span class="text-danger">*</span></label>
-                                                        <input type="number" class="form-control tenant-count-input" id="tenant_count_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_count" min="1" max="<?php echo $max_occupancy; ?>" value="1" required data-room-id="<?php echo htmlspecialchars($room['id']); ?>">
-                                                        <small class="text-muted">Maximum <?php echo $max_occupancy; ?> person(s) for this room type</small>
+                                                        <label for="checkin_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Check-in Date & Time <span class="text-danger">*</span></label>
+                                                        <input type="text" class="form-control checkin-date" id="checkin_<?php echo htmlspecialchars($room['id']); ?>" name="checkin_date" required data-room-id="<?php echo htmlspecialchars($room['id']); ?>">
                                                     </div>
 
-                                                    <!-- Co-Tenants Section (shown when occupants > 1) -->
-                                                    <div class="co-tenants-section" id="co_tenants_<?php echo htmlspecialchars($room['id']); ?>" style="display: none;">
+                                                    <div class="mb-3">
+                                                        <label for="checkout_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Check-out Date & Time <span class="text-danger">*</span></label>
+                                                        <input type="text" class="form-control checkout-date" id="checkout_<?php echo htmlspecialchars($room['id']); ?>" name="checkout_date" required data-room-id="<?php echo htmlspecialchars($room['id']); ?>">
+                                                    </div>
+
+                                                    <div class="mb-3" id="cost_display_<?php echo htmlspecialchars($room['id']); ?>" style="display:none;">
+                                                        <label class="form-label"><strong>Total Cost of Stay:</strong></label>
+                                                        <div class="alert alert-info mb-2" id="cost_value_<?php echo htmlspecialchars($room['id']); ?>"></div>
+
+                                                    </div>
+
+                                                    <div class="mb-3">
+                                                        <label for="guest_count_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Number of Guests <span class="text-danger">*</span></label>
+                                                        <input type="number" class="form-control guest-count-input" id="guest_count_<?php echo htmlspecialchars($room['id']); ?>" name="guest_count" min="1" max="<?php echo $max_occupancy; ?>" value="1" required data-room-id="<?php echo htmlspecialchars($room['id']); ?>">
+                                                        <small class="text-muted">Maximum <?php echo $max_occupancy; ?> guest(s) for this room type</small>
+                                                    </div>
+
+                                                    <!-- Co-Guests Section (shown when guests > 1) -->
+                                                    <div class="co-guests-section" id="co_guests_<?php echo htmlspecialchars($room['id']); ?>" style="display: none;">
                                                         <div class="alert alert-info">
-                                                            <i class="bi bi-info-circle"></i> Please provide information for all roommates. You will be the primary tenant responsible for payments.
+                                                            <i class="bi bi-info-circle"></i> Please provide information for all guests. You will be the primary guest responsible for payments.
                                                         </div>
-                                                        <div id="co_tenant_fields_<?php echo htmlspecialchars($room['id']); ?>"></div>
+                                                        <div id="co_guest_fields_<?php echo htmlspecialchars($room['id']); ?>"></div>
                                                     </div>
 
                                                     <div class="mb-3">
@@ -559,33 +628,139 @@ try {
                             </div>
                         </div>
                     </div>
-
-                    <!-- My Requests Section -->
-                    <div class="col-lg-4">
-                        <div class="card">
-                            <div class="card-header bg-light">
-                                <h5 class="mb-0"><i class="bi bi-clock-history"></i> My Requests</h5>
+                </div>
+                <script>
+                        // Auto-calculate checkout datetime based on check-in and nights, using Flatpickr format
+                        document.querySelectorAll('.room-card').forEach(function(card) {
+                            const checkinInput = card.querySelector('.checkin-date');
+                            const checkoutInput = card.querySelector('.checkout-date');
+                            const nightsInput = card.querySelector('.nights-input'); // If you have a nights input, otherwise set nights = 1
+                            let nights = 1;
+                            if (nightsInput) {
+                                nightsInput.addEventListener('input', function() {
+                                    nights = parseInt(nightsInput.value) || 1;
+                                    updateCheckout();
+                                });
+                            }
+                            function pad(n) { return n.toString().padStart(2, '0'); }
+                            function formatFlatpickr(dt) {
+                                // Format: Y-m-d h:i K (e.g., 2026-02-07 05:00 PM)
+                                let hours = dt.getHours();
+                                let minutes = pad(dt.getMinutes());
+                                let ampm = hours >= 12 ? 'PM' : 'AM';
+                                let hour12 = hours % 12;
+                                if (hour12 === 0) hour12 = 12;
+                                return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(hour12)}:${minutes} ${ampm}`;
+                            }
+                            function updateCheckout() {
+                                if (checkinInput.value) {
+                                    // Parse using Flatpickr's format
+                                    let checkinDate = null;
+                                    // Try to parse as Date
+                                    if (window.flatpickr && flatpickr.parseDate) {
+                                        checkinDate = flatpickr.parseDate(checkinInput.value, "Y-m-d h:i K");
+                                    }
+                                    if (!checkinDate || isNaN(checkinDate.getTime())) {
+                                        checkinDate = new Date(checkinInput.value);
+                                    }
+                                    if (!isNaN(checkinDate.getTime())) {
+                                        const checkoutDate = new Date(checkinDate.getTime());
+                                        checkoutDate.setDate(checkoutDate.getDate() + nights);
+                                        // Set time to match check-in
+                                        checkoutDate.setHours(checkinDate.getHours());
+                                        checkoutDate.setMinutes(checkinDate.getMinutes());
+                                        // Format for Flatpickr
+                                        checkoutInput.value = formatFlatpickr(checkoutDate);
+                                        // If Flatpickr instance exists, setDate for UI sync
+                                        if (checkoutInput._flatpickr) {
+                                            checkoutInput._flatpickr.setDate(checkoutDate, true, "Y-m-d h:i K");
+                                        }
+                                    }
+                                }
+                            }
+                            if (checkinInput && checkoutInput) {
+                                checkinInput.addEventListener('change', updateCheckout);
+                                // If you have a nights input, also update on its change
+                                if (nightsInput) nightsInput.addEventListener('change', updateCheckout);
+                            }
+                        });
+                function filterRooms() {
+                    const type = document.getElementById('filterType').value;
+                    const price = document.getElementById('filterPrice').value;
+                    const guests = document.getElementById('filterGuests').value;
+                    const cards = document.querySelectorAll('.room-card');
+                    cards.forEach(card => {
+                        let show = true;
+                        if (type && !card.innerHTML.includes(type)) show = false;
+                        if (price) {
+                            const priceText = card.querySelector('.rate')?.textContent.replace(/[^\d.]/g, '') || '0';
+                            if (parseFloat(priceText) > parseFloat(price)) show = false;
+                        }
+                        if (guests) {
+                            const maxGuestsText = card.innerHTML.match(/Max Guests:\s*(\d+)/);
+                            if (maxGuestsText && parseInt(maxGuestsText[1]) > parseInt(guests)) show = false;
+                        }
+                        card.style.display = show ? '' : 'none';
+                    });
+                }
+                </script>
+                                <!-- Flatpickr CSS & JS -->
+                                <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+                                <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+                                <script>
+                                    // Initialize Flatpickr for both check-in and check-out fields (both editable)
+                                    document.querySelectorAll('.checkin-date, .checkout-date').forEach(function(input) {
+                                        flatpickr(input, {
+                                            enableTime: true,
+                                            dateFormat: "Y-m-d h:i K", // 12-hour format with AM/PM
+                                            time_24hr: false,
+                                            minuteIncrement: 1,
+                                            allowInput: true
+                                        });
+                                    });
+                                </script>
                             </div>
-                            <div class="card-body">
+                        </div>
+                    </div>
+
+                    <!-- My Requests Section (Improved UI) -->
+                    <div class="col-12 mt-4">
+                        <div class="card shadow-lg border-primary" style="max-width: 500px; margin: 0 auto;">
+                            <div class="card-header bg-primary text-white text-center" style="font-size: 1.5rem; font-weight: bold; letter-spacing: 1px;">
+                                <i class="bi bi-clock-history"></i> My Requests
+                            </div>
+                            <div class="card-body" style="background: #fafdff;">
                                 <?php if (empty($my_requests)): ?>
-                                    <p class="text-muted">You haven't submitted any room requests yet.</p>
+                                    <p class="text-muted text-center">You haven't submitted any room requests yet.</p>
                                 <?php else: ?>
                                     <?php foreach ($my_requests as $request): ?>
-                                        <div class="request-card">
-                                            <div class="d-flex justify-content-between align-items-start mb-2">
-                                                <h6 class="mb-0"><?php echo htmlspecialchars($request['room_number']); ?></h6>
-                                                <span class="request-status request-<?php echo htmlspecialchars(strtolower($request['status'])); ?>">
-                                                    <?php echo htmlspecialchars(ucfirst($request['status'])); ?>
+                                        <div class="request-card mb-4 p-3 border border-2 rounded-3" style="background: #f4f8ff;">
+                                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                                <span class="fs-5 fw-bold text-primary">Room <?php echo htmlspecialchars($request['room_number']); ?></span>
+                                                <span class="request-status request-<?php echo htmlspecialchars(strtolower($request['status'])); ?> px-3 py-1" style="font-size:1rem;">
+                                                    <?php
+                                                        if ($request['status'] === 'pending_payment') {
+                                                            echo 'Awaiting Payment';
+                                                        } else {
+                                                            echo htmlspecialchars(ucfirst($request['status']));
+                                                        }
+                                                    ?>
                                                 </span>
                                             </div>
-                                            <p class="mb-1"><strong>Rate:</strong> $<?php echo number_format($request['rate'], 2); ?></p>
-                                            <p class="mb-1"><strong>Occupants:</strong> <?php echo intval($request['tenant_count'] ?? 1); ?> person(s)</p>
-                                            <p class="mb-1"><strong>Requested:</strong> <?php echo date('M d, Y', strtotime($request['request_date'])); ?></p>
+                                            <div class="mb-1"><strong>Rate:</strong> <span class="text-success">₱<?php echo number_format($request['rate'], 2); ?></span></div>
+                                            <div class="mb-1"><strong>Occupants:</strong> <?php echo intval($request['tenant_count'] ?? 1); ?> person(s)</div>
+                                            <div class="mb-1"><strong>Requested:</strong> <?php echo date('M d, Y', strtotime($request['request_date'])); ?></div>
                                             <?php if (!empty($request['tenant_info_name'])): ?>
-                                                <p class="mb-1 text-muted small"><strong>Name:</strong> <?php echo htmlspecialchars($request['tenant_info_name']); ?></p>
+                                                <div class="mb-1"><strong>Name:</strong> <?php echo htmlspecialchars($request['tenant_info_name']); ?></div>
                                             <?php endif; ?>
                                             <?php if ($request['notes']): ?>
-                                                <p class="mb-0 text-muted small"><strong>Notes:</strong> <?php echo htmlspecialchars($request['notes']); ?></p>
+                                                <div class="mb-0 text-muted small"><strong>Notes:</strong> <?php echo htmlspecialchars($request['notes']); ?></div>
+                                            <?php endif; ?>
+                                            <?php if ($request['status'] === 'pending_payment') : ?>
+                                                <form method="get" action="tenant_make_payment.php" class="mt-2">
+                                                    <input type="hidden" name="room_request_id" value="<?php echo $request['id']; ?>">
+                                                    <button type="submit" class="btn btn-warning w-100">Proceed to Payment</button>
+                                                </form>
                                             <?php endif; ?>
                                         </div>
                                     <?php endforeach; ?>
@@ -607,11 +782,9 @@ try {
                 const count = parseInt(this.value);
                 const coTenantSection = document.getElementById('co_tenants_' + roomId);
                 const fieldsContainer = document.getElementById('co_tenant_fields_' + roomId);
-                
                 if (count > 1) {
                     coTenantSection.style.display = 'block';
                     let html = '';
-                    
                     for (let i = 1; i < count; i++) {
                         html += `
                             <div class="card mb-3 border-secondary">
@@ -639,13 +812,68 @@ try {
                             </div>
                         `;
                     }
-                    
                     fieldsContainer.innerHTML = html;
                 } else {
                     coTenantSection.style.display = 'none';
                     fieldsContainer.innerHTML = '';
                 }
             });
+        });
+
+        // Cost calculation and payment button logic
+        document.querySelectorAll('.room-card').forEach(function(card) {
+            const roomId = card.querySelector('input[name="room_id"]').value;
+            // Get the rate from the data attribute
+            let rate = 0;
+            const infoDiv = card.querySelector('.room-info');
+            if (infoDiv && infoDiv.dataset.rate) {
+                rate = parseFloat(infoDiv.dataset.rate);
+            }
+            const checkinInput = card.querySelector('.checkin-date');
+            const checkoutInput = card.querySelector('.checkout-date');
+            const costDisplay = card.querySelector('#cost_display_' + roomId);
+            const costValue = card.querySelector('#cost_value_' + roomId);
+            const payBtn = card.querySelector('#pay_btn_' + roomId);
+            function updateCost() {
+                if (!checkinInput.value || !checkoutInput.value) {
+                    costDisplay.style.display = 'none';
+                    payBtn.style.display = 'none';
+                    costValue.innerHTML = '';
+                    return;
+                }
+                const checkin = new Date(checkinInput.value);
+                const checkout = new Date(checkoutInput.value);
+                if (checkout <= checkin) {
+                    costDisplay.style.display = 'block';
+                    costValue.innerHTML = '<span class="text-danger">Check-out must be after check-in.</span>';
+                    payBtn.style.display = 'none';
+                    return;
+                }
+                const diffTime = Math.abs(checkout - checkin);
+                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                const totalCost = diffDays * rate;
+                costValue.innerHTML = `<span class="fs-5 fw-bold text-success">₱${totalCost.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</span> <span class="text-muted">(${diffDays} night${diffDays>1?'s':''})</span>`;
+                costDisplay.style.display = 'block';
+                payBtn.style.display = 'inline-block';
+            }
+            if (checkinInput && checkoutInput) {
+                checkinInput.addEventListener('change', updateCost);
+                checkoutInput.addEventListener('change', updateCost);
+                // Show cost if already filled (e.g. browser autofill)
+                if (checkinInput.value && checkoutInput.value) updateCost();
+            }
+            if (payBtn) {
+                payBtn.addEventListener('click', function() {
+                    // Redirect to payment page with booking details
+                    const params = new URLSearchParams({
+                        room_id: roomId,
+                        checkin: checkinInput.value,
+                        checkout: checkoutInput.value,
+                        total_cost: costValue.textContent.replace(/[^\d.]/g, '')
+                    });
+                    window.location.href = `tenant_make_payment.php?${params.toString()}`;
+                });
+            }
         });
     </script>
 </body>

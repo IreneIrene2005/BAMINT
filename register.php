@@ -154,7 +154,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             
             // First create a tenant record
             $sql = "INSERT INTO tenants (name, email, phone, id_number, room_id, start_date, status) 
-                    VALUES (:name, :email, '0000000000', 'PENDING', NULL, CURDATE(), 'pending')";
+                    VALUES (:name, :email, '0000000000', 'PENDING', NULL, CURDATE(), 'active')";
             
             if ($stmt = $conn->prepare($sql)) {
                 $stmt->bindParam(":name", $param_name, PDO::PARAM_STR);

@@ -522,7 +522,7 @@ function notifyAdminsNewRoomRequest($conn, $roomRequestId, $tenantId, $tenantCou
  * @param decimal $cost Maintenance cost in ₱
  * @return bool Success status
  */
-function addMaintenanceCostToBill($conn, $tenantId, $cost) {
+function addMaintenanceCostToBill($conn, $tenantId, $cost, $requestId = null, $requestCategory = null) {
     if (!$tenantId || !$cost || $cost <= 0) {
         return false;
     }
@@ -539,19 +539,51 @@ function addMaintenanceCostToBill($conn, $tenantId, $cost) {
 
         $roomId = $tenant['room_id'];
 
-        // Determine next month (current month of first day)
-        $nextMonth = date('Y-m-01', strtotime('first day of next month'));
+        // Determine billing month later (we target the current month by default)
+        // Prepare note text if request info provided
+        $noteText = null;
+        if ($requestId !== null || $requestCategory !== null) {
+            $noteText = 'Amenity: ' . ($requestCategory ?? 'amenity') . ' (Request #' . intval($requestId) . ')';
+        }
 
-        // Check if bill exists for next month
-        $billStmt = $conn->prepare("
-            SELECT id, amount_due FROM bills 
-            WHERE tenant_id = :tenant_id AND billing_month = :billing_month
-        ");
-        $billStmt->execute([
-            'tenant_id' => $tenantId,
-            'billing_month' => $nextMonth
-        ]);
-        $bill = $billStmt->fetch(PDO::FETCH_ASSOC);
+        // If request ID provided, check if this request is already referenced in any bill for this tenant (avoid double billing)
+        if ($requestId !== null) {
+            $pattern = '%' . 'Request #' . intval($requestId) . '%';
+            $existingCheck = $conn->prepare("SELECT id FROM bills WHERE tenant_id = :tenant_id AND notes LIKE :pattern LIMIT 1");
+            $existingCheck->execute([
+                'tenant_id' => $tenantId,
+                'pattern' => $pattern
+            ]);
+            $existingBill = $existingCheck->fetch(PDO::FETCH_ASSOC);
+            if ($existingBill) {
+                // Already billed and referenced; nothing to do
+                return $existingBill['id'];
+            }
+        }
+
+        // Target billing month: current month (first day)
+        $targetMonth = date('Y-m-01');
+
+        // Prefer attaching to an existing active bill for this tenant (avoid creating duplicate bills for same customer)
+        // Active = not paid OR paid but within recent grace interval (7 days) — matches archive logic used in listing
+        $activeStmt = $conn->prepare("SELECT id, amount_due, notes, billing_month FROM bills WHERE tenant_id = :tenant_id AND (status != 'paid' OR DATE_ADD(updated_at, INTERVAL 7 DAY) >= NOW()) ORDER BY billing_month DESC LIMIT 1");
+        $activeStmt->execute(['tenant_id' => $tenantId]);
+        $bill = $activeStmt->fetch(PDO::FETCH_ASSOC);
+        // Debug: log whether an active bill was found for this tenant
+        error_log("addMaintenanceCostToBill: tenant {$tenantId} active bill: " . json_encode($bill));
+
+        // If no active bill found, fall back to checking the current month bill
+        if (!$bill) {
+            $billStmt = $conn->prepare("
+                SELECT id, amount_due, notes, billing_month FROM bills 
+                WHERE tenant_id = :tenant_id AND billing_month = :billing_month
+            ");
+            $billStmt->execute([
+                'tenant_id' => $tenantId,
+                'billing_month' => $targetMonth
+            ]);
+            $bill = $billStmt->fetch(PDO::FETCH_ASSOC);
+        }
 
         if ($bill) {
             // Update existing bill by adding cost
@@ -565,6 +597,43 @@ function addMaintenanceCostToBill($conn, $tenantId, $cost) {
                 'cost' => $cost,
                 'bill_id' => $bill['id']
             ]);
+
+            // Debug: record that we appended this amenity to an existing bill
+            error_log("addMaintenanceCostToBill: appended cost {$cost} to bill {$bill['id']} for tenant {$tenantId}");
+
+            // Append note if available, avoid duplicate note text
+            if ($noteText) {
+                $existingNotes = $bill['notes'] ?? '';
+                $newNotes = $existingNotes;
+                if ($noteText && stripos($existingNotes, $noteText) === false) {
+                    $newNotes = trim($existingNotes . ' | ' . $noteText, " |\t\n\r");
+                }
+                $noteStmt = $conn->prepare("UPDATE bills SET notes = :notes WHERE id = :bill_id");
+                $noteStmt->execute(['notes' => $newNotes, 'bill_id' => $bill['id']]);
+            }
+
+            // Record itemized entry in bill_items and mark maintenance request as billed
+            try {
+                if ($requestId !== null) {
+                    $itemStmt = $conn->prepare("INSERT INTO bill_items (bill_id, request_id, tenant_id, description, amount) VALUES (:bill_id, :request_id, :tenant_id, :description, :amount)");
+                    $itemStmt->execute([
+                        'bill_id' => $bill['id'],
+                        'request_id' => intval($requestId),
+                        'tenant_id' => $tenantId,
+                        'description' => $noteText,
+                        'amount' => $cost
+                    ]);
+
+                    // Update maintenance_requests to mark billed and reference bill
+                    $updReq = $conn->prepare("UPDATE maintenance_requests SET billed = 1, billed_bill_id = :bill_id WHERE id = :request_id");
+                    $updReq->execute(['bill_id' => $bill['id'], 'request_id' => intval($requestId)]);
+                }
+            } catch (Exception $e) {
+                // Ignore item recording failures but log
+                error_log('Failed to record bill item: ' . $e->getMessage());
+            }
+
+            return $bill['id'];
         } else {
             // Create new bill for next month with maintenance cost
             // Get room rate
@@ -573,22 +642,47 @@ function addMaintenanceCostToBill($conn, $tenantId, $cost) {
             $room = $roomStmt->fetch(PDO::FETCH_ASSOC);
             
             $roomRate = $room['rate'] ?? 0;
-            $totalAmount = $roomRate + $cost;
+            // For a standalone bill created only because no active bill existed, only charge the additional amenity (do not duplicate room rate)
+            $totalAmount = $cost;
 
-            $insertStmt = $conn->prepare("
+            $insertSql = "
                 INSERT INTO bills 
-                (tenant_id, room_id, billing_month, amount_due, amount_paid, status, created_at, updated_at)
-                VALUES (:tenant_id, :room_id, :billing_month, :amount_due, 0, 'pending', NOW(), NOW())
-            ");
+                (tenant_id, room_id, billing_month, amount_due, amount_paid, status, notes, created_at, updated_at)
+                VALUES (:tenant_id, :room_id, :billing_month, :amount_due, 0, 'pending', :notes, NOW(), NOW())
+            ";
+            $insertStmt = $conn->prepare($insertSql);
             $insertStmt->execute([
                 'tenant_id' => $tenantId,
                 'room_id' => $roomId,
-                'billing_month' => $nextMonth,
-                'amount_due' => $totalAmount
+                'billing_month' => $targetMonth,
+                'amount_due' => $totalAmount,
+                'notes' => $noteText
             ]);
+
+            $newBillId = $conn->lastInsertId();
+            // Record bill item and mark maintenance request billed
+            try {
+                if ($requestId !== null) {
+                    $itemStmt = $conn->prepare("INSERT INTO bill_items (bill_id, request_id, tenant_id, description, amount) VALUES (:bill_id, :request_id, :tenant_id, :description, :amount)");
+                    $itemStmt->execute([
+                        'bill_id' => $newBillId,
+                        'request_id' => intval($requestId),
+                        'tenant_id' => $tenantId,
+                        'description' => $noteText,
+                        'amount' => $cost
+                    ]);
+
+                    $updReq = $conn->prepare("UPDATE maintenance_requests SET billed = 1, billed_bill_id = :bill_id WHERE id = :request_id");
+                    $updReq->execute(['bill_id' => $newBillId, 'request_id' => intval($requestId)]);
+                }
+            } catch (Exception $e) {
+                error_log('Failed to record bill item for new bill: ' . $e->getMessage());
+            }
+
+            return $newBillId;
         }
 
-        return true;
+        return false;
     } catch (Exception $e) {
         error_log("Error adding maintenance cost to bill: " . $e->getMessage());
         return false;

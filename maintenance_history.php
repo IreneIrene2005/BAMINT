@@ -15,11 +15,11 @@ $filter_category = isset($_GET['category']) ? $_GET['category'] : '';
 $filter_tenant = isset($_GET['tenant']) ? $_GET['tenant'] : '';
 
 // Build the SQL query
-$sql = "SELECT maintenance_requests.*, tenants.name as tenant_name, rooms.room_number, admins.username 
+$sql = "SELECT maintenance_requests.*, tenants.name as tenant_name, rooms.room_number,
+       (SELECT a.username FROM maintenance_history mh JOIN admins a ON mh.completed_by = a.id WHERE mh.maintenance_request_id = maintenance_requests.id ORDER BY mh.moved_to_history_at DESC LIMIT 1) AS completed_by
         FROM maintenance_requests
         LEFT JOIN tenants ON maintenance_requests.tenant_id = tenants.id
         LEFT JOIN rooms ON maintenance_requests.room_id = rooms.id
-        LEFT JOIN admins ON maintenance_requests.assigned_to = admins.id
         WHERE maintenance_requests.status IN ('completed', 'cancelled')";
 
 if ($search) {
@@ -231,6 +231,7 @@ $stats = $stats_stmt->fetch(PDO::FETCH_ASSOC);
                             <th>Submitted</th>
                             <th>Completed</th>
                             <th>Assigned To</th>
+                            <th>Completed By</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -279,6 +280,7 @@ $stats = $stats_stmt->fetch(PDO::FETCH_ASSOC);
                                     <span class="text-muted"><small>Unassigned</small></span>
                                 <?php endif; ?>
                             </td>
+                            <td><?php echo htmlspecialchars($row['completed_by'] ?? ''); ?></td>
                             <td>
                                 <a href="maintenance_actions.php?action=view&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-primary" title="View"><i class="bi bi-eye"></i></a>
                             </td>

@@ -1,19 +1,16 @@
 <?php
 session_start();
-
 if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "admin") {
     header("location: index.php?role=admin");
     exit;
 }
-
 require_once "db/database.php";
 require_once "db/notifications.php";
-
 $admin_id = $_SESSION["id"];
 $message = '';
 $message_type = '';
 
-// Handle verification/rejection
+// Handle payment verification/rejection
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = $_POST['action'];
     $payment_id = isset($_POST['payment_id']) ? intval($_POST['payment_id']) : 0;
@@ -24,45 +21,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         try {
             if ($action === 'verify') {
                 // Update payment to verified
-                $stmt = $conn->prepare("
-                    UPDATE payment_transactions 
-                    SET payment_status = 'verified', verified_by = :admin_id, verification_date = NOW()
-                    WHERE id = :id AND payment_status = 'pending'
-                ");
-                $stmt->execute(['id' => $payment_id, 'admin_id' => $admin_id]);
+                $stmt = $conn->prepare("UPDATE payments SET payment_status = 'verified', verified_by = :admin_id, verification_date = NOW(), notes = :notes WHERE id = :id AND payment_status = 'pending'");
+                $stmt->execute(['id' => $payment_id, 'admin_id' => $admin_id, 'notes' => $verification_notes]);
 
-                // If verified, mark bill as paid (if fully paid)
-                $payment_stmt = $conn->prepare("
-                    SELECT pt.bill_id, pt.tenant_id, b.amount_due FROM payment_transactions pt
-                    JOIN bills b ON pt.bill_id = b.id
-                    WHERE pt.id = :id
-                ");
+                // Get payment info
+                $payment_stmt = $conn->prepare("SELECT * FROM payments WHERE id = :id");
                 $payment_stmt->execute(['id' => $payment_id]);
                 $payment_info = $payment_stmt->fetch(PDO::FETCH_ASSOC);
 
                 if ($payment_info) {
                     // Check if bill is fully paid now
-                    $bill_check = $conn->prepare("
-                        SELECT COALESCE(SUM(payment_amount), 0) as total_paid FROM payment_transactions 
-                        WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved')
-                    ");
+                    $bill_check = $conn->prepare("SELECT COALESCE(SUM(amount), 0) as total_paid FROM payments WHERE bill_id = :bill_id AND payment_status = 'verified'");
                     $bill_check->execute(['bill_id' => $payment_info['bill_id']]);
                     $paid_info = $bill_check->fetch(PDO::FETCH_ASSOC);
-
                     $total_paid = $paid_info['total_paid'];
-                    $bill_status = ($total_paid >= $payment_info['amount_due']) ? 'paid' : 'partial';
 
-                    $update_bill = $conn->prepare("
-                        UPDATE bills SET status = :status WHERE id = :id
-                    ");
+                    $bill_stmt = $conn->prepare("SELECT amount_due FROM bills WHERE id = :bill_id");
+                    $bill_stmt->execute(['bill_id' => $payment_info['bill_id']]);
+                    $bill = $bill_stmt->fetch(PDO::FETCH_ASSOC);
+                    $amount_due = $bill ? $bill['amount_due'] : 0;
+
+                    $bill_status = ($total_paid >= $amount_due) ? 'paid' : 'partial';
+                    $update_bill = $conn->prepare("UPDATE bills SET status = :status WHERE id = :id");
                     $update_bill->execute(['status' => $bill_status, 'id' => $payment_info['bill_id']]);
 
-                    // Notify if partial payment
+                    // Update guest balance
+                    $balance_stmt = $conn->prepare("SELECT id, balance FROM guest_balances WHERE tenant_id = :tenant_id");
+                    $balance_stmt->execute(['tenant_id' => $payment_info['tenant_id']]);
+                    $balance = $balance_stmt->fetch(PDO::FETCH_ASSOC);
+                    if ($balance) {
+                        $new_balance = $balance['balance'] - $payment_info['amount'];
+                        $update_balance = $conn->prepare("UPDATE guest_balances SET balance = :balance WHERE id = :id");
+                        $update_balance->execute(['balance' => $new_balance, 'id' => $balance['id']]);
+                    }
+
+                    // Notify tenant
                     if ($bill_status === 'partial') {
-                        $amount_due_remaining = $payment_info['amount_due'] - $total_paid;
-                        notifyPartialPayment($conn, $payment_info['tenant_id'], $payment_info['bill_id'], $payment_info['amount_due'], $total_paid, $payment_id);
-                        
-                        // Send admin's message to tenant if provided
+                        // Partial payment notification
                         if (!empty($partial_payment_message)) {
                             sendMessage(
                                 $conn,
@@ -77,60 +72,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                             );
                         }
                     } else {
-                        // Only notify for full payment, not for partial
+                        // Full payment notification
                         notifyTenantPaymentVerification($conn, $payment_info['tenant_id'], $payment_id, 'approved');
                     }
-
-                    // If advance payment (move-in) is verified and paid, activate tenant and mark room as occupied
-                    if ($bill_status === 'paid') {
-                        // Get tenant room info and details
-                        $tenant_stmt = $conn->prepare("
-                            SELECT t.id, t.room_id, t.start_date, r.rate 
-                            FROM tenants t
-                            LEFT JOIN rooms r ON t.room_id = r.id
-                            WHERE t.id = :tenant_id
-                        ");
-                        $tenant_stmt->execute(['tenant_id' => $payment_info['tenant_id']]);
-                        $tenant_info = $tenant_stmt->fetch(PDO::FETCH_ASSOC);
-
-                        if ($tenant_info && $tenant_info['room_id']) {
-                            // Update tenant status to active
-                            $activate_tenant = $conn->prepare("
-                                UPDATE tenants SET status = 'active' WHERE id = :tenant_id
-                            ");
-                            $activate_tenant->execute(['tenant_id' => $payment_info['tenant_id']]);
-
-                            // Mark room as occupied
-                            $occupy_room = $conn->prepare("
-                                UPDATE rooms SET status = 'occupied' WHERE id = :room_id
-                            ");
-                            $occupy_room->execute(['room_id' => $tenant_info['room_id']]);
-                        }
-                    }
                 }
-
                 $message = "✓ Payment verified and recorded successfully!";
             } else {
                 // Update payment to rejected
-                $stmt = $conn->prepare("
-                    UPDATE payment_transactions 
-                    SET payment_status = 'rejected', verified_by = :admin_id, verification_date = NOW()
-                    WHERE id = :id AND payment_status = 'pending'
-                ");
-                $stmt->execute(['id' => $payment_id, 'admin_id' => $admin_id]);
-                
+                $stmt = $conn->prepare("UPDATE payments SET payment_status = 'rejected', verified_by = :admin_id, verification_date = NOW(), notes = :notes WHERE id = :id AND payment_status = 'pending'");
+                $stmt->execute(['id' => $payment_id, 'admin_id' => $admin_id, 'notes' => $verification_notes]);
+
                 // Get tenant ID for notification
-                $payment_stmt = $conn->prepare("SELECT tenant_id FROM payment_transactions WHERE id = :id");
+                $payment_stmt = $conn->prepare("SELECT tenant_id FROM payments WHERE id = :id");
                 $payment_stmt->execute(['id' => $payment_id]);
                 $payment_info = $payment_stmt->fetch(PDO::FETCH_ASSOC);
-                
                 if ($payment_info) {
                     notifyTenantPaymentVerification($conn, $payment_info['tenant_id'], $payment_id, 'rejected');
                 }
-                
                 $message = "✓ Payment rejected. Tenant will be notified.";
             }
-            
             $message_type = "success";
         } catch (Exception $e) {
             $message = "Error processing verification: " . $e->getMessage();
@@ -139,21 +99,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 }
 
-// Fetch pending online payments
+// Fetch pending payments
 try {
-    $stmt = $conn->prepare("
-        SELECT pt.*, t.name as tenant_name, t.email as tenant_email, t.phone as tenant_phone,
-               b.billing_month, b.amount_due, b.amount_paid,
-               a.username as recorded_by_name
-        FROM payment_transactions pt
-        JOIN tenants t ON pt.tenant_id = t.id
-        JOIN bills b ON pt.bill_id = b.id
-        LEFT JOIN admins a ON pt.recorded_by = a.id
-        WHERE pt.payment_type = 'online' AND pt.payment_status = 'pending'
-        ORDER BY pt.created_at DESC
-    ");
-    $stmt->execute();
-    $pending_payments = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $stmt = $conn->prepare("SELECT p.*, c.name as customer_name, c.email as customer_email, c.phone as customer_phone, b.billing_month, b.amount_due, a.username as verified_by_name FROM payments p JOIN customers c ON p.customer_id = c.id JOIN bills b ON p.bill_id = b.id LEFT JOIN admins a ON p.verified_by = a.id WHERE p.payment_status = 'pending' ORDER BY p.created_at DESC");
+        $stmt->execute();
+        $pending_payments = $stmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     $message = "Error loading payments: " . $e->getMessage();
     $message_type = "danger";
@@ -162,37 +112,18 @@ try {
 
 // Fetch unpaid bills with outstanding balances
 try {
-    $stmt = $conn->prepare("
-        SELECT b.*, t.name as tenant_name, t.email as tenant_email, t.id as tenant_id,
-               COALESCE(SUM(pt.payment_amount), 0) as total_paid,
-               (b.amount_due - COALESCE(SUM(pt.payment_amount), 0)) as remaining_balance
-        FROM bills b
-        JOIN tenants t ON b.tenant_id = t.id
-        LEFT JOIN payment_transactions pt ON b.id = pt.bill_id AND pt.payment_status IN ('verified', 'approved')
-        WHERE b.status IN ('partial', 'unpaid')
-        GROUP BY b.id, t.name, t.email, t.id, b.amount_due
-        ORDER BY b.billing_month DESC
-    ");
-    $stmt->execute();
-    $unpaid_bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $stmt = $conn->prepare("SELECT b.*, c.name as customer_name, c.email as customer_email, c.id as customer_id, COALESCE(SUM(p.amount), 0) as total_paid, (b.amount_due - COALESCE(SUM(p.amount), 0)) as remaining_balance FROM bills b JOIN customers c ON b.customer_id = c.id LEFT JOIN payments p ON b.id = p.bill_id AND p.payment_status = 'verified' WHERE b.status IN ('partial', 'unpaid') GROUP BY b.id, c.name, c.email, c.id, b.amount_due ORDER BY b.billing_month DESC");
+        $stmt->execute();
+        $unpaid_bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     $unpaid_bills = [];
 }
 
-// Fetch recent verified payments (last 30 days)
+// Fetch recent verifications (last 30 days)
 try {
-    $stmt = $conn->prepare("
-        SELECT pt.*, t.name as tenant_name, b.billing_month, a.username as verified_by_name
-        FROM payment_transactions pt
-        JOIN tenants t ON pt.tenant_id = t.id
-        JOIN bills b ON pt.bill_id = b.id
-        LEFT JOIN admins a ON pt.verified_by = a.id
-        WHERE pt.payment_type = 'online' AND pt.payment_status IN ('verified', 'rejected')
-        AND pt.verification_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-        ORDER BY pt.verification_date DESC
-    ");
-    $stmt->execute();
-    $recent_verifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $stmt = $conn->prepare("SELECT p.*, c.name as customer_name, b.billing_month, a.username as verified_by_name FROM payments p JOIN customers c ON p.customer_id = c.id JOIN bills b ON p.bill_id = b.id LEFT JOIN admins a ON p.verified_by = a.id WHERE p.payment_status IN ('verified', 'rejected') AND p.verification_date >= DATE_SUB(NOW(), INTERVAL 30 DAY) ORDER BY p.verification_date DESC");
+        $stmt->execute();
+        $recent_verifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     $recent_verifications = [];
 }
