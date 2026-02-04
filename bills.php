@@ -614,25 +614,15 @@ try {
                             $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
                             $checkin = $dates ? $dates['checkin_date'] : null;
                             $checkout = $dates ? $dates['checkout_date'] : null;
-                            // Calculate Grand Total Due for this tenant (real-time, matches tenant_bills.php)
-                            $room_bills_stmt = $conn->prepare("SELECT id, amount_due FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending','partial','unpaid','overdue')");
-                            $room_bills_stmt->execute(['tenant_id' => $row['tenant_id']]);
-                            $room_bills = $room_bills_stmt->fetchAll(PDO::FETCH_ASSOC);
-                            $unpaid_room_total = 0.0;
-                            foreach ($room_bills as $bill) {
-                                $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                                $sum_stmt->execute(['bill_id' => $bill['id']]);
-                                $live_paid = floatval($sum_stmt->fetchColumn());
-                                $unpaid_room_total += max(0, floatval($bill['amount_due']) - $live_paid);
-                            }
-                            $amenities_stmt = $conn->prepare("SELECT cost FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
-                            $amenities_stmt->execute(['tenant_id' => $row['tenant_id']]);
-                            $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
-                            $total_amenities = 0.0;
-                            foreach ($amenities as $a) {
-                                $total_amenities += floatval($a['cost']);
-                            }
-                            $grand_total_due = $unpaid_room_total + $total_amenities;
+                            // Calculate Grand Total Due as (Amount Paid for this bill) + (Total Additional Charges for this tenant)
+                            $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
+                            $sum_stmt->execute(['bill_id' => $row['id']]);
+                            $amount_paid = floatval($sum_stmt->fetchColumn());
+                            $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
+                            $charges_stmt->execute(['tenant_id' => $row['tenant_id']]);
+                            $total_charges = $charges_stmt->fetchColumn();
+                            $total_charges = $total_charges ? floatval($total_charges) : 0.0;
+                            $grand_total_due = $amount_paid + $total_charges;
                         ?>
                         <tr>
                             <td>

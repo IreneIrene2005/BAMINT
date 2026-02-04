@@ -739,8 +739,25 @@ try {
                                                 <span class="fs-5 fw-bold text-primary">Room <?php echo htmlspecialchars($request['room_number']); ?></span>
                                                 <span class="request-status request-<?php echo htmlspecialchars(strtolower($request['status'])); ?> px-3 py-1" style="font-size:1rem;">
                                                     <?php
-                                                        if ($request['status'] === 'pending_payment') {
-                                                            echo 'Awaiting Payment';
+                                                        // Show 'Approved' if status is 'approved' or if status is 'pending_payment' but payment is already made and approved
+                                                        if ($request['status'] === 'approved') {
+                                                            echo 'Approved';
+                                                        } elseif ($request['status'] === 'pending_payment') {
+                                                            // Check if there is a verified/approved payment for this request's bill
+                                                            $bill_stmt = $conn->prepare("SELECT id FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' LIMIT 1");
+                                                            $bill_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $request['room_id']]);
+                                                            $bill = $bill_stmt->fetch(PDO::FETCH_ASSOC);
+                                                            $is_paid = false;
+                                                            if ($bill) {
+                                                                $pay_stmt = $conn->prepare("SELECT COUNT(*) FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                                                                $pay_stmt->execute(['bill_id' => $bill['id']]);
+                                                                $is_paid = $pay_stmt->fetchColumn() > 0;
+                                                            }
+                                                            if ($is_paid) {
+                                                                echo 'Approved';
+                                                            } else {
+                                                                echo 'Awaiting Payment';
+                                                            }
                                                         } else {
                                                             echo htmlspecialchars(ucfirst($request['status']));
                                                         }
