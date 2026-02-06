@@ -312,6 +312,22 @@ try {
 } catch (Exception $e) {
     $walk_in_customers = [];
 }
+
+// Fetch active tenants for checkout
+$checkout_tenants = [];
+try {
+    $stmt = $conn->prepare("
+        SELECT t.id, t.name, t.email, t.phone, r.room_number, r.rate, t.start_date
+        FROM tenants t
+        LEFT JOIN rooms r ON t.room_id = r.id
+        WHERE t.status = 'active' AND t.room_id IS NOT NULL
+        ORDER BY t.name ASC
+    ");
+    $stmt->execute();
+    $checkout_tenants = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $checkout_tenants = [];
+}
 ?>
 
 <!DOCTYPE html>
@@ -337,6 +353,10 @@ try {
             <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
                 <h1 class="h2">Payments</h1>
                 <div class="btn-toolbar mb-2 mb-md-0">
+                    <button type="button" class="btn btn-sm btn-danger me-2" data-bs-toggle="modal" data-bs-target="#checkoutModal">
+                        <i class="bi bi-box-arrow-right"></i>
+                        Check Out
+                    </button>
                     <button type="button" class="btn btn-sm btn-outline-secondary me-2" data-bs-toggle="modal" data-bs-target="#generateBillsModal">
                         <i class="bi bi-plus-circle"></i>
                         Generate Bills
@@ -363,18 +383,50 @@ try {
                     $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
                     $checkin = $dates ? $dates['checkin_date'] : null;
                     $checkout = $dates ? $dates['checkout_date'] : null;
-                    $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
+                    // Calculate amount paid from verified/approved payment transactions (includes checkout payments)
+                    $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved')");
                     $sum_stmt->execute(['bill_id' => $row['id']]);
                     $amount_paid = floatval($sum_stmt->fetchColumn());
-                    // Fetch latest payment method for this bill (if any)
-                    $pm_stmt = $conn->prepare("SELECT payment_method FROM payment_transactions WHERE bill_id = :bill_id ORDER BY created_at DESC, id DESC LIMIT 1");
-                    $pm_stmt->execute(['bill_id' => $row['id']]);
-                    $payment_method = $pm_stmt->fetchColumn();
+                    
+                    // Fetch check-in payment method (first/earliest payment)
+                    $pm_checkin_stmt = $conn->prepare("SELECT payment_method FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved') ORDER BY created_at ASC, id ASC LIMIT 1");
+                    $pm_checkin_stmt->execute(['bill_id' => $row['id']]);
+                    $payment_method_checkin = $pm_checkin_stmt->fetchColumn();
+                    
                     $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
                     $charges_stmt->execute(['tenant_id' => $row['tenant_id']]);
                     $total_charges = $charges_stmt->fetchColumn();
                     $total_charges = $total_charges ? floatval($total_charges) : 0.0;
-                    $grand_total_due = $amount_paid + $total_charges;
+                    
+                    // Check if tenant is inactive (checked out) to determine status
+                    $tenant_status_stmt = $conn->prepare("SELECT status FROM tenants WHERE id = :tenant_id");
+                    $tenant_status_stmt->execute(['tenant_id' => $row['tenant_id']]);
+                    $tenant_status = $tenant_status_stmt->fetchColumn();
+                    
+                    // Fetch check-out payment method (only if tenant is inactive/checked out)
+                    $payment_method_checkout = null;
+                    if ($tenant_status === 'inactive') {
+                        $pm_checkout_stmt = $conn->prepare("SELECT payment_method FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved') ORDER BY created_at DESC, id DESC LIMIT 1");
+                        $pm_checkout_stmt->execute(['bill_id' => $row['id']]);
+                        $payment_method_checkout = $pm_checkout_stmt->fetchColumn();
+                    }
+                    
+                    
+                    // Total billable = Bill amount + Additional charges
+                    $bill_amount = floatval($row['amount_due']);
+                    $total_billable = $bill_amount + $total_charges;
+                    
+                    // Grand Total Due calculation:
+                    // If tenant is inactive (checked out), Grand Total Due = 0 (already paid)
+                    // If tenant is active, Grand Total Due = Amount Paid + Total Additional Charges (total billable)
+                    if ($tenant_status === 'inactive') {
+                        // Customer has checked out - they paid, so Grand Total Due = 0
+                        $grand_total_due = 0;
+                    } else {
+                        // Customer is still active - show total billable (amount paid + charges)
+                        $grand_total_due = $amount_paid + $total_charges;
+                    }
+                    
                     $grand_total_due_sum += $grand_total_due;
                     $grand_total_paid_sum += $amount_paid;
                     $table_rows[] = [
@@ -382,11 +434,14 @@ try {
                         'checkout' => $checkout,
                         'name' => $row['name'],
                         'room_number' => $row['room_number'],
+                        'amount_due' => $bill_amount,
                         'grand_total_due' => $grand_total_due,
                         'amount_paid' => $amount_paid,
                         'total_charges' => $total_charges,
-                        'payment_method' => $payment_method,
+                        'payment_method_checkin' => $payment_method_checkin,
+                        'payment_method_checkout' => $payment_method_checkout,
                         'status' => $row['status'],
+                        'tenant_status' => $tenant_status,
                         'bill_id' => $row['id'],
                         'tenant_id' => $row['tenant_id']
                     ];
@@ -777,7 +832,8 @@ try {
                                 <th>Room</th>
                                 <th>Grand Total Due (₱)</th>
                                 <th>Amount Paid (₱)</th>
-                                <th>Payment Method</th>
+                                <th>Payment Method Check-in</th>
+                                <th>Payment Method Check-out</th>
                                 <th>Total Additional Charges (₱)</th>
                                 <th>Status</th>
                                 <th>Actions</th>
@@ -798,33 +854,42 @@ try {
                             <td><?php echo htmlspecialchars(number_format($row['grand_total_due'], 2)); ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['amount_paid'], 2)); ?></td>
                             <td><?php
-                                    $pm = $row['payment_method'] ?? '';
-                                    $pm_norm = strtolower(trim((string)$pm));
+                                    $pm_checkin = $row['payment_method_checkin'] ?? '';
+                                    $pm_norm = strtolower(trim((string)$pm_checkin));
                                     if ($pm_norm === 'gcash') $pm_display = 'GCash';
                                     elseif ($pm_norm === 'paymaya') $pm_display = 'PayMaya';
                                     elseif ($pm_norm === 'cash') $pm_display = 'Cash';
-                                    else $pm_display = $pm ? ucfirst($pm) : '-';
+                                    else $pm_display = $pm_checkin ? ucfirst($pm_checkin) : '-';
+                                    echo htmlspecialchars($pm_display);
+                                ?></td>
+                            <td><?php
+                                    $pm_checkout = $row['payment_method_checkout'] ?? '';
+                                    $pm_norm = strtolower(trim((string)$pm_checkout));
+                                    if ($pm_norm === 'gcash') $pm_display = 'GCash';
+                                    elseif ($pm_norm === 'paymaya') $pm_display = 'PayMaya';
+                                    elseif ($pm_norm === 'cash') $pm_display = 'Cash';
+                                    else $pm_display = $pm_checkout ? ucfirst($pm_checkout) : '-';
                                     echo htmlspecialchars($pm_display);
                                 ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['total_charges'], 2)); ?></td>
                             <td>
                                 <?php
-                                // Calculate live status based on verified/approved payments
-                                $status_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
-                                $status_stmt->execute(['bill_id' => $row['bill_id']]);
-                                $verified_paid = floatval($status_stmt->fetchColumn());
+                                // Status determination:
+                                // "Paid" only if tenant is inactive (checked out)
+                                // Otherwise based on payment status: "Partial" if payment exists, "Pending" if no payment
                                 $status_label = '';
                                 $status_class = '';
-                                if ($verified_paid >= floatval($row['amount_paid'])) {
+                                
+                                if ($row['tenant_status'] === 'inactive') {
+                                    // Customer has checked out - mark as Paid
                                     $status_label = 'Paid';
                                     $status_class = 'success';
-                                } elseif ($verified_paid > 0) {
+                                } elseif ($row['amount_paid'] > 0) {
+                                    // Has some payment but not checked out
                                     $status_label = 'Partial';
                                     $status_class = 'warning';
-                                } elseif ($row['status'] == 'overdue') {
-                                    $status_label = 'Overdue';
-                                    $status_class = 'danger';
                                 } else {
+                                    // No payment yet
                                     $status_label = 'Pending';
                                     $status_class = 'secondary';
                                 }
@@ -1399,6 +1464,157 @@ function switchView(view) {
         navButtons[1].classList.add('active');
         // Update URL without reloading
         window.history.pushState({}, '', 'bills.php?view=archive');
+    }
+}
+</script>
+
+<!-- Check Out Modal -->
+<div class="modal fade" id="checkoutModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title"><i class="bi bi-exit"></i> Customer Check Out</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST" action="bill_actions.php?action=checkout">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="checkout_tenant" class="form-label">Select Customer <span class="text-danger">*</span></label>
+                        <select class="form-select" id="checkout_tenant" name="tenant_id" required onchange="loadCheckoutDetails()">
+                            <option value="">-- Choose a Customer --</option>
+                            <?php foreach ($checkout_tenants as $tenant): ?>
+                                <option value="<?php echo $tenant['id']; ?>">
+                                    <?php echo htmlspecialchars($tenant['name']); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
+                    <!-- Customer Details Card -->
+                    <div id="checkoutDetailsCard" class="card mb-3" style="display: none;">
+                        <div class="card-body">
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <p class="mb-2"><strong><i class="bi bi-person"></i> Name:</strong> <span id="co_name" class="text-muted">-</span></p>
+                                    <p class="mb-2"><strong><i class="bi bi-envelope"></i> Email:</strong> <span id="co_email" class="text-muted small">-</span></p>
+                                </div>
+                                <div class="col-md-6">
+                                    <p class="mb-2"><strong><i class="bi bi-door-closed"></i> Room:</strong> <span id="co_room" class="badge bg-info">-</span></p>
+                                    <p class="mb-2"><strong><i class="bi bi-telephone"></i> Phone:</strong> <span id="co_phone" class="text-muted">-</span></p>
+                                </div>
+                            </div>
+                            <hr>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <p class="mb-2"><strong>Amount Due:</strong><br><span id="co_amount_due" class="text-danger" style="font-size: 1.2rem; font-weight: 600;">₱0.00</span></p>
+                                </div>
+                                <div class="col-md-6">
+                                    <p class="mb-2"><strong>Amount Paid:</strong><br><span id="co_amount_paid" class="text-success" style="font-size: 1.2rem; font-weight: 600;">₱0.00</span></p>
+                                </div>
+                            </div>
+                            <div class="row mt-2">
+                                <div class="col-12">
+                                    <p class="mb-0"><strong>Grand Total Due:</strong><br><span id="co_remaining" class="text-warning" style="font-size: 1.3rem; font-weight: 700;">₱0.00</span></p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Additional Charges Section -->
+                    <div id="chargesSection" style="display: none;">
+                        <h6 class="mb-3"><i class="bi bi-receipt"></i> Additional Charges</h6>
+                        <div id="chargesList" class="mb-3">
+                            <!-- Charges will be loaded here -->
+                        </div>
+                    </div>
+
+                    <hr>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <label for="checkout_method" class="form-label">Payment Method <span class="text-danger">*</span></label>
+                            <select class="form-select" id="checkout_method" name="payment_method" required>
+                                <option value="">-- Select Payment Method --</option>
+                                <option value="cash">Cash</option>
+                                <option value="gcash">GCash</option>
+                                <option value="paymaya">PayMaya</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="checkout_amount" class="form-label">Final Amount to Collect <span class="text-danger">*</span></label>
+                            <input type="number" class="form-control" id="checkout_amount" name="final_amount" step="0.01" readonly placeholder="₱0.00">
+                        </div>
+                    </div>
+
+                    <div class="mt-3">
+                        <label for="checkout_notes" class="form-label">Checkout Notes (Optional)</label>
+                        <textarea class="form-control" id="checkout_notes" name="checkout_notes" placeholder="Any notes about the checkout..." rows="2"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-danger">
+                        <i class="bi bi-check-circle"></i> Process Check Out
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+// Load checkout details when tenant is selected
+async function loadCheckoutDetails() {
+    const tenantId = document.getElementById('checkout_tenant').value;
+    const detailsCard = document.getElementById('checkoutDetailsCard');
+    const chargesSection = document.getElementById('chargesSection');
+    const chargesList = document.getElementById('chargesList');
+    const finalAmount = document.getElementById('checkout_amount');
+    
+    if (!tenantId) {
+        detailsCard.style.display = 'none';
+        chargesSection.style.display = 'none';
+        finalAmount.value = '';
+        return;
+    }
+
+    try {
+        const response = await fetch('api_get_checkout_details.php?tenant_id=' + tenantId);
+        const data = await response.json();
+        
+        if (data.success) {
+            // Populate customer details
+            document.getElementById('co_name').textContent = data.tenant_name;
+            document.getElementById('co_email').textContent = data.email;
+            document.getElementById('co_phone').textContent = data.phone;
+            document.getElementById('co_room').textContent = data.room_number || 'N/A';
+            document.getElementById('co_amount_due').textContent = '₱' + parseFloat(data.amount_due).toFixed(2);
+            document.getElementById('co_amount_paid').textContent = '₱' + parseFloat(data.amount_paid).toFixed(2);
+            document.getElementById('co_remaining').textContent = '₱' + parseFloat(data.remaining).toFixed(2);
+            
+            // Update final amount to collect
+            finalAmount.value = parseFloat(data.remaining).toFixed(2);
+            
+            // Populate charges
+            if (data.charges && data.charges.length > 0) {
+                let chargesHTML = '<div class="table-responsive"><table class="table table-sm mb-0"><tbody>';
+                let totalCharges = 0;
+                data.charges.forEach(charge => {
+                    chargesHTML += '<tr><td>' + charge.category + '</td><td class="text-end"><strong>₱' + parseFloat(charge.cost).toFixed(2) + '</strong></td></tr>';
+                    totalCharges += parseFloat(charge.cost);
+                });
+                chargesHTML += '</tbody></table></div>';
+                chargesList.innerHTML = chargesHTML;
+                chargesSection.style.display = 'block';
+            } else {
+                chargesSection.style.display = 'none';
+            }
+            
+            detailsCard.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('Error loading checkout details:', error);
+        alert('Error loading checkout details. Please try again.');
     }
 }
 </script>

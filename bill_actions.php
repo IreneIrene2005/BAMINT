@@ -477,6 +477,129 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = 'Error processing walk-in: ' . $e->getMessage();
             header('location: bills.php'); exit;
         }
+    
+    } elseif ($action === 'checkout') {
+        // Process customer checkout: record final payment, mark tenant inactive, free room
+        $tenant_id = intval($_POST['tenant_id'] ?? 0);
+        $final_amount = floatval($_POST['final_amount'] ?? 0);
+        $payment_method = $_POST['payment_method'] ?? 'cash';
+        $checkout_notes = $_POST['checkout_notes'] ?? '';
+        
+        if (!$tenant_id || $final_amount < 0) {
+            $_SESSION['error'] = 'Invalid checkout data.';
+            header('location: bills.php');
+            exit;
+        }
+        
+        try {
+            $conn->beginTransaction();
+            
+            // Get tenant and room details
+            $tenant_stmt = $conn->prepare("SELECT id, room_id, name FROM tenants WHERE id = :id");
+            $tenant_stmt->execute(['id' => $tenant_id]);
+            $tenant = $tenant_stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$tenant) {
+                throw new Exception('Tenant not found.');
+            }
+            
+            $room_id = $tenant['room_id'];
+            
+            // Get unpaid bills to record payment against
+            $bills_stmt = $conn->prepare("
+                SELECT id, amount_due, amount_paid 
+                FROM bills 
+                WHERE tenant_id = :tenant_id 
+                AND status IN ('pending', 'partial', 'unpaid', 'overdue')
+                ORDER BY billing_month ASC
+            ");
+            $bills_stmt->execute(['tenant_id' => $tenant_id]);
+            $unpaid_bills = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            // Apply payment to bills (FIFO - oldest first)
+            $remaining_payment = $final_amount;
+            foreach ($unpaid_bills as $bill) {
+                if ($remaining_payment <= 0) break;
+                
+                $bill_balance = $bill['amount_due'] - $bill['amount_paid'];
+                $payment_on_bill = min($bill_balance, $remaining_payment);
+                
+                $new_amount_paid = $bill['amount_paid'] + $payment_on_bill;
+                $new_status = ($new_amount_paid >= $bill['amount_due']) ? 'paid' : 'partial';
+                
+                $update_bill = $conn->prepare("
+                    UPDATE bills 
+                    SET amount_paid = :amount_paid, status = :status, paid_date = :paid_date
+                    WHERE id = :id
+                ");
+                $update_bill->execute([
+                    'amount_paid' => $new_amount_paid,
+                    'status' => $new_status,
+                    'paid_date' => ($new_status === 'paid') ? date('Y-m-d') : null,
+                    'id' => $bill['id']
+                ]);
+                
+                // Record payment transaction for this bill
+                $trans_sql = "INSERT INTO payment_transactions 
+                             (bill_id, tenant_id, payment_amount, payment_method, payment_status, payment_date, notes, recorded_by) 
+                             VALUES (:bill_id, :tenant_id, :payment_amount, :payment_method, :payment_status, :payment_date, :notes, :recorded_by)";
+                $trans_stmt = $conn->prepare($trans_sql);
+                $trans_stmt->execute([
+                    'bill_id' => $bill['id'],
+                    'tenant_id' => $tenant_id,
+                    'payment_amount' => $payment_on_bill,
+                    'payment_method' => $payment_method,
+                    'payment_status' => 'approved',
+                    'payment_date' => date('Y-m-d'),
+                    'notes' => 'Checkout payment. ' . $checkout_notes,
+                    'recorded_by' => $_SESSION['id']
+                ]);
+                
+                $remaining_payment -= $payment_on_bill;
+            }
+            
+            // Mark tenant as inactive with end_date
+            $update_tenant = $conn->prepare("
+                UPDATE tenants 
+                SET status = 'inactive', end_date = :end_date
+                WHERE id = :id
+            ");
+            $update_tenant->execute([
+                'end_date' => date('Y-m-d'),
+                'id' => $tenant_id
+            ]);
+            
+            // Set room back to available
+            if ($room_id) {
+                $update_room = $conn->prepare("
+                    UPDATE rooms 
+                    SET status = 'available' 
+                    WHERE id = :id
+                ");
+                $update_room->execute(['id' => $room_id]);
+                
+                // Update room_requests to mark checkout
+                $update_requests = $conn->prepare("
+                    UPDATE room_requests 
+                    SET status = 'completed', checkout_date = :checkout_date
+                    WHERE tenant_id = :tenant_id AND room_id = :room_id AND status != 'completed'
+                ");
+                $update_requests->execute([
+                    'checkout_date' => date('Y-m-d'),
+                    'tenant_id' => $tenant_id,
+                    'room_id' => $room_id
+                ]);
+            }
+            
+            $conn->commit();
+            $_SESSION['message'] = "Customer {$tenant['name']} checked out successfully! Payment of ₱" . number_format($final_amount, 2) . " recorded.";
+        } catch (Exception $e) {
+            $conn->rollBack();
+            $_SESSION['error'] = "Error processing checkout: " . $e->getMessage();
+        }
+        
+        header("location: bills.php");
+        exit;
     }
 } else { // GET request
     if ($action === 'delete') {
