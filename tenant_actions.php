@@ -288,6 +288,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         header("location: tenants.php");
         exit;
+    } elseif ($action === 'archive') {
+        $id = $_GET['id'];
+        try {
+            // backdate end_date so tenant appears in archive immediately and mark inactive
+            $sql = "UPDATE tenants SET end_date = DATE_SUB(NOW(), INTERVAL 8 DAY), status = 'inactive' WHERE id = :id";
+            $stmt = $conn->prepare($sql);
+            $stmt->execute(['id' => $id]);
+            $_SESSION['message'] = "Tenant archived successfully!";
+        } catch (Exception $e) {
+            $_SESSION['error'] = "Error archiving tenant: " . $e->getMessage();
+        }
+        header("location: tenants.php");
+        exit;
+    } elseif ($action === 'restore') {
+        $id = $_GET['id'];
+        try {
+            // clear end_date so tenant no longer meets archive criteria; keep status as inactive
+            $sql = "UPDATE tenants SET end_date = NULL WHERE id = :id";
+            $stmt = $conn->prepare($sql);
+            $stmt->execute(['id' => $id]);
+            $_SESSION['message'] = "Tenant restored from archive.";
+        } catch (Exception $e) {
+            $_SESSION['error'] = "Error restoring tenant: " . $e->getMessage();
+        }
+        header("location: tenants.php");
+        exit;
     } elseif ($action === 'edit') {
         $id = $_GET['id'];
         $sql = "SELECT * FROM tenants WHERE id = :id";

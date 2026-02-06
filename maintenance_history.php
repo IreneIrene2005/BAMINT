@@ -14,12 +14,36 @@ $filter_month = isset($_GET['month']) ? $_GET['month'] : '';
 $filter_category = isset($_GET['category']) ? $_GET['category'] : '';
 $filter_tenant = isset($_GET['tenant']) ? $_GET['tenant'] : '';
 
+// Determine which assigned column exists and prepare JOIN accordingly
+$hasAssignedTo = false;
+$hasAssignedStaff = false;
+try {
+    $colStmt = $conn->query("SHOW COLUMNS FROM maintenance_requests LIKE 'assigned_to'");
+    $hasAssignedTo = $colStmt && $colStmt->rowCount() > 0;
+    $colStmt2 = $conn->query("SHOW COLUMNS FROM maintenance_requests LIKE 'assigned_staff_id'");
+    $hasAssignedStaff = $colStmt2 && $colStmt2->rowCount() > 0;
+} catch (Exception $e) {
+    // ignore and assume columns may not exist
+}
+
 // Build the SQL query
+$assignedJoin = '';
+$assignedSelect = 'NULL as assigned_username';
+if ($hasAssignedTo) {
+    $assignedJoin = 'LEFT JOIN admins a ON maintenance_requests.assigned_to = a.id';
+    $assignedSelect = 'a.username as assigned_username';
+} elseif ($hasAssignedStaff) {
+    $assignedJoin = 'LEFT JOIN admins a ON maintenance_requests.assigned_staff_id = a.id';
+    $assignedSelect = 'a.username as assigned_username';
+}
+
 $sql = "SELECT maintenance_requests.*, tenants.name as tenant_name, rooms.room_number,
-       (SELECT a.username FROM maintenance_history mh JOIN admins a ON mh.completed_by = a.id WHERE mh.maintenance_request_id = maintenance_requests.id ORDER BY mh.moved_to_history_at DESC LIMIT 1) AS completed_by
+       (SELECT a2.username FROM maintenance_history mh JOIN admins a2 ON mh.completed_by = a2.id WHERE mh.maintenance_request_id = maintenance_requests.id ORDER BY mh.moved_to_history_at DESC LIMIT 1) AS completed_by,
+       " . $assignedSelect . "
         FROM maintenance_requests
         LEFT JOIN tenants ON maintenance_requests.tenant_id = tenants.id
         LEFT JOIN rooms ON maintenance_requests.room_id = rooms.id
+        " . $assignedJoin . "
         WHERE maintenance_requests.status IN ('completed', 'cancelled')";
 
 if ($search) {
@@ -135,14 +159,7 @@ $stats = $stats_stmt->fetch(PDO::FETCH_ASSOC);
                         </div>
                     </div>
                 </div>
-                <div class="col-md-2">
-                    <div class="card">
-                        <div class="card-body">
-                            <h6 class="card-title">Avg Resolution</h6>
-                            <p class="card-text display-6"><?php echo htmlspecialchars($stats['avg_resolution_hours']); ?><small>h</small></p>
-                        </div>
-                    </div>
-                </div>
+                
                 <div class="col-md-2">
                     <div class="card">
                         <div class="card-body">
@@ -274,8 +291,8 @@ $stats = $stats_stmt->fetch(PDO::FETCH_ASSOC);
                                 <?php endif; ?>
                             </td>
                             <td>
-                                <?php if ($row['username']): ?>
-                                    <small><?php echo htmlspecialchars($row['username']); ?></small>
+                                <?php if (!empty($row['assigned_username'])): ?>
+                                    <small><?php echo htmlspecialchars($row['assigned_username']); ?></small>
                                 <?php else: ?>
                                     <span class="text-muted"><small>Unassigned</small></span>
                                 <?php endif; ?>

@@ -565,7 +565,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 WHERE id = :id
             ");
             $update_tenant->execute([
-                'end_date' => date('Y-m-d'),
+                // backdate end_date so tenant immediately appears in archive view
+                'end_date' => date('Y-m-d', strtotime('-8 days')),
                 'id' => $tenant_id
             ]);
             

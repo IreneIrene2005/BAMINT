@@ -81,11 +81,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Fetch tenants for selector
+// Fetch tenants for selector (exclude archived tenants: inactive with end_date set)
 $tenants = [];
 try {
     // Use room_number for display (join rooms)
-    $tstmt = $pdo->query("SELECT t.id, t.name, t.room_id, r.room_number FROM tenants t LEFT JOIN rooms r ON t.room_id = r.id ORDER BY t.name ASC");
+    $tstmt = $pdo->query("SELECT t.id, t.name, t.room_id, r.room_number FROM tenants t LEFT JOIN rooms r ON t.room_id = r.id WHERE NOT (t.status = 'inactive' AND t.end_date IS NOT NULL) ORDER BY t.name ASC");
     $tenants = $tstmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     // ignore

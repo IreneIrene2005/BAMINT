@@ -112,51 +112,76 @@ require_once "db/database.php";
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-// Placeholder chart data for demonstration
+// Create empty charts and populate via API
 const bookingsBarChart = new Chart(document.getElementById('bookingsBarChart'), {
     type: 'bar',
-    data: {
-        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
-        datasets: [{
-            label: 'Bookings',
-            data: [12, 19, 3, 5, 2, 3],
-            backgroundColor: '#0d6efd'
-        }]
-    }
+    data: { labels: [], datasets: [{ label: 'Bookings', data: [], backgroundColor: '#0d6efd' }] },
+    options: { responsive: true }
 });
 const revenuePieChart = new Chart(document.getElementById('revenuePieChart'), {
     type: 'pie',
-    data: {
-        labels: ['Room', 'Service', 'Other'],
-        datasets: [{
-            label: 'Revenue',
-            data: [12000, 5000, 2000],
-            backgroundColor: ['#198754', '#ffc107', '#dc3545']
-        }]
-    }
+    data: { labels: [], datasets: [{ label: 'Revenue', data: [], backgroundColor: ['#198754', '#ffc107', '#dc3545'] }] },
+    options: { responsive: true }
 });
 const occupancyLineChart = new Chart(document.getElementById('occupancyLineChart'), {
     type: 'line',
-    data: {
-        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
-        datasets: [{
-            label: 'Occupancy Rate (%)',
-            data: [80, 85, 78, 90, 88, 92],
-            borderColor: '#17a2b8',
-            fill: false
-        }]
-    }
+    data: { labels: [], datasets: [{ label: 'Occupancy Rate (%)', data: [], borderColor: '#17a2b8', fill: false }] },
+    options: { responsive: true }
 });
 const paymentBarChart = new Chart(document.getElementById('paymentBarChart'), {
     type: 'bar',
-    data: {
-        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
-        datasets: [{
-            label: 'Payments',
-            data: [8000, 9500, 7000, 11000, 10500, 12000],
-            backgroundColor: '#6c757d'
-        }]
-    }
+    data: { labels: [], datasets: [{ label: 'Payments', data: [], backgroundColor: '#6c757d' }] },
+    options: { responsive: true }
+});
+
+// Fetch data and update charts
+function fetchAndRender(reportType, period, date) {
+    const url = `reports_api.php?reportType=${encodeURIComponent(reportType)}&period=${encodeURIComponent(period)}&date=${encodeURIComponent(date)}`;
+    fetch(url)
+        .then(res => res.json())
+        .then(json => {
+            if (!json.success) { alert('Error fetching report: ' + (json.message||'Unknown')); return; }
+            const labels = json.labels || [];
+            const data = json.data || [];
+            if (reportType === 'bookings') {
+                bookingsBarChart.data.labels = labels;
+                bookingsBarChart.data.datasets[0].data = data;
+                bookingsBarChart.update();
+            } else if (reportType === 'revenue') {
+                revenuePieChart.data.labels = labels;
+                revenuePieChart.data.datasets[0].data = data;
+                revenuePieChart.update();
+            } else if (reportType === 'occupancy') {
+                occupancyLineChart.data.labels = labels;
+                occupancyLineChart.data.datasets[0].data = data;
+                occupancyLineChart.update();
+            } else if (reportType === 'payments') {
+                paymentBarChart.data.labels = labels;
+                paymentBarChart.data.datasets[0].data = data;
+                paymentBarChart.update();
+            }
+        }).catch(err => { console.error(err); alert('Failed to load report data'); });
+}
+
+// On page load, render default reports for the selected options
+document.addEventListener('DOMContentLoaded', function(){
+    const form = document.querySelector('form');
+    const reportTypeEl = document.getElementById('reportType');
+    const periodEl = document.getElementById('period');
+    const dateEl = document.getElementById('date');
+    // Set default date to today
+    if (!dateEl.value) dateEl.value = new Date().toISOString().slice(0,10);
+    // Initial render
+    fetchAndRender(reportTypeEl.value, periodEl.value, dateEl.value);
+    // Auto-refresh reports every 10 seconds
+    setInterval(function(){
+        fetchAndRender(reportTypeEl.value, periodEl.value, dateEl.value);
+    }, 10000);
+    // Handle form submit
+    form.addEventListener('submit', function(e){
+        e.preventDefault();
+        fetchAndRender(reportTypeEl.value, periodEl.value, dateEl.value);
+    });
 });
 </script>
 </body>

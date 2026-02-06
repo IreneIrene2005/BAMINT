@@ -44,9 +44,7 @@ $stmt = $conn->prepare($sql_income);
 $stmt->execute(['month' => $current_month]);
 $total_income = $stmt->fetchColumn();
 
-// Overdue payments count
-$sql_overdue = "SELECT COUNT(*) FROM bills WHERE status = 'overdue'";
-$overdue_payments = $conn->query($sql_overdue)->fetchColumn();
+// Overdue payments count removed — card eliminated per request
 
 // Pending maintenance requests
 $sql_pending_maintenance = "SELECT COUNT(*) FROM maintenance_requests WHERE status = 'pending'";
@@ -171,6 +169,34 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                 </button>
             </div>
 
+            <!-- CHARTS -->
+            <div class="row mb-4">
+                <div class="col-lg-6 mb-3">
+                    <div class="card">
+                        <div class="card-header">Revenue (Last 6 months)</div>
+                        <div class="card-body">
+                            <div class="chart-container"><canvas id="revenueChart"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-3 mb-3">
+                    <div class="card">
+                        <div class="card-header">Occupancy</div>
+                        <div class="card-body">
+                            <div class="chart-container"><canvas id="occupancyChart"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-3 mb-3">
+                    <div class="card">
+                        <div class="card-header">Rooms by Type</div>
+                        <div class="card-body">
+                            <div class="chart-container"><canvas id="roomTypesChart"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- KEY METRICS SECTION -->
             <div class="row mb-4">
                 <h4 class="mb-3">Key Metrics</h4>
@@ -183,7 +209,7 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                                 <i class="bi bi-people"></i>
                             </div>
                             <div class="metric-label">Total Tenants</div>
-                            <div class="metric-value"><?php echo $total_tenants; ?></div>
+                            <div id="totalTenantsValue" class="metric-value"><?php echo $total_tenants; ?></div>
                         </div>
                     </div>
                 </div>
@@ -196,7 +222,7 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                                 <i class="bi bi-building"></i>
                             </div>
                             <div class="metric-label">Total Rooms</div>
-                            <div class="metric-value"><?php echo $total_rooms; ?></div>
+                            <div id="totalRoomsValue" class="metric-value"><?php echo $total_rooms; ?></div>
                         </div>
                     </div>
                 </div>
@@ -209,7 +235,7 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                                 <i class="bi bi-percent"></i>
                             </div>
                             <div class="metric-label">Occupancy Rate</div>
-                            <div class="metric-value"><?php echo $occupancy_rate; ?>%</div>
+                            <div id="occupancyRateValue" class="metric-value"><?php echo $occupancy_rate; ?>%</div>
                         </div>
                     </div>
                 </div>
@@ -222,23 +248,12 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                                 <i class="bi bi-cash-coin"></i>
                             </div>
                             <div class="metric-label">This Month</div>
-                            <div class="metric-value">₱<?php echo number_format($total_income, 0); ?></div>
+                            <div id="totalIncomeValue" class="metric-value">₱<?php echo number_format($total_income, 0); ?></div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Overdue Payments -->
-                <div class="col-md-2 col-sm-4 mb-3">
-                    <div class="card metric-card bg-warning text-white h-100">
-                        <div class="card-body text-center">
-                            <div class="metric-icon">
-                                <i class="bi bi-exclamation-triangle"></i>
-                            </div>
-                            <div class="metric-label">Overdue Bills</div>
-                            <div class="metric-value"><?php echo $overdue_payments; ?></div>
-                        </div>
-                    </div>
-                </div>
+                <!-- Overdue Payments card removed -->
 
                 <!-- Pending Maintenance -->
                 <div class="col-md-2 col-sm-4 mb-3">
@@ -248,7 +263,7 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                                 <i class="bi bi-tools"></i>
                             </div>
                             <div class="metric-label">Pending Requests</div>
-                            <div class="metric-value"><?php echo $pending_maintenance; ?></div>
+                            <div id="pendingMaintenanceValue" class="metric-value"><?php echo $pending_maintenance; ?></div>
                         </div>
                     </div>
                 </div>
@@ -414,17 +429,40 @@ function refreshDashboard() {
         second: '2-digit'
     });
     
-    // Reload page data via AJAX
-    fetch('dashboard.php')
-        .then(response => response.text())
-        .then(data => {
-            console.log('Dashboard data refreshed');
+    // Fetch fresh metrics from API and update DOM
+    fetch('dashboard_api.php')
+        .then(response => response.json())
+        .then(json => {
+            if (!json.success) return console.error('Dashboard API error', json.error);
+            document.getElementById('totalTenantsValue').textContent = json.total_tenants;
+            document.getElementById('totalRoomsValue').textContent = json.total_rooms;
+            document.getElementById('occupancyRateValue').textContent = json.occupancy_rate + '%';
+            document.getElementById('totalIncomeValue').textContent = '₱' + Math.round(json.total_income).toLocaleString();
+            document.getElementById('pendingMaintenanceValue').textContent = json.pending_maintenance;
+            document.getElementById('updateTime').textContent = new Date().toLocaleString();
+            // Update charts if data available
+            if (json.revenue_labels && json.revenue_data && typeof revenueChart !== 'undefined') {
+                revenueChart.data.labels = json.revenue_labels;
+                revenueChart.data.datasets[0].data = json.revenue_data;
+                revenueChart.update();
+            }
+            if (json.occupancy_labels && json.occupancy_data && typeof occupancyChart !== 'undefined') {
+                occupancyChart.data.labels = json.occupancy_labels;
+                occupancyChart.data.datasets[0].data = json.occupancy_data;
+                occupancyChart.update();
+            }
+            if (json.room_types_labels && json.room_types_data && typeof roomTypesChart !== 'undefined') {
+                roomTypesChart.data.labels = json.room_types_labels;
+                roomTypesChart.data.datasets[0].data = json.room_types_data;
+                roomTypesChart.update();
+            }
         })
         .catch(error => console.error('Error refreshing dashboard:', error));
 }
 
-// Auto-refresh every 5 minutes (300000 ms)
-setInterval(refreshDashboard, 300000);
+// Refresh immediately on load then auto-refresh every 10 seconds (10000 ms)
+refreshDashboard();
+setInterval(refreshDashboard, 10000);
 
 // Update time display every minute
 setInterval(function() {

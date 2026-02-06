@@ -12,6 +12,8 @@ require_once "db/database.php";
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
 $filter_status = isset($_GET['status']) ? $_GET['status'] : '';
 $filter_room = isset($_GET['room']) ? $_GET['room'] : '';
+// view: 'active' or 'archive'
+$view = isset($_GET['view']) ? $_GET['view'] : 'active';
 
 // Build the SQL query with search and filter
 $sql = "SELECT tenants.*, COALESCE(rooms.room_number, (
@@ -35,8 +37,13 @@ if ($filter_room) {
     $sql .= " AND tenants.room_id = :room_id";
 }
 
+
+// Exclude archived tenants (status = 'inactive') so archived tenants are immediately hidden from active view
+$sql .= " AND tenants.status != 'inactive'";
+
 $sql .= " ORDER BY tenants.name ASC";
 
+// Prepare active tenants statement
 $stmt = $conn->prepare($sql);
 
 if ($search) {
@@ -52,8 +59,49 @@ if ($filter_room) {
     $stmt->bindParam(':room_id', $filter_room);
 }
 
+// Prepare archive query
+$archive_sql = "SELECT tenants.*, COALESCE(rooms.room_number, (
+            SELECT r2.room_number FROM bills b 
+            JOIN rooms r2 ON b.room_id = r2.id 
+            WHERE b.tenant_id = tenants.id ORDER BY b.id DESC LIMIT 1
+        )) as room_number FROM tenants LEFT JOIN rooms ON tenants.room_id = rooms.id WHERE tenants.status = 'inactive'";
+
+if ($search) {
+    $archive_sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR tenants.phone LIKE :search OR tenants.id_number LIKE :search)";
+}
+
+if ($filter_status) {
+    $archive_sql .= " AND tenants.status = :status";
+}
+
+if ($filter_room) {
+    $archive_sql .= " AND tenants.room_id = :room_id";
+}
+
+    $archive_sql .= " ORDER BY tenants.name ASC";
+
+// prepare statements
+
+$archive_stmt = $conn->prepare($archive_sql);
+
+// bind same params for archive statement if needed
+if ($search) {
+    $archive_stmt->bindParam(':search', $search_param);
+}
+
+if ($filter_status) {
+    $archive_stmt->bindParam(':status', $filter_status);
+}
+
+if ($filter_room) {
+    $archive_stmt->bindParam(':room_id', $filter_room);
+}
+
 $stmt->execute();
-$tenants = $stmt;
+$archive_stmt->execute();
+
+// choose which result set to iterate
+$tenants = ($view === 'archive') ? $archive_stmt : $stmt;
 
 
 
@@ -93,6 +141,10 @@ $available_rooms = $conn->query($sql_available_rooms);
             <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
                 <h1 class="h2">Customers</h1>
                 <div class="btn-toolbar mb-2 mb-md-0">
+                    <div class="btn-group me-2" role="group" aria-label="View switch">
+                        <a href="tenants.php?view=active" class="btn btn-sm <?php echo $view === 'active' ? 'btn-primary' : 'btn-outline-primary'; ?>">Active</a>
+                        <a href="tenants.php?view=archive" class="btn btn-sm <?php echo $view === 'archive' ? 'btn-primary' : 'btn-outline-primary'; ?>">Archive</a>
+                    </div>
                     <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#addTenantModal">
                         <i class="bi bi-plus-circle"></i>
                         Add Walk-in Customer
@@ -195,10 +247,14 @@ $available_rooms = $conn->query($sql_available_rooms);
                             </td>
                             <td>
                                 <a href="tenant_actions.php?action=edit&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-primary" title="Edit"><i class="bi bi-pencil-square"></i></a>
-                                <?php if($row['status'] === 'active'): ?>
-                                    <a href="tenant_actions.php?action=deactivate&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-warning" title="Deactivate" onclick="return confirm('Deactivate this tenant?');"><i class="bi bi-pause-circle"></i></a>
+                                <?php if ($view === 'archive'): ?>
+                                    <a href="tenant_actions.php?action=restore&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Restore" onclick="return confirm('Restore this tenant from archive?');"><i class="bi bi-arrow-counterclockwise"></i></a>
                                 <?php else: ?>
-                                    <a href="tenant_actions.php?action=activate&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Activate"><i class="bi bi-play-circle"></i></a>
+                                    <?php if($row['status'] === 'active'): ?>
+                                        <a href="tenant_actions.php?action=deactivate&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-warning" title="Deactivate" onclick="return confirm('Deactivate this tenant?');"><i class="bi bi-pause-circle"></i></a>
+                                    <?php else: ?>
+                                        <a href="tenant_actions.php?action=activate&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Activate"><i class="bi bi-play-circle"></i></a>
+                                    <?php endif; ?>
                                 <?php endif; ?>
                                 <a href="tenant_actions.php?action=delete&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-danger" title="Delete" onclick="return confirm('Are you sure you want to delete this tenant?');"><i class="bi bi-trash"></i></a>
                             </td>
