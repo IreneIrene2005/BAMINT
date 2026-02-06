@@ -142,6 +142,171 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         header("location: bills.php");
         exit;
         
+    } elseif ($action === 'add_new_bill') {
+        // Add new bill based on selected booking and payment details
+        $booking_room = $_POST['booking_room'] ?? '';
+        $payment_type = $_POST['payment_type'] ?? 'full';
+        $payment_method = $_POST['payment_method'] ?? 'cash';
+        $amount_paid = floatval($_POST['amount_paid'] ?? 0);
+        $remaining_balance = floatval($_POST['remaining_balance'] ?? 0);
+        
+        if (!$booking_room) {
+            $_SESSION['error'] = "Please select a booking/room.";
+            header("location: bills.php");
+            exit;
+        }
+        
+        try {
+            $conn->beginTransaction();
+            
+            // Get booking and tenant details
+            $booking_sql = "
+                SELECT 
+                    rr.id as booking_id,
+                    rr.tenant_id,
+                    rr.room_id,
+                    r.rate as room_rate,
+                    r.room_number,
+                    rr.checkin_date,
+                    rr.checkout_date
+                FROM room_requests rr
+                JOIN rooms r ON rr.room_id = r.id
+                WHERE rr.id = :booking_id
+            ";
+            $booking_stmt = $conn->prepare($booking_sql);
+            $booking_stmt->execute(['booking_id' => $booking_room]);
+            $booking = $booking_stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$booking) {
+                throw new Exception("Invalid booking selected.");
+            }
+            
+            $tenant_id = $booking['tenant_id'];
+            $room_id = $booking['room_id'];
+            $room_rate = floatval($booking['room_rate']);
+            
+            // Calculate amount due based on payment type
+            $amount_due = ($payment_type === 'downpayment') ? ($room_rate * 0.5) : $room_rate;
+            
+            // Determine bill status
+            $status = 'pending';
+            if ($amount_paid >= $amount_due) {
+                $status = 'paid';
+            } elseif ($amount_paid > 0) {
+                $status = 'partial';
+            }
+            
+            // Create bill
+            $insert_bill_sql = "
+                INSERT INTO bills (
+                    tenant_id, 
+                    room_id, 
+                    billing_month, 
+                    amount_due, 
+                    amount_paid,
+                    due_date, 
+                    status, 
+                    notes, 
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    :tenant_id, 
+                    :room_id, 
+                    :billing_month, 
+                    :amount_due, 
+                    :amount_paid,
+                    :due_date, 
+                    :status, 
+                    :notes,
+                    NOW(),
+                    NOW()
+                )
+            ";
+            
+            $billing_month = date('Y-m-01');
+            $due_date = date('Y-m-15');
+            $payment_type_note = ($payment_type === 'downpayment') ? 'Downpayment (50%)' : 'Full Payment';
+            $notes = "Payment Type: {$payment_type_note} | Payment Method: " . ucfirst($payment_method);
+            
+            $insert_bill_stmt = $conn->prepare($insert_bill_sql);
+            $insert_bill_stmt->execute([
+                'tenant_id' => $tenant_id,
+                'room_id' => $room_id,
+                'billing_month' => $billing_month,
+                'amount_due' => $amount_due,
+                'amount_paid' => $amount_paid,
+                'due_date' => $due_date,
+                'status' => $status,
+                'notes' => $notes
+            ]);
+            
+            $bill_id = $conn->lastInsertId();
+            
+            // Record payment transaction if amount is paid
+            if ($amount_paid > 0) {
+                $payment_sql = "
+                    INSERT INTO payment_transactions (
+                        bill_id,
+                        tenant_id,
+                        payment_amount,
+                        payment_method,
+                        payment_date,
+                        payment_status,
+                        notes,
+                        recorded_by,
+                        created_at
+                    ) VALUES (
+                        :bill_id,
+                        :tenant_id,
+                        :payment_amount,
+                        :payment_method,
+                        :payment_date,
+                        :payment_status,
+                        :notes,
+                        :recorded_by,
+                        NOW()
+                    )
+                ";
+                
+                $payment_stmt = $conn->prepare($payment_sql);
+                $payment_stmt->execute([
+                    'bill_id' => $bill_id,
+                    'tenant_id' => $tenant_id,
+                    'payment_amount' => $amount_paid,
+                    'payment_method' => $payment_method,
+                    'payment_date' => date('Y-m-d'),
+                    'payment_status' => 'verified',
+                    'notes' => $notes,
+                    'recorded_by' => $_SESSION['admin_id']
+                ]);
+            }
+            
+            $conn->commit();
+            
+            // Send notification to tenant
+            $month_display = date('F Y');
+            createNotification(
+                $conn,
+                'tenant',
+                $tenant_id,
+                'new_bill',
+                'New Bill Created',
+                "A new bill for {$month_display} has been created. Amount due: ₱" . number_format($amount_due, 2),
+                $bill_id,
+                'bill',
+                'bills.php'
+            );
+            
+            $_SESSION['message'] = "Bill created successfully! Amount paid: ₱" . number_format($amount_paid, 2) . ", Remaining: ₱" . number_format($remaining_balance, 2);
+            
+        } catch (Exception $e) {
+            $conn->rollBack();
+            $_SESSION['error'] = "Error creating bill: " . $e->getMessage();
+        }
+        
+        header("location: bills.php");
+        exit;
+        
     } elseif ($action === 'edit') {
         // Update bill payment
         $id = $_POST['id'];
@@ -216,6 +381,87 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         header("location: bills.php");
         exit;
+    }
+    elseif ($action === 'process_walk_in') {
+        // Process walk-in payment setup: create invoice (downpayment or full) and mark room booked
+        $tenant_id = isset($_GET['tenant_id']) ? intval($_GET['tenant_id']) : (isset($_POST['tenant_id']) ? intval($_POST['tenant_id']) : 0);
+        $room_id = $_POST['room_id'] ?? null;
+        $checkin = $_POST['checkin_date'] ?? null;
+        $checkout = $_POST['checkout_date'] ?? null;
+        $payment_option = $_POST['payment_option'] ?? 'full_payment';
+
+        if (!$tenant_id) {
+            $_SESSION['error'] = 'Missing tenant information.';
+            header('location: bills.php'); exit;
+        }
+
+        try {
+            $conn->beginTransaction();
+
+            // Validate room availability if room selected
+            if ($room_id) {
+                $room_stmt = $conn->prepare("SELECT status, rate FROM rooms WHERE id = :id");
+                $room_stmt->execute(['id' => $room_id]);
+                $room = $room_stmt->fetch(PDO::FETCH_ASSOC);
+                if (!$room) throw new Exception('Selected room not found.');
+                if ($room['status'] !== 'available' && $room['status'] !== 'vacant') {
+                    // allow booking only if available
+                    throw new Exception('Selected room is not available.');
+                }
+                $rate = floatval($room['rate']);
+            } else {
+                $rate = 0;
+            }
+
+            // compute nights
+            $nights = 0;
+            if ($checkin && $checkout) {
+                try { $ci = new DateTime($checkin); $co = new DateTime($checkout); $nights = max(0, (int)$ci->diff($co)->days); } catch (Exception $e) { $nights = 0; }
+            }
+            $total_cost = $rate * max(1, $nights);
+
+            if ($payment_option === 'downpayment') {
+                $amount_due = round($total_cost * 0.5, 2);
+            } else {
+                $amount_due = round($total_cost, 2);
+            }
+
+            // Create or update bill for this tenant and room (pending)
+            $billing_month = $checkin ? (new DateTime($checkin))->format('Y-m') : date('Y-m');
+            $due_date = $checkin ?: date('Y-m-d');
+
+            $notes = ($payment_option === 'downpayment') ? "ADVANCE PAYMENT (Downpayment) - {$nights} night(s), ₱" . number_format($rate,2) . "/night" : "ADVANCE PAYMENT - Full payment (" . $nights . " night(s))";
+
+            // Insert bill
+            $insert = $conn->prepare("INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, created_at, updated_at) VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, NOW(), NOW())");
+            $insert->execute([
+                'tenant_id' => $tenant_id,
+                'room_id' => $room_id,
+                'billing_month' => $billing_month,
+                'amount_due' => $amount_due,
+                'due_date' => $due_date,
+                'notes' => $notes
+            ]);
+            $bill_id = $conn->lastInsertId();
+
+            // Mark room booked so it's reserved
+            if ($room_id) {
+                $upd = $conn->prepare("UPDATE rooms SET status = 'booked' WHERE id = :id");
+                $upd->execute(['id' => $room_id]);
+            }
+
+            // If there is a pending room_request, update its status to pending_payment (already) and link to bill via notes or leave as-is
+            $rr_stmt = $conn->prepare("UPDATE room_requests SET status = 'pending_payment' WHERE tenant_id = :tenant_id AND room_id = :room_id AND status != 'approved'");
+            $rr_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $room_id]);
+
+            $conn->commit();
+            $_SESSION['message'] = 'Invoice generated. Bill ID #' . $bill_id;
+            header('location: bills.php'); exit;
+        } catch (Exception $e) {
+            $conn->rollBack();
+            $_SESSION['error'] = 'Error processing walk-in: ' . $e->getMessage();
+            header('location: bills.php'); exit;
+        }
     }
 } else { // GET request
     if ($action === 'delete') {

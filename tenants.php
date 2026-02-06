@@ -95,7 +95,7 @@ $available_rooms = $conn->query($sql_available_rooms);
                 <div class="btn-toolbar mb-2 mb-md-0">
                     <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#addTenantModal">
                         <i class="bi bi-plus-circle"></i>
-                        Add New Customer
+                        Add Walk-in Customer
                     </button>
                 </div>
             </div>
@@ -171,12 +171,12 @@ $available_rooms = $conn->query($sql_available_rooms);
                             </td>
                             <td>
                                 <?php
-                                // Only show stay duration if latest room_request is approved or occupied
-                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                // Show only start/move-in date (remove end date as requested)
+                                $room_req_stmt = $conn->prepare("SELECT checkin_date, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                                 $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
                                 $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                if ($dates && $dates['checkin_date'] && $dates['checkout_date'] && in_array($dates['status'], ['approved', 'occupied'])) {
-                                    echo htmlspecialchars(date('M d, Y', strtotime($dates['checkin_date'])) . ' - ' . date('M d, Y', strtotime($dates['checkout_date'])));
+                                if ($dates && $dates['checkin_date'] && in_array($dates['status'], ['approved', 'occupied'])) {
+                                    echo htmlspecialchars(date('M d, Y', strtotime($dates['checkin_date'])));
                                 } else {
                                     echo '-';
                                 }
@@ -209,12 +209,13 @@ $available_rooms = $conn->query($sql_available_rooms);
 <div class="modal fade" id="addTenantModal" tabindex="-1" aria-labelledby="addTenantModalLabel" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="addTenantModalLabel">Add New Tenant</h5>
+            <div class="modal-header">
+                <h5 class="modal-title" id="addTenantModalLabel">Add Walk-in Customer</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
-        <form action="tenant_actions.php?action=add" method="post">
+                <form action="tenant_actions.php?action=add" method="post">
+                    <input type="hidden" name="source" value="walk-in">
           <div class="mb-3">
             <label for="name" class="form-label">Name</label>
             <input type="text" class="form-control" id="name" name="name" required>
@@ -227,26 +228,45 @@ $available_rooms = $conn->query($sql_available_rooms);
             <label for="phone" class="form-label">Phone</label>
             <input type="text" class="form-control" id="phone" name="phone" required>
           </div>
-          <div class="mb-3">
-            <label for="id_number" class="form-label">ID Number</label>
-            <input type="text" class="form-control" id="id_number" name="id_number">
-          </div>
-          <div class="mb-3">
-            <label for="room_id" class="form-label">Room</label>
-            <select class="form-control" id="room_id" name="room_id" required>
-                <option value="">Select a room</option>
-                <?php 
-                $available_rooms->execute();
-                while($room = $available_rooms->fetch(PDO::FETCH_ASSOC)): ?>
-                    <option value="<?php echo $room['id']; ?>"><?php echo htmlspecialchars($room['room_number']); ?></option>
-                <?php endwhile; ?>
-            </select>
-          </div>
-          <div class="mb-3">
-            <label for="start_date" class="form-label">Start Date</label>
-            <input type="date" class="form-control" id="start_date" name="start_date" required>
-          </div>
-          <button type="submit" class="btn btn-primary">Save Tenant</button>
+
+                                        <div class="mb-3">
+                                                <label for="room_type" class="form-label">Room Type</label>
+                                                <select class="form-control" id="room_type" name="room_type">
+                                                                <option value="">Any Type</option>
+                                                                <option value="single">Single</option>
+                                                                <option value="double">Double</option>
+                                                                <option value="family">Family</option>
+                                                </select>
+                                        </div>
+
+                                        <div class="mb-3">
+                                                <label for="room_id" class="form-label">Room</label>
+                                                <select class="form-control" id="room_id" name="room_id">
+                                                                <option value="">Select a room (optional)</option>
+                                                                <?php 
+                                                                $available_rooms->execute();
+                                                                while($room = $available_rooms->fetch(PDO::FETCH_ASSOC)): ?>
+                                                                                <option value="<?php echo $room['id']; ?>" data-room-type="<?php echo htmlspecialchars(strtolower($room['room_type'])); ?>"><?php echo htmlspecialchars($room['room_number']); ?> (<?php echo htmlspecialchars($room['room_type']); ?>) - ₱<?php echo number_format($room['rate'],2); ?></option>
+                                                                <?php endwhile; ?>
+                                                </select>
+                                        </div>
+
+                                        <div class="mb-3">
+                                                <label for="tenant_count" class="form-label">Number of Occupants</label>
+                                                <input type="number" class="form-control" id="tenant_count" name="tenant_count" value="1" min="1">
+                                        </div>
+
+                                        <div id="co_tenants_container"></div>
+
+                    <div class="mb-3">
+                        <label for="checkin_date" class="form-label">Check-in Date</label>
+                        <input type="date" class="form-control" id="checkin_date" name="checkin_date">
+                    </div>
+                    <div class="mb-3">
+                        <label for="checkout_date" class="form-label">Check-out Date</label>
+                        <input type="date" class="form-control" id="checkout_date" name="checkout_date">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save Walk-in Customer</button>
         </form>
       </div>
     </div>
@@ -254,5 +274,95 @@ $available_rooms = $conn->query($sql_available_rooms);
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// Client-side filtering, roommate fields and validation for Add Walk-in Customer modal
+document.addEventListener('DOMContentLoaded', function(){
+    const roomTypeEl = document.getElementById('room_type');
+    const roomSelect = document.getElementById('room_id');
+    const tenantCountEl = document.getElementById('tenant_count');
+    const coTenantContainer = document.getElementById('co_tenants_container');
+
+    function filterRooms(){
+        if(!roomTypeEl || !roomSelect) return;
+        const type = (roomTypeEl.value || '').toLowerCase();
+        for(const opt of roomSelect.options){
+            const rt = (opt.dataset.roomType || '').toLowerCase();
+            if(!type || type === rt){
+                opt.style.display = '';
+            } else {
+                opt.style.display = 'none';
+                if(roomSelect.value === opt.value) roomSelect.value = '';
+            }
+        }
+    }
+
+    function renderCoTenants(){
+        coTenantContainer.innerHTML = '';
+        const count = parseInt(tenantCountEl.value) || 1;
+        if(count > 1){
+            for(let i=1;i< count;i++){
+                const idx = i;
+                const card = document.createElement('div');
+                card.className = 'card mb-2 p-2';
+                card.innerHTML = `
+                    <h6 class="mb-2">Roommate ${idx}</h6>
+                    <div class="mb-2">
+                        <input type="text" class="form-control" name="co_tenant_name_${idx}" placeholder="Full name" required>
+                    </div>
+                    <div class="mb-2">
+                        <input type="email" class="form-control" name="co_tenant_email_${idx}" placeholder="Email (optional)">
+                    </div>
+                    <div class="mb-2">
+                        <input type="text" class="form-control" name="co_tenant_phone_${idx}" placeholder="Phone (optional)">
+                    </div>
+                `;
+                coTenantContainer.appendChild(card);
+            }
+        }
+    }
+
+    roomTypeEl && roomTypeEl.addEventListener('change', function(){
+        const t = this.value;
+        if(t === 'single'){
+            tenantCountEl.value = 1; tenantCountEl.min = 1; tenantCountEl.disabled = true;
+        } else if(t === 'double'){
+            tenantCountEl.value = 2; tenantCountEl.min = 2; tenantCountEl.disabled = true;
+        } else {
+            tenantCountEl.disabled = false; tenantCountEl.min = 1;
+        }
+        filterRooms(); renderCoTenants();
+    });
+
+    tenantCountEl && tenantCountEl.addEventListener('input', function(){ renderCoTenants(); });
+
+    // initial render
+    filterRooms(); renderCoTenants();
+
+    // Validate before submit
+    const addForm = document.querySelector('#addTenantModal form');
+    if(addForm){
+        addForm.addEventListener('submit', function(e){
+            const type = (roomTypeEl && roomTypeEl.value) ? roomTypeEl.value.toLowerCase() : '';
+            const count = parseInt(tenantCountEl.value) || 1;
+            if(type === 'single' && count !== 1){ e.preventDefault(); alert('Single rooms must have exactly 1 occupant.'); return; }
+            if(type === 'double' && count !== 2){ e.preventDefault(); alert('Double rooms must have exactly 2 occupants.'); return; }
+            // if count >1 ensure roommate names filled
+            if(count > 1){
+                for(let i=1;i<count;i++){
+                    const nameEl = addForm.querySelector('[name="co_tenant_name_' + i + '"]');
+                    if(!nameEl || !nameEl.value.trim()){ e.preventDefault(); alert('Please fill roommate ' + i + "'s name."); return; }
+                }
+            }
+            // If room selected, require checkin and checkout
+            const roomSelectEl = document.getElementById('room_id');
+            const checkinEl = document.getElementById('checkin_date');
+            const checkoutEl = document.getElementById('checkout_date');
+            if(roomSelectEl && roomSelectEl.value){
+                if(!checkinEl.value || !checkoutEl.value){ e.preventDefault(); alert('Please select check-in and check-out dates when selecting a room.'); return; }
+            }
+        });
+    }
+});
+</script>
 </body>
 </html>

@@ -280,6 +280,38 @@ try {
 } catch (Exception $e) {
     $tenants_needing_bills = [];
 }
+
+// Get walk-in customers waiting for room selection & payment (based on pending room_requests)
+$walk_in_customers = [];
+try {
+    $walk_in_stmt = $conn->prepare("
+        SELECT 
+            t.id,
+            t.name,
+            t.email,
+            t.phone,
+            t.status,
+            rr.id as room_request_id,
+            rr.room_id,
+            rr.checkin_date,
+            rr.checkout_date,
+            b.id as bill_id,
+            b.amount_due,
+            b.amount_paid,
+            b.notes,
+            rr.request_date as requested_at,
+            t.created_at
+        FROM tenants t
+        JOIN room_requests rr ON rr.tenant_id = t.id AND rr.status = 'pending_payment'
+        LEFT JOIN bills b ON b.tenant_id = t.id AND b.room_id = rr.room_id AND b.status = 'pending'
+        WHERE t.status = 'inactive'
+        ORDER BY rr.request_date DESC
+    ");
+    $walk_in_stmt->execute();
+    $walk_in_customers = $walk_in_stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $walk_in_customers = [];
+}
 ?>
 
 <!DOCTYPE html>
@@ -308,6 +340,10 @@ try {
                     <button type="button" class="btn btn-sm btn-outline-secondary me-2" data-bs-toggle="modal" data-bs-target="#generateBillsModal">
                         <i class="bi bi-plus-circle"></i>
                         Generate Bills
+                    </button>
+                    <button type="button" class="btn btn-sm btn-primary me-2" data-bs-toggle="modal" data-bs-target="#addNewBillModal">
+                        <i class="bi bi-plus-circle"></i>
+                        Add New Bill
                     </button>
                 </div>
             </div>
@@ -384,7 +420,142 @@ try {
                 </div>
             </div>
 
-            <!-- Tab Navigation: Active Bills | Archive -->
+            <!-- Walk-in Customers Section -->
+            <?php if (!empty($walk_in_customers)): ?>
+            <div class="card border-info mb-4">
+                <div class="card-header bg-info bg-opacity-10 border-info">
+                    <h5 class="mb-0"><i class="bi bi-person-walking"></i> Walk-in Customers - Pending Payment & Room Selection</h5>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-striped table-sm">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Customer Name</th>
+                                    <th>Email</th>
+                                    <th>Phone</th>
+                                    <th>Registered</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($walk_in_customers as $customer): ?>
+                                <tr>
+                                    <td><strong><?php echo htmlspecialchars($customer['name']); ?></strong></td>
+                                    <td><?php echo htmlspecialchars($customer['email']); ?></td>
+                                    <td><?php echo htmlspecialchars($customer['phone']); ?></td>
+                                    <td><?php echo date('M d, Y', strtotime($customer['created_at'])); ?></td>
+                                    <td>
+                                        <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#walkInModal<?php echo $customer['id']; ?>">
+                                            <i class="bi bi-credit-card"></i> Process Payment & Room
+                                        </button>
+                                    </td>
+                                </tr>
+
+                                <!-- Walk-in Payment & Room Modal -->
+                                <div class="modal fade" id="walkInModal<?php echo $customer['id']; ?>" tabindex="-1" aria-hidden="true">
+                                    <div class="modal-dialog modal-lg">
+                                        <div class="modal-content">
+                                            <div class="modal-header bg-primary bg-opacity-10">
+                                                <h5 class="modal-title">
+                                                    <i class="bi bi-person-walking"></i> Process Walk-in Customer - <?php echo htmlspecialchars($customer['name']); ?>
+                                                </h5>
+                                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                            </div>
+                                            <div class="modal-body">
+                                                <div class="row mb-3">
+                                                    <div class="col-md-6">
+                                                        <h6>Customer Info</h6>
+                                                        <p><strong><?php echo htmlspecialchars($customer['name']); ?></strong><br>
+                                                        <?php echo htmlspecialchars($customer['email']); ?><br>
+                                                        <?php echo htmlspecialchars($customer['phone']); ?></p>
+                                                    </div>
+                                                    <div class="col-md-6">
+                                                        <h6>Next Steps</h6>
+                                                        <p>1. Select a room and check-in/out dates<br>
+                                                        2. Process payment (Full or Downpayment)<br>
+                                                        3. Confirm booking</p>
+                                                    </div>
+                                                </div>
+
+                                                <hr>
+
+                                                <form method="POST" action="bill_actions.php?action=process_walk_in&tenant_id=<?php echo $customer['id']; ?>">
+                                                    <div class="row mb-3">
+                                                        <div class="col-md-6">
+                                                            <label for="room_walk_in_<?php echo $customer['id']; ?>" class="form-label">Select Room <span class="text-danger">*</span></label>
+                                                            <select class="form-control" name="room_id" id="room_walk_in_<?php echo $customer['id']; ?>" required>
+                                                                <option value="">-- Choose a Room --</option>
+                                                                <?php
+                                                                $available_rooms_stmt = $conn->prepare("SELECT id, room_number, room_type, rate FROM rooms WHERE status = 'available' ORDER BY room_number ASC");
+                                                                $available_rooms_stmt->execute();
+                                                                while ($room = $available_rooms_stmt->fetch(PDO::FETCH_ASSOC)):
+                                                                ?>
+                                                                    <option value="<?php echo $room['id']; ?>">
+                                                                        <?php echo htmlspecialchars($room['room_number']); ?> (<?php echo htmlspecialchars($room['room_type']); ?>) - ₱<?php echo number_format($room['rate'], 2); ?>/night
+                                                                    </option>
+                                                                <?php endwhile; ?>
+                                                            </select>
+                                                        </div>
+                                                    </div>
+
+                                                    <div class="row mb-3">
+                                                        <div class="col-md-6">
+                                                            <label for="checkin_walk_in_<?php echo $customer['id']; ?>" class="form-label">Check-in Date <span class="text-danger">*</span></label>
+                                                            <input type="date" class="form-control" name="checkin_date" id="checkin_walk_in_<?php echo $customer['id']; ?>" required>
+                                                        </div>
+                                                        <div class="col-md-6">
+                                                            <label for="checkout_walk_in_<?php echo $customer['id']; ?>" class="form-label">Check-out Date <span class="text-danger">*</span></label>
+                                                            <input type="date" class="form-control" name="checkout_date" id="checkout_walk_in_<?php echo $customer['id']; ?>" required>
+                                                        </div>
+                                                    </div>
+
+                                                    <div class="row mb-3">
+                                                        <div class="col-md-12">
+                                                            <label class="form-label">Payment Option <span class="text-danger">*</span></label>
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="radio" name="payment_option" id="full_pay_<?php echo $customer['id']; ?>" value="full_payment" required>
+                                                                <label class="form-check-label" for="full_pay_<?php echo $customer['id']; ?>">
+                                                                    <strong>Full Payment</strong> - Pay entire stay amount upfront
+                                                                </label>
+                                                            </div>
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="radio" name="payment_option" id="down_pay_<?php echo $customer['id']; ?>" value="downpayment" required>
+                                                                <label class="form-check-label" for="down_pay_<?php echo $customer['id']; ?>">
+                                                                    <strong>Downpayment</strong> - Pay 50% now, balance on checkout
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div class="alert alert-info mb-3">
+                                                        <small><i class="bi bi-info-circle"></i> <strong>Note:</strong> The customer will receive a payment link after you click "Generate Invoice". They can pay online.</small>
+                                                    </div>
+                                                </form>
+                                            </div>
+                                            <div class="modal-footer">
+                                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                                <form method="POST" action="bill_actions.php?action=process_walk_in&tenant_id=<?php echo $customer['id']; ?>" style="display: inline;">
+                                                    <input type="hidden" name="room_id" value="">
+                                                    <input type="hidden" name="checkin_date" value="">
+                                                    <input type="hidden" name="checkout_date" value="">
+                                                    <input type="hidden" name="payment_option" value="">
+                                                    <button type="submit" class="btn btn-primary" onclick="document.querySelector('#walkInModal<?php echo $customer['id']; ?> form').submit();">
+                                                        <i class="bi bi-check-circle"></i> Generate Invoice & Payment Link
+                                                    </button>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+
             <ul class="nav nav-tabs mb-3" role="tablist">
                 <li class="nav-item" role="presentation">
                     <button class="nav-link <?php echo $view === 'active' ? 'active' : ''; ?>" onclick="switchView('active')" type="button">
@@ -845,6 +1016,139 @@ try {
   </div>
 </div>
 
+<!-- Add New Bill Modal -->
+<div class="modal fade" id="addNewBillModal" tabindex="-1" aria-labelledby="addNewBillModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="addNewBillModalLabel">Add New Bill</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <form id="addNewBillForm" action="bill_actions.php?action=add_new_bill" method="post">
+          
+                    <!-- Note: Guest information is taken from selected booking -->
+
+          <!-- Stay Details Section -->
+          <div class="mb-4">
+            <h6 class="text-primary border-bottom pb-2"><strong>Stay Details</strong></h6>
+            
+            <div class="mb-3">
+              <label for="booking_room" class="form-label">Select Booked Room</label>
+              <select class="form-control" id="booking_room" name="booking_room" onchange="loadBookingDetails()">
+                <option value="">-- Select a booked room --</option>
+              </select>
+              <small class="text-muted">Shows rooms with confirmed bookings</small>
+            </div>
+
+            <!-- Booking Details Card -->
+            <div id="bookingDetailsCard" style="display: none; margin-bottom: 10px;">
+              <div class="card bg-light">
+                <div class="card-body">
+                                    <div class="row mb-2">
+                                        <div class="col-md-6">
+                                            <small class="text-muted d-block">Room Number</small>
+                                            <strong id="bookingRoomNumber">-</strong>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <small class="text-muted d-block">Customer Name</small>
+                                            <strong id="bookingCustomerName">-</strong>
+                                        </div>
+                                    </div>
+                                    <div class="row mb-2">
+                                        <div class="col-md-6">
+                                            <small class="text-muted d-block">Contact Number</small>
+                                            <strong id="bookingCustomerPhone">-</strong>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <small class="text-muted d-block">Email Address</small>
+                                            <strong id="bookingCustomerEmail">-</strong>
+                                        </div>
+                                    </div>
+                                    <div class="row mb-2">
+                                        <div class="col-md-6">
+                                            <small class="text-muted d-block">Check-in Date</small>
+                                            <strong id="bookingCheckIn">-</strong>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <small class="text-muted d-block">Check-out Date</small>
+                                            <strong id="bookingCheckOut">-</strong>
+                                        </div>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <small class="text-muted d-block">Room Rate</small>
+                                            <strong id="bookingRoomRate" class="text-success">₱0.00</strong>
+                                        </div>
+                                    </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Payment Details Section -->
+          <div class="mb-4">
+            <h6 class="text-primary border-bottom pb-2"><strong>Payment Details</strong></h6>
+            
+            <div class="mb-3">
+              <label class="form-label">Payment Type <span class="text-danger">*</span></label>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="payment_type" id="payment_full" value="full" checked onchange="updatePaymentCalculation()">
+                <label class="form-check-label" for="payment_full">
+                  Full Payment
+                </label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="payment_type" id="payment_downpayment" value="downpayment" onchange="updatePaymentCalculation()">
+                <label class="form-check-label" for="payment_downpayment">
+                  Downpayment (50%)
+                </label>
+              </div>
+            </div>
+
+            <div class="mb-3">
+              <label class="form-label">Payment Method <span class="text-danger">*</span></label>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="payment_method" id="method_cash" value="cash" checked>
+                <label class="form-check-label" for="method_cash">
+                  Cash
+                </label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="payment_method" id="method_card" value="card">
+                <label class="form-check-label" for="method_card">
+                  Card
+                </label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="payment_method" id="method_online" value="online">
+                <label class="form-check-label" for="method_online">
+                  Online (GCash / Bank)
+                </label>
+              </div>
+            </div>
+
+            <div class="mb-3">
+              <label for="amount_paid_new" class="form-label">Amount Paid (₱) <span class="text-danger">*</span></label>
+              <input type="number" step="0.01" class="form-control" id="amount_paid_new" name="amount_paid" placeholder="0.00" oninput="updatePaymentCalculation()" required>
+            </div>
+
+            <div class="mb-3">
+              <label for="remaining_balance_new" class="form-label">Remaining Balance (₱)</label>
+              <input type="number" step="0.01" class="form-control" id="remaining_balance_new" name="remaining_balance" placeholder="0.00" readonly style="background-color: #f8f9fa;">
+            </div>
+          </div>
+
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary">Save Bill</button>
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 
 <script>
@@ -899,7 +1203,163 @@ document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('amount_due').value = rateText;
         });
     }
+
+    // Load booked rooms when Add New Bill Modal is shown
+    const addNewBillModal = document.getElementById('addNewBillModal');
+    if (addNewBillModal) {
+        addNewBillModal.addEventListener('show.bs.modal', function() {
+            loadBookedRooms();
+        });
+    }
+    // Bind payment type radios to auto-fill amounts when changed
+    const paymentTypeRadios = document.querySelectorAll('input[name="payment_type"]');
+    paymentTypeRadios.forEach(r => r.addEventListener('change', function(){
+        // autoFill amounts based on selected booking and type
+        updatePaymentCalculation(true);
+    }));
+
+    const amountPaidEl = document.getElementById('amount_paid_new');
+    if (amountPaidEl) {
+        amountPaidEl.addEventListener('input', function(){ updatePaymentCalculation(false); });
+    }
 });
+
+// Load booked rooms for the "Add New Bill" modal
+function loadBookedRooms() {
+    const bookingRoomSelect = document.getElementById('booking_room');
+    
+    // Make AJAX call to fetch booked rooms
+    fetch('api_get_booked_rooms.php')
+        .then(response => response.json())
+        .then(data => {
+            bookingRoomSelect.innerHTML = '<option value="">-- Select a booked room --</option>';
+            
+            if (data.success && data.bookings.length > 0) {
+                data.bookings.forEach(booking => {
+                    const option = document.createElement('option');
+                    option.value = booking.booking_id;
+                    option.setAttribute('data-room-number', booking.room_number);
+                    option.setAttribute('data-customer-name', booking.tenant_name);
+                    option.setAttribute('data-tenant-phone', booking.tenant_phone || '');
+                    option.setAttribute('data-tenant-email', booking.tenant_email || '');
+                    // use raw ISO dates for calculations
+                    option.setAttribute('data-checkin-date', booking.raw_checkin || '');
+                    option.setAttribute('data-checkout-date', booking.raw_checkout || '');
+                    option.setAttribute('data-room-rate', booking.room_rate);
+                    option.setAttribute('data-room-id', booking.room_id);
+                    option.setAttribute('data-tenant-id', booking.tenant_id);
+                    // human readable label
+                    const displayCheckIn = booking.checkin_date ? booking.checkin_date : '';
+                    option.textContent = `${booking.room_number} - ${booking.tenant_name} ${displayCheckIn ? '(' + displayCheckIn + ')' : ''}`;
+                    bookingRoomSelect.appendChild(option);
+                });
+            } else {
+                const option = document.createElement('option');
+                option.textContent = '-- No booked rooms available --';
+                option.disabled = true;
+                bookingRoomSelect.appendChild(option);
+            }
+        })
+        .catch(error => {
+            console.error('Error loading booked rooms:', error);
+            bookingRoomSelect.innerHTML = '<option value="">-- Error loading rooms --</option>';
+        });
+}
+
+// Load booking details when a room is selected
+function loadBookingDetails() {
+    const bookingRoomSelect = document.getElementById('booking_room');
+    const selectedOption = bookingRoomSelect.options[bookingRoomSelect.selectedIndex];
+    const bookingDetailsCard = document.getElementById('bookingDetailsCard');
+
+    if (!bookingRoomSelect.value) {
+        bookingDetailsCard.style.display = 'none';
+        document.getElementById('amount_paid_new').value = '';
+        document.getElementById('remaining_balance_new').value = '';
+        return;
+    }
+
+    // Get data from selected option (raw ISO dates expected)
+    const roomNumber = selectedOption.getAttribute('data-room-number') || '-';
+    const customerName = selectedOption.getAttribute('data-customer-name') || '-';
+    const checkinDate = selectedOption.getAttribute('data-checkin-date') || '';
+    const checkoutDate = selectedOption.getAttribute('data-checkout-date') || '';
+    const roomRate = parseFloat(selectedOption.getAttribute('data-room-rate')) || 0;
+
+    // Format dates for display
+    let formattedCheckIn = checkinDate;
+    let formattedCheckOut = checkoutDate;
+    if (checkinDate) {
+        const d = new Date(checkinDate + 'T00:00:00');
+        formattedCheckIn = d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+    if (checkoutDate) {
+        const d = new Date(checkoutDate + 'T00:00:00');
+        formattedCheckOut = d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+
+    // Update booking details card
+    document.getElementById('bookingRoomNumber').textContent = roomNumber;
+    document.getElementById('bookingCustomerName').textContent = customerName;
+    document.getElementById('bookingCheckIn').textContent = formattedCheckIn || '-';
+    document.getElementById('bookingCheckOut').textContent = formattedCheckOut || '-';
+    document.getElementById('bookingRoomRate').textContent = '₱' + roomRate.toFixed(2);
+    document.getElementById('bookingCustomerPhone').textContent = selectedOption.getAttribute('data-tenant-phone') || '-';
+    document.getElementById('bookingCustomerEmail').textContent = selectedOption.getAttribute('data-tenant-email') || '-';
+
+    // Compute nights and total
+    const nights = computeNights(checkinDate, checkoutDate);
+    const totalAmount = parseFloat((roomRate * nights).toFixed(2));
+    bookingRoomSelect.setAttribute('data-total-amount', totalAmount);
+
+    bookingDetailsCard.style.display = 'block';
+
+    // Auto-apply payment type calculation to set amount paid and remaining
+    updatePaymentCalculation(true);
+}
+
+// Update payment calculation based on payment type and amount paid
+function updatePaymentCalculation(autoFill) {
+    const bookingRoomSelect = document.getElementById('booking_room');
+    const selectedOption = bookingRoomSelect.options[bookingRoomSelect.selectedIndex] || {};
+    const roomRate = parseFloat(selectedOption.getAttribute && selectedOption.getAttribute('data-room-rate')) || 0;
+
+    const paymentType = (document.querySelector('input[name="payment_type"]:checked') || {}).value || 'full';
+    const amountPaidInput = document.getElementById('amount_paid_new');
+    const remainingBalanceInput = document.getElementById('remaining_balance_new');
+
+    const totalFromAttr = parseFloat(bookingRoomSelect.getAttribute('data-total-amount')) || 0;
+    const totalBillAmount = totalFromAttr || roomRate;
+
+    // If autoFill requested (e.g., on booking selection or payment type change), set typical amounts
+    if (autoFill) {
+        if (paymentType === 'downpayment') {
+            const down = parseFloat((totalBillAmount * 0.5).toFixed(2));
+            amountPaidInput.value = down.toFixed(2);
+            remainingBalanceInput.value = (totalBillAmount - down).toFixed(2);
+        } else {
+            // full
+            amountPaidInput.value = totalBillAmount.toFixed(2);
+            remainingBalanceInput.value = '0.00';
+        }
+        return;
+    }
+
+    // If admin edits amount_paid, recalc remaining
+    const amountPaidRaw = amountPaidInput.value;
+    const amountPaid = amountPaidRaw === '' ? 0 : parseFloat(amountPaidRaw) || 0;
+    const remaining = Math.max(0, totalBillAmount - amountPaid);
+    remainingBalanceInput.value = remaining.toFixed(2);
+}
+
+// compute nights between two ISO dates (checkout - checkin)
+function computeNights(checkin, checkout) {
+    if (!checkin || !checkout) return 1;
+    const c = new Date(checkin + 'T00:00:00');
+    const o = new Date(checkout + 'T00:00:00');
+    const diff = Math.ceil((o - c) / (1000 * 60 * 60 * 24));
+    return diff > 0 ? diff : 1;
+}
 
 // Function to switch between Active and Archive views
 function switchView(view) {

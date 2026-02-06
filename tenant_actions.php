@@ -16,19 +16,99 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = $_POST['name'];
         $email = $_POST['email'];
         $phone = $_POST['phone'];
-        $room_id = $_POST['room_id'] ?? null;
-        $start_date = $_POST['start_date'];
+        $tenant_count = isset($_POST['tenant_count']) ? intval($_POST['tenant_count']) : 1;
+        $source = $_POST['source'] ?? 'walk-in';
 
         $conn->beginTransaction();
         try {
-            // Create tenant without room assignment (admin approves and assigns room later)
-            $sql = "INSERT INTO tenants (name, email, phone, room_id, start_date, status) VALUES (:name, :email, :phone, :room_id, :start_date, 'inactive')";
+            // Create tenant record WITHOUT room assignment (walk-in customer)
+            $sql = "INSERT INTO tenants (name, email, phone, status) VALUES (:name, :email, :phone, 'inactive')";
             $stmt = $conn->prepare($sql);
-            $stmt->execute(['name' => $name, 'email' => $email, 'phone' => $phone, 'room_id' => $room_id, 'start_date' => $start_date]);
+            $stmt->execute(['name' => $name, 'email' => $email, 'phone' => $phone]);
+            $newTenantId = $conn->lastInsertId();
 
-            $sql_update_room = "UPDATE rooms SET status = 'occupied' WHERE id = :room_id AND :room_id IS NOT NULL";
-            $stmt_update_room = $conn->prepare($sql_update_room);
-            $stmt_update_room->execute(['room_id' => $room_id]);
+            // Save co-tenants if occupants > 1
+            if ($tenant_count > 1) {
+                for ($i = 1; $i < $tenant_count; $i++) {
+                    $co_name = isset($_POST['co_tenant_name_' . $i]) ? trim($_POST['co_tenant_name_' . $i]) : '';
+                    $co_email = isset($_POST['co_tenant_email_' . $i]) ? trim($_POST['co_tenant_email_' . $i]) : '';
+                    $co_phone = isset($_POST['co_tenant_phone_' . $i]) ? trim($_POST['co_tenant_phone_' . $i]) : '';
+                    if (!empty($co_name)) {
+                        $co_stmt = $conn->prepare("INSERT INTO co_tenants (primary_tenant_id, name, email, phone) VALUES (:primary_tenant_id, :name, :email, :phone)");
+                        $co_stmt->execute([
+                            'primary_tenant_id' => $newTenantId,
+                            'name' => $co_name,
+                            'email' => $co_email,
+                            'phone' => $co_phone
+                        ]);
+                    }
+                }
+            }
+
+            // If room and dates provided, create a room_request and generate an advance bill
+            $room_id = $_POST['room_id'] ?? null;
+            $checkin_date = $_POST['checkin_date'] ?? null;
+            $checkout_date = $_POST['checkout_date'] ?? null;
+            $notes = $_POST['notes'] ?? null;
+
+            if ($room_id && $checkin_date && $checkout_date) {
+                // Insert room request (pending payment)
+                $rr_stmt = $conn->prepare("INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status, checkin_date, checkout_date) VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending_payment', :checkin_date, :checkout_date)");
+                $rr_stmt->execute([
+                    'tenant_id' => $newTenantId,
+                    'room_id' => $room_id,
+                    'tenant_count' => $tenant_count,
+                    'tenant_info_name' => $name,
+                    'tenant_info_email' => $email,
+                    'tenant_info_phone' => $phone,
+                    'tenant_info_address' => null,
+                    'notes' => $notes,
+                    'checkin_date' => $checkin_date,
+                    'checkout_date' => $checkout_date
+                ]);
+
+                // Calculate advance amount (nights * rate)
+                $rate_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
+                $rate_stmt->execute(['room_id' => $room_id]);
+                $rate = floatval($rate_stmt->fetchColumn());
+                $nights = 0;
+                try {
+                    $ci = new DateTime($checkin_date);
+                    $co = new DateTime($checkout_date);
+                    $interval = $ci->diff($co);
+                    $nights = max(0, (int)$interval->days);
+                } catch (Exception $e) {
+                    $nights = 0;
+                }
+                $total_cost = $rate * max(1, $nights);
+
+                $bill_notes = "ADVANCE PAYMENT - Move-in fee (" . $nights . " night" . ($nights != 1 ? 's' : '') . ", ₱" . number_format($rate,2) . "/night)";
+                $billing_month = $checkin_date ? (new DateTime($checkin_date))->format('Y-m') : date('Y-m');
+                $due_date = $checkin_date ?: date('Y-m-d');
+
+                $bill_stmt = $conn->prepare("INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, created_at, updated_at) VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, NOW(), NOW())");
+                $bill_stmt->execute([
+                    'tenant_id' => $newTenantId,
+                    'room_id' => $room_id,
+                    'billing_month' => $billing_month,
+                    'amount_due' => $total_cost,
+                    'due_date' => $due_date,
+                    'notes' => $bill_notes
+                ]);
+                // Mark room as booked until payment is verified
+                $update_room_booked = $conn->prepare("UPDATE rooms SET status = 'booked' WHERE id = :room_id");
+                $update_room_booked->execute(['room_id' => $room_id]);
+            } else {
+                // Fallback: create initial placeholder bill/invoice for walk-in customer (pending payment)
+                $billing_month = date('Y-m');
+                $bill_notes = "WALK-IN CUSTOMER - Pending room selection and payment";
+                $bill_stmt = $conn->prepare("INSERT INTO bills (tenant_id, billing_month, amount_due, due_date, status, notes) VALUES (:tenant_id, :billing_month, 0, NOW(), 'pending', :notes)");
+                $bill_stmt->execute([
+                    'tenant_id' => $newTenantId,
+                    'billing_month' => $billing_month,
+                    'notes' => $bill_notes
+                ]);
+            }
             
             $conn->commit();
         } catch (Exception $e) {
@@ -46,7 +126,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $email = $_POST['email'];
         $phone = $_POST['phone'];
         $room_id = $_POST['room_id'] ?? null;
-        $start_date = $_POST['start_date'];
+        $checkin_date = $_POST['checkin_date'] ?? null;
+        $checkout_date = $_POST['checkout_date'] ?? null;
+        $start_date = $checkin_date; // Use checkin_date as start_date for backward compatibility
         $original_room_id = $_POST['original_room_id'] ?? null;
 
         $conn->beginTransaction();
@@ -276,22 +358,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <label for="phone" class="form-label">Phone</label>
                             <input type="text" class="form-control" id="phone" name="phone" value="<?php echo htmlspecialchars($tenant['phone']); ?>" required>
                         </div>
-                        <div class="mb-3">
-                            <label for="id_number" class="form-label">ID Number</label>
-                            <input type="text" class="form-control" id="id_number" name="id_number" value="<?php echo htmlspecialchars($tenant['id_number'] ?? ''); ?>">
-                        </div>
+                        
                         <div class="mb-3">
                             <label for="room_id" class="form-label">Room</label>
                             <select class="form-control" id="room_id" name="room_id" required>
                                 <option value="">Select a room</option>
                                 <?php foreach($available_rooms as $room): ?>
-                                    <option value="<?php echo $room['id']; ?>" <?php echo $tenant['room_id'] == $room['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($room['room_number']); ?></option>
+                                    <option value="<?php echo $room['id']; ?>" <?php echo $tenant['room_id'] == $room['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($room['room_number']); ?> (<?php echo htmlspecialchars($room['room_type']); ?>)</option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
                         <div class="mb-3">
-                            <label for="start_date" class="form-label">Start Date</label>
-                            <input type="date" class="form-control" id="start_date" name="start_date" value="<?php echo htmlspecialchars($tenant['start_date']); ?>" required>
+                            <label for="checkin_date" class="form-label">Check-in Date</label>
+                            <input type="date" class="form-control" id="checkin_date" name="checkin_date" value="<?php echo htmlspecialchars($tenant['start_date']); ?>" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="checkout_date" class="form-label">Check-out Date</label>
+                            <input type="date" class="form-control" id="checkout_date" name="checkout_date" value="">
                         </div>
                         <button type="submit" class="btn btn-primary">Save Changes</button>
                     </form>
