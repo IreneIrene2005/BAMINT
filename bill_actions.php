@@ -617,8 +617,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         header("location: bills.php");
         exit;
+    
+    } elseif ($action === 'archive') {
+        // Archive a bill by setting updated_at to 8 days ago
+        $id = $_GET['id'];
+        
+        try {
+            // Update updated_at to 8 days ago so it meets archive criteria (paid + 7 days old)
+            $sql = "UPDATE bills SET updated_at = DATE_SUB(NOW(), INTERVAL 8 DAY) WHERE id = :id";
+            $stmt = $conn->prepare($sql);
+            $stmt->execute(['id' => $id]);
+            
+            $_SESSION['message'] = "Bill archived successfully!";
+        } catch (Exception $e) {
+            $_SESSION['error'] = "Error archiving bill: " . $e->getMessage();
+        }
+        
+        header("location: bills.php");
+        exit;
         
     } elseif ($action === 'edit') {
+
+    } elseif ($action === 'restore') {
+        // Restore a bill by setting updated_at to now so it no longer meets the archive criteria
+        $id = $_GET['id'];
+
+        try {
+            $sql = "UPDATE bills SET updated_at = NOW() WHERE id = :id";
+            $stmt = $conn->prepare($sql);
+            $stmt->execute(['id' => $id]);
+
+            $_SESSION['message'] = "Bill restored to Payment Transactions.";
+        } catch (Exception $e) {
+            $_SESSION['error'] = "Error restoring bill: " . $e->getMessage();
+        }
+
+        header("location: bills.php");
+        exit;
+
         // Show edit form
         $id = $_GET['id'];
         $sql = "SELECT bills.*, tenants.name, rooms.room_number FROM bills 

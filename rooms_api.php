@@ -24,6 +24,14 @@ switch ($action) {
         }
         echo json_encode(['success' => true, 'rooms' => $rooms]);
         break;
+    case 'metrics':
+        // Return quick room counts for dashboard
+        $total = $conn->query("SELECT COUNT(*) as c FROM rooms")->fetch_assoc()['c'] ?? 0;
+        $occupied = $conn->query("SELECT COUNT(*) as c FROM rooms WHERE status = 'occupied'")->fetch_assoc()['c'] ?? 0;
+        $vacant = $conn->query("SELECT COUNT(*) as c FROM rooms WHERE status = 'available'")->fetch_assoc()['c'] ?? 0;
+        $maintenance = $conn->query("SELECT COUNT(*) as c FROM rooms WHERE status = 'under maintenance'")->fetch_assoc()['c'] ?? 0;
+        echo json_encode(['success' => true, 'total' => (int)$total, 'occupied' => (int)$occupied, 'vacant' => (int)$vacant, 'maintenance' => (int)$maintenance]);
+        break;
     case 'guests':
         $room_id = $_GET['room_id'] ?? 0;
         $guests = [];

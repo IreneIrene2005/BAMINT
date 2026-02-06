@@ -901,6 +901,7 @@ try {
                             <td>
                                 <a href="bill_actions.php?action=edit&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-primary" title="Edit"><i class="bi bi-pencil-square"></i></a>
                                 <a href="bill_actions.php?action=view&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-info" title="View Details"><i class="bi bi-eye"></i></a>
+                                <a href="bill_actions.php?action=archive&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-warning" title="Archive" onclick="return confirm('Archive this bill?');"><i class="bi bi-archive"></i></a>
                                 <a href="bill_actions.php?action=delete&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-danger" title="Delete" onclick="return confirm('Are you sure?');"><i class="bi bi-trash"></i></a>
                             </td>
                         </tr>
@@ -943,10 +944,6 @@ try {
                     </div>
                 </div>
 
-                <div class="alert alert-info mb-3">
-                    <i class="bi bi-info-circle"></i> <strong>Archive Information:</strong> These are paid bills that are older than 7 days. They are automatically moved here for record-keeping.
-                </div>
-
                 <div class="table-responsive">
                     <table class="table table-striped table-sm">
                         <thead>
@@ -966,7 +963,40 @@ try {
                             $archive_bills->execute();
                             while($row = $archive_bills->fetch(PDO::FETCH_ASSOC)) : ?>
                             <tr>
-                                <td><?php echo htmlspecialchars(date('F Y', strtotime($row['billing_month']))); ?></td>
+                                <td><?php 
+                                    // Safely format billing_month - handle various date formats
+                                    if (!empty($row['billing_month'])) {
+                                        $bm = strtotime($row['billing_month']);
+                                        // If parsing failed OR the year looks invalid, fallback to paid_date/updated_at
+                                        if ($bm !== false) {
+                                            $year = (int)date('Y', $bm);
+                                            if ($year > 1970) {
+                                                echo htmlspecialchars(date('F Y', $bm));
+                                            } else {
+                                                // fallback
+                                                if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
+                                                    echo htmlspecialchars(date('F Y', strtotime($row['paid_date'])));
+                                                } else {
+                                                    echo htmlspecialchars(date('F Y', strtotime($row['updated_at'])));
+                                                }
+                                            }
+                                        } else {
+                                            // fallback when strtotime fails
+                                            if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
+                                                echo htmlspecialchars(date('F Y', strtotime($row['paid_date'])));
+                                            } else {
+                                                echo htmlspecialchars(date('F Y', strtotime($row['updated_at'])));
+                                            }
+                                        }
+                                    } else {
+                                        // No billing_month - use paid_date/updated_at
+                                        if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
+                                            echo htmlspecialchars(date('F Y', strtotime($row['paid_date'])));
+                                        } else {
+                                            echo htmlspecialchars(date('F Y', strtotime($row['updated_at'])));
+                                        }
+                                    }
+                                ?></td>
                                 <td><?php echo htmlspecialchars($row['name']); ?></td>
                                 <td><?php echo htmlspecialchars($row['room_number']); ?></td>
                                 <td><?php echo htmlspecialchars(number_format($row['amount_due'], 2)); ?></td>
@@ -976,9 +1006,17 @@ try {
                                         <i class="bi bi-check-circle"></i> Paid
                                     </span>
                                 </td>
-                                <td><?php echo htmlspecialchars(date('M d, Y', strtotime($row['updated_at']))); ?></td>
+                                <td><?php 
+                                    // Use paid_date if available, otherwise use updated_at
+                                    if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
+                                        echo htmlspecialchars(date('M d, Y', strtotime($row['paid_date'])));
+                                    } else {
+                                        echo htmlspecialchars(date('M d, Y', strtotime($row['updated_at'])));
+                                    }
+                                ?></td>
                                 <td>
                                     <a href="bill_actions.php?action=view&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-info" title="View Details"><i class="bi bi-eye"></i></a>
+                                    <a href="bill_actions.php?action=restore&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Restore"><i class="bi bi-arrow-counterclockwise"></i></a>
                                 </td>
                             </tr>
                             <?php endwhile; ?>
@@ -1444,8 +1482,6 @@ function computeNights(checkin, checkout) {
 function switchView(view) {
     const activeView = document.getElementById('activeView');
     const archiveView = document.getElementById('archiveView');
-    const activeBtn = document.querySelector('button:contains("Active Bills")');
-    const archiveBtn = document.querySelector('button:contains("Archive")');
     
     // Get all nav buttons
     const navButtons = document.querySelectorAll('.nav-link');
@@ -1454,14 +1490,14 @@ function switchView(view) {
         activeView.style.display = 'block';
         archiveView.style.display = 'none';
         navButtons.forEach(btn => btn.classList.remove('active'));
-        navButtons[0].classList.add('active');
+        if (navButtons[0]) navButtons[0].classList.add('active');
         // Update URL without reloading
         window.history.pushState({}, '', 'bills.php?view=active');
     } else if (view === 'archive') {
         activeView.style.display = 'none';
         archiveView.style.display = 'block';
         navButtons.forEach(btn => btn.classList.remove('active'));
-        navButtons[1].classList.add('active');
+        if (navButtons[1]) navButtons[1].classList.add('active');
         // Update URL without reloading
         window.history.pushState({}, '', 'bills.php?view=archive');
     }
@@ -1506,15 +1542,15 @@ function switchView(view) {
                             <hr>
                             <div class="row">
                                 <div class="col-md-6">
-                                    <p class="mb-2"><strong>Amount Due:</strong><br><span id="co_amount_due" class="text-danger" style="font-size: 1.2rem; font-weight: 600;">₱0.00</span></p>
-                                </div>
-                                <div class="col-md-6">
                                     <p class="mb-2"><strong>Amount Paid:</strong><br><span id="co_amount_paid" class="text-success" style="font-size: 1.2rem; font-weight: 600;">₱0.00</span></p>
                                 </div>
+                                <div class="col-md-6">
+                                    <p class="mb-2"><strong>Total Additional Charges:</strong><br><span id="co_charges" class="text-info" style="font-size: 1.2rem; font-weight: 600;">₱0.00</span></p>
+                                </div>
                             </div>
-                            <div class="row mt-2">
+                            <div class="row mt-3 border-top pt-3">
                                 <div class="col-12">
-                                    <p class="mb-0"><strong>Grand Total Due:</strong><br><span id="co_remaining" class="text-warning" style="font-size: 1.3rem; font-weight: 700;">₱0.00</span></p>
+                                    <p class="mb-0"><strong>Grand Total Due:</strong><br><span id="co_grand_total_due" class="text-warning" style="font-size: 1.3rem; font-weight: 700;">₱0.00</span></p>
                                 </div>
                             </div>
                         </div>
@@ -1588,12 +1624,12 @@ async function loadCheckoutDetails() {
             document.getElementById('co_email').textContent = data.email;
             document.getElementById('co_phone').textContent = data.phone;
             document.getElementById('co_room').textContent = data.room_number || 'N/A';
-            document.getElementById('co_amount_due').textContent = '₱' + parseFloat(data.amount_due).toFixed(2);
             document.getElementById('co_amount_paid').textContent = '₱' + parseFloat(data.amount_paid).toFixed(2);
-            document.getElementById('co_remaining').textContent = '₱' + parseFloat(data.remaining).toFixed(2);
+            document.getElementById('co_charges').textContent = '₱' + parseFloat(data.charges_total).toFixed(2);
+            document.getElementById('co_grand_total_due').textContent = '₱' + parseFloat(data.grand_total_due).toFixed(2);
             
-            // Update final amount to collect
-            finalAmount.value = parseFloat(data.remaining).toFixed(2);
+            // Update final amount to collect (Grand Total Due)
+            finalAmount.value = parseFloat(data.grand_total_due).toFixed(2);
             
             // Populate charges
             if (data.charges && data.charges.length > 0) {

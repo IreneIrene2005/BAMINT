@@ -13,7 +13,7 @@ $room_status_filter = isset($_GET['status']) ? trim($_GET['status']) : '';
 
 // Prepare metrics
 $total_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms")->fetch_row()[0];
-$occupied_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'booked'")->fetch_row()[0];
+$occupied_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'occupied'")->fetch_row()[0];
 $vacant_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'available'")->fetch_row()[0];
 $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'under maintenance'")->fetch_row()[0];
 
@@ -57,7 +57,7 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
             <div class="card-body text-center">
               <div class="metric-icon"><i class="bi bi-building"></i></div>
               <div class="metric-label">Total Rooms</div>
-              <div class="metric-value"><?= $total_rooms ?></div>
+              <div id="totalRoomsValue" class="metric-value"><?= $total_rooms ?></div>
             </div>
           </div>
         </div>
@@ -66,7 +66,7 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
             <div class="card-body text-center">
               <div class="metric-icon"><i class="bi bi-door-open"></i></div>
               <div class="metric-label">Occupied</div>
-              <div class="metric-value"><?= $occupied_rooms ?></div>
+              <div id="occupiedRoomsValue" class="metric-value"><?= $occupied_rooms ?></div>
             </div>
           </div>
         </div>
@@ -75,7 +75,7 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
             <div class="card-body text-center">
               <div class="metric-icon"><i class="bi bi-door-closed"></i></div>
               <div class="metric-label">Vacant</div>
-              <div class="metric-value"><?= $vacant_rooms ?></div>
+              <div id="vacantRoomsValue" class="metric-value"><?= $vacant_rooms ?></div>
             </div>
           </div>
         </div>
@@ -84,7 +84,7 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
             <div class="card-body text-center">
               <div class="metric-icon"><i class="bi bi-tools"></i></div>
               <div class="metric-label">Under Maintenance</div>
-              <div class="metric-value"><?= $maintenance_rooms ?></div>
+              <div id="maintenanceRoomsValue" class="metric-value"><?= $maintenance_rooms ?></div>
             </div>
           </div>
         </div>
@@ -305,5 +305,22 @@ window.addEventListener('load', function() {
     });
   }
   loadRooms();
+  // Start realtime metrics refresh
+  refreshMetrics();
+  setInterval(refreshMetrics, 10000); // every 10s
 });
+
+function refreshMetrics() {
+  fetch('rooms_api.php?action=metrics')
+    .then(res => res.json())
+    .then(data => {
+      if (data.success) {
+        document.getElementById('totalRoomsValue').textContent = data.total;
+        document.getElementById('occupiedRoomsValue').textContent = data.occupied;
+        document.getElementById('vacantRoomsValue').textContent = data.vacant;
+        document.getElementById('maintenanceRoomsValue').textContent = data.maintenance;
+        document.getElementById('updateTime').textContent = new Date().toLocaleString();
+      }
+    }).catch(err => console.error('metrics fetch error', err));
+}
 </script>

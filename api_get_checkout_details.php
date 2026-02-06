@@ -52,9 +52,6 @@ try {
     $paid_result = $stmt->fetch(PDO::FETCH_ASSOC);
     $total_paid = floatval($paid_result['total_paid']);
 
-    // Calculate remaining balance
-    $remaining = max(0, $total_due - $total_paid);
-
     // Get additional charges (maintenance/amenity requests that have a cost)
     $stmt = $conn->prepare("
         SELECT category, cost, status, submitted_date
@@ -65,6 +62,15 @@ try {
     $stmt->execute(['tenant_id' => $tenant_id]);
     $charges = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+    // Sum the charges
+    $total_charges = 0.0;
+    foreach ($charges as $c) {
+        $total_charges += floatval($c['cost']);
+    }
+
+    // Grand Total Due = Amount Paid + Total Charges (same formula as in bills.php table)
+    $grand_total_due = $total_paid + $total_charges;
+
     echo json_encode([
         'success' => true,
         'tenant_id' => $tenant['id'],
@@ -72,9 +78,9 @@ try {
         'email' => $tenant['email'],
         'phone' => $tenant['phone'],
         'room_number' => $tenant['room_number'],
-        'amount_due' => $total_due,
         'amount_paid' => $total_paid,
-        'remaining' => $remaining,
+        'charges_total' => $total_charges,
+        'grand_total_due' => $grand_total_due,
         'charges' => $charges
     ]);
 
