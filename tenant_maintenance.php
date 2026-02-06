@@ -11,6 +11,22 @@ require_once "db/database.php";
 $tenant_id = $_SESSION["tenant_id"];
 $success_msg = "";
 
+// Fetch amenities from database
+$amenities_list = [];
+try {
+    $stmt = $conn->prepare("SELECT id, name, price FROM extra_amenities WHERE is_active = 1 ORDER BY name ASC");
+    $stmt->execute();
+    $amenities_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $amenities_list = [];
+}
+
+// Create a map of amenity names to prices for quick lookup
+$amenity_price_map = [];
+foreach ($amenities_list as $amenity) {
+    $amenity_price_map[$amenity['name']] = $amenity['price'];
+}
+
 // Handle new amenity request submission
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_request'])) {
     $category = trim($_POST['category'] ?? '');
@@ -24,21 +40,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_request'])) {
             $stmt->execute(['tenant_id' => $tenant_id]);
             $room = $stmt->fetch(PDO::FETCH_ASSOC);
             $room_id = $room['room_id'] ?? 0;
-            // determine cost server-side for accuracy (amenities)
-            $category_prices = [
-                'Extra pillow' => 150,
-                'Extra blanket' => 200,
-                'Extra towel' => 100,
-                'Extra bed / rollaway bed' => 1000,
-                'Extra toiletries set' => 100,
-                'Room cleaning on request' => 300,
-                'Laundry service (per load)' => 400,
-                'Drinking water refill' => 50,
-                'Iron & ironing board rental' => 200,
-                'Electric kettle rental' => 250,
-                'Other' => null
-            ];
-            $cost = array_key_exists($category, $category_prices) ? $category_prices[$category] : null;
+            // Determine cost from amenities table
+            $cost = array_key_exists($category, $amenity_price_map) ? $amenity_price_map[$category] : null;
 
             $stmt = $conn->prepare("INSERT INTO maintenance_requests (tenant_id, room_id, category, description, priority, status, cost) VALUES (:tenant_id, :room_id, :category, :description, :priority, 'pending', :cost)");
 
@@ -276,17 +279,9 @@ try {
                                     <label for="category" class="form-label">Category</label>
                                     <select class="form-select" id="category" name="category" required onchange="updateCostDisplay()">
                                         <option value="">Select amenity...</option>
-                                        <option value="Extra pillow">🛌 Extra pillow – ₱150</option>
-                                        <option value="Extra blanket">🛌 Extra blanket – ₱200</option>
-                                        <option value="Extra towel">🛁 Extra towel – ₱100</option>
-                                        <option value="Extra bed / rollaway bed">🛏️ Extra bed / rollaway bed – ₱1,000</option>
-                                        <option value="Extra toiletries set">🧴 Extra toiletries set – ₱100</option>
-                                        <option value="Room cleaning on request">🧹 Room cleaning on request – ₱300</option>
-                                        <option value="Laundry service (per load)">🧺 Laundry service (per load) – ₱400</option>
-                                        <option value="Drinking water refill">💧 Drinking water refill – ₱50</option>
-                                        <option value="Iron & ironing board rental">🧺 Iron & ironing board rental – ₱200</option>
-                                        <option value="Electric kettle rental">☕ Electric kettle rental – ₱250</option>
-                                        <option value="Other">Other – Describe your request (Cost determined by admin)</option>
+                                        <?php foreach ($amenities_list as $amenity): ?>
+                                            <option value="<?php echo htmlspecialchars($amenity['name']); ?>">✨ <?php echo htmlspecialchars($amenity['name']); ?> – ₱<?php echo number_format($amenity['price'], 0); ?></option>
+                                        <?php endforeach; ?>
                                     </select>
                                 </div>
 
@@ -387,21 +382,8 @@ try {
                                             if (isset($request['cost']) && $request['cost'] !== null && $request['cost'] !== '') {
                                                 $display_cost = $request['cost'];
                                             } else {
-                                                $category_prices = [
-                                                    'Extra pillow' => 150,
-                                                    'Extra blanket' => 200,
-                                                    'Extra towel' => 100,
-                                                    'Extra bed / rollaway bed' => 1000,
-                                                    'Extra toiletries set' => 100,
-                                                    'Room cleaning on request' => 300,
-                                                    'Laundry service (per load)' => 400,
-                                                    'Drinking water refill' => 50,
-                                                    'Iron & ironing board rental' => 200,
-                                                    'Electric kettle rental' => 250,
-                                                    'Other' => null
-                                                ];
-                                                if (!empty($request['category']) && array_key_exists($request['category'], $category_prices)) {
-                                                    $display_cost = $category_prices[$request['category']];
+                                                if (!empty($request['category']) && array_key_exists($request['category'], $amenity_price_map)) {
+                                                    $display_cost = $amenity_price_map[$request['category']];
                                                 }
                                             }
 
@@ -434,17 +416,9 @@ try {
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         const categoryPrices = {
-            'Extra pillow': 150,
-            'Extra blanket': 200,
-            'Extra towel': 100,
-            'Extra bed / rollaway bed': 1000,
-            'Extra toiletries set': 100,
-            'Room cleaning on request': 300,
-            'Laundry service (per load)': 400,
-            'Drinking water refill': 50,
-            'Iron & ironing board rental': 200,
-            'Electric kettle rental': 250,
-            'Other': null
+            <?php foreach ($amenities_list as $amenity): ?>
+            <?php echo json_encode($amenity['name']); ?>: <?php echo intval($amenity['price']); ?>,
+            <?php endforeach; ?>
         };
 
         function updateCostDisplay() {
