@@ -86,28 +86,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $billing_month = $checkin_date ? (new DateTime($checkin_date))->format('Y-m') : date('Y-m');
                 $due_date = $checkin_date ?: date('Y-m-d');
 
-                $bill_stmt = $conn->prepare("INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, created_at, updated_at) VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, NOW(), NOW())");
-                $bill_stmt->execute([
-                    'tenant_id' => $newTenantId,
-                    'room_id' => $room_id,
-                    'billing_month' => $billing_month,
-                    'amount_due' => $total_cost,
-                    'due_date' => $due_date,
-                    'notes' => $bill_notes
-                ]);
                 // Mark room as booked until payment is verified
                 $update_room_booked = $conn->prepare("UPDATE rooms SET status = 'booked' WHERE id = :room_id");
                 $update_room_booked->execute(['room_id' => $room_id]);
             } else {
-                // Fallback: create initial placeholder bill/invoice for walk-in customer (pending payment)
-                $billing_month = date('Y-m');
-                $bill_notes = "WALK-IN CUSTOMER - Pending room selection and payment";
-                $bill_stmt = $conn->prepare("INSERT INTO bills (tenant_id, billing_month, amount_due, due_date, status, notes) VALUES (:tenant_id, :billing_month, 0, NOW(), 'pending', :notes)");
-                $bill_stmt->execute([
-                    'tenant_id' => $newTenantId,
-                    'billing_month' => $billing_month,
-                    'notes' => $bill_notes
-                ]);
+                // No bill is created here. Bills will be created when payment is recorded via Add New Bill.
             }
             
             $conn->commit();

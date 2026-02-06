@@ -352,10 +352,6 @@ try {
             <div class="row mb-4">
                 <?php
                 // Cache table rows and sum Grand Total Due for summary card
-                $room_count_stmt = $conn->prepare("SELECT COUNT(DISTINCT room_id) FROM bills WHERE status IN ('pending','partial','unpaid','overdue')");
-                $room_count_stmt->execute();
-                $room_count = $room_count_stmt->fetchColumn();
-
                 $table_rows = [];
                 $grand_total_due_sum = 0.0;
                 $grand_total_paid_sum = 0.0;
@@ -370,6 +366,10 @@ try {
                     $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
                     $sum_stmt->execute(['bill_id' => $row['id']]);
                     $amount_paid = floatval($sum_stmt->fetchColumn());
+                    // Fetch latest payment method for this bill (if any)
+                    $pm_stmt = $conn->prepare("SELECT payment_method FROM payment_transactions WHERE bill_id = :bill_id ORDER BY created_at DESC, id DESC LIMIT 1");
+                    $pm_stmt->execute(['bill_id' => $row['id']]);
+                    $payment_method = $pm_stmt->fetchColumn();
                     $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
                     $charges_stmt->execute(['tenant_id' => $row['tenant_id']]);
                     $total_charges = $charges_stmt->fetchColumn();
@@ -385,20 +385,14 @@ try {
                         'grand_total_due' => $grand_total_due,
                         'amount_paid' => $amount_paid,
                         'total_charges' => $total_charges,
+                        'payment_method' => $payment_method,
                         'status' => $row['status'],
                         'bill_id' => $row['id'],
                         'tenant_id' => $row['tenant_id']
                     ];
                 }
                 ?>
-                <div class="col-md-3 col-sm-6 mb-3">
-                    <div class="card metric-card bg-primary bg-opacity-10 h-100">
-                        <div class="card-body text-center">
-                            <div class="metric-label">Room Count</div>
-                            <div class="metric-value"><?php echo $room_count; ?></div>
-                        </div>
-                    </div>
-                </div>
+                <!-- Room Count card removed -->
                 <div class="col-md-3 col-sm-6 mb-3">
                     <div class="card metric-card bg-warning bg-opacity-10 h-100">
                         <div class="card-body text-center">
@@ -604,9 +598,17 @@ try {
                                             <i class="bi bi-door"></i> Room: <?php echo htmlspecialchars($payment['room_number'] ?? 'N/A'); ?> |
                                             <i class="bi bi-calendar"></i> <?php echo date('M Y', strtotime($payment['billing_month'])); ?>
                                         </p>
-                                        <p class="card-text mb-2 text-muted small">
-                                            <i class="bi bi-credit-card"></i> <?php echo htmlspecialchars($payment['payment_method']); ?>
-                                        </p>
+                                        <p class="card-text mb-1 text-muted small">
+                                                        <i class="bi bi-credit-card"></i> <?php
+                                                        $pm = $payment['payment_method'] ?? '';
+                                                        $pm_norm = strtolower(trim((string)$pm));
+                                                        if ($pm_norm === 'gcash') $pm_display = 'GCash';
+                                                        elseif ($pm_norm === 'paymaya') $pm_display = 'PayMaya';
+                                                        elseif ($pm_norm === 'cash') $pm_display = 'Cash';
+                                                        else $pm_display = $pm ? ucfirst($pm) : '-';
+                                                        echo htmlspecialchars($pm_display);
+                                                        ?>
+                                                    </p>
                                         <h5 class="text-primary">₱<?php echo number_format($payment['payment_amount'], 2); ?></h5>
                                     </div>
                                     <button class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#paymentModal<?php echo $payment['id']; ?>" title="Review Payment">
@@ -637,7 +639,15 @@ try {
                                         <div class="col-md-6">
                                             <h6 class="text-muted">Payment Details</h6>
                                             <p><strong>Amount:</strong> ₱<?php echo number_format($payment['payment_amount'], 2); ?><br>
-                                            <strong>Method:</strong> <?php echo htmlspecialchars($payment['payment_method']); ?><br>
+                                            <strong>Method:</strong> <?php
+                                            $pm = $payment['payment_method'] ?? '';
+                                            $pm_norm = strtolower(trim((string)$pm));
+                                            if ($pm_norm === 'gcash') $pm_display = 'GCash';
+                                            elseif ($pm_norm === 'paymaya') $pm_display = 'PayMaya';
+                                            elseif ($pm_norm === 'cash') $pm_display = 'Cash';
+                                            else $pm_display = $pm ? ucfirst($pm) : '-';
+                                            echo htmlspecialchars($pm_display);
+                                            ?><br>
                                             <strong>Submitted:</strong> <?php echo date('M d, Y • H:i A', strtotime($payment['created_at'])); ?></p>
                                         </div>
                                     </div>
@@ -767,6 +777,7 @@ try {
                                 <th>Room</th>
                                 <th>Grand Total Due (₱)</th>
                                 <th>Amount Paid (₱)</th>
+                                <th>Payment Method</th>
                                 <th>Total Additional Charges (₱)</th>
                                 <th>Status</th>
                                 <th>Actions</th>
@@ -786,6 +797,15 @@ try {
                             <td><?php echo htmlspecialchars($row['room_number']); ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['grand_total_due'], 2)); ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['amount_paid'], 2)); ?></td>
+                            <td><?php
+                                    $pm = $row['payment_method'] ?? '';
+                                    $pm_norm = strtolower(trim((string)$pm));
+                                    if ($pm_norm === 'gcash') $pm_display = 'GCash';
+                                    elseif ($pm_norm === 'paymaya') $pm_display = 'PayMaya';
+                                    elseif ($pm_norm === 'cash') $pm_display = 'Cash';
+                                    else $pm_display = $pm ? ucfirst($pm) : '-';
+                                    echo htmlspecialchars($pm_display);
+                                ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['total_charges'], 2)); ?></td>
                             <td>
                                 <?php
@@ -1108,24 +1128,18 @@ try {
 
             <div class="mb-3">
               <label class="form-label">Payment Method <span class="text-danger">*</span></label>
-              <div class="form-check">
-                <input class="form-check-input" type="radio" name="payment_method" id="method_cash" value="cash" checked>
-                <label class="form-check-label" for="method_cash">
-                  Cash
-                </label>
-              </div>
-              <div class="form-check">
-                <input class="form-check-input" type="radio" name="payment_method" id="method_card" value="card">
-                <label class="form-check-label" for="method_card">
-                  Card
-                </label>
-              </div>
-              <div class="form-check">
-                <input class="form-check-input" type="radio" name="payment_method" id="method_online" value="online">
-                <label class="form-check-label" for="method_online">
-                  Online (GCash / Bank)
-                </label>
-              </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="payment_method" id="method_cash" value="cash" checked>
+                                <label class="form-check-label" for="method_cash">Cash</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="payment_method" id="method_gcash" value="gcash">
+                                <label class="form-check-label" for="method_gcash">GCash</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="payment_method" id="method_paymaya" value="paymaya">
+                                <label class="form-check-label" for="method_paymaya">PayMaya</label>
+                            </div>
             </div>
 
             <div class="mb-3">

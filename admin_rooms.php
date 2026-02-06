@@ -8,6 +8,9 @@ if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true) {
 
 require_once 'db_connect.php';
 
+// Room status filter from query string (optional)
+$room_status_filter = isset($_GET['status']) ? trim($_GET['status']) : '';
+
 // Prepare metrics
 $total_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms")->fetch_row()[0];
 $occupied_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'booked'")->fetch_row()[0];
@@ -90,9 +93,24 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
       <!-- Rooms table -->
       <div class="card shadow-sm border-0 mb-4">
         <div class="card-header bg-light d-flex justify-content-between align-items-center">
-          <span class="fw-semibold"><i class="bi bi-table"></i> Room List</span>
-          <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addRoomModal"><i class="bi bi-plus-circle"></i> Add Room</button>
-        </div>
+            <div class="d-flex align-items-center gap-3">
+              <span class="fw-semibold"><i class="bi bi-table"></i> Room List</span>
+              <div>
+                <label for="roomStatusFilter" class="form-label mb-0 small">Filter</label>
+                <select id="roomStatusFilter" class="form-select form-select-sm">
+                  <option value="">All</option>
+                  <option value="available" <?php echo $room_status_filter === 'available' ? 'selected' : ''; ?>>Available</option>
+                  <option value="booked" <?php echo $room_status_filter === 'booked' ? 'selected' : ''; ?>>Booked</option>
+                  <option value="occupied" <?php echo $room_status_filter === 'occupied' ? 'selected' : ''; ?>>Occupied</option>
+                  <option value="under maintenance" <?php echo $room_status_filter === 'under maintenance' ? 'selected' : ''; ?>>Under Maintenance</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <button class="btn btn-primary btn-sm me-2" id="applyRoomFilter">Apply</button>
+              <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addRoomModal"><i class="bi bi-plus-circle"></i> Add Room</button>
+            </div>
+          </div>
         <div class="card-body p-0">
           <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
@@ -110,7 +128,13 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
               </thead>
               <tbody id="roomTableBody">
                 <?php
-                $res = $conn->query("SELECT * FROM rooms ORDER BY id DESC");
+                // Fetch rooms, optionally filter by status
+                if ($room_status_filter) {
+                    $status_esc = $conn->real_escape_string($room_status_filter);
+                    $res = $conn->query("SELECT * FROM rooms WHERE status = '".$status_esc."' ORDER BY id DESC");
+                } else {
+                    $res = $conn->query("SELECT * FROM rooms ORDER BY id DESC");
+                }
                 while ($r = $res->fetch_assoc()):
                   $status = htmlspecialchars(ucfirst($r['status']));
                   $badge = ($r['status'] === 'available') ? 'success' : (($r['status'] === 'booked') ? 'warning text-dark' : 'secondary');
@@ -198,7 +222,10 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 function loadRooms() {
-  fetch('rooms_api.php?action=list')
+  const statusEl = document.getElementById('roomStatusFilter');
+  const status = statusEl ? encodeURIComponent(statusEl.value) : '';
+  const url = 'rooms_api.php?action=list' + (status ? ('&status=' + status) : '');
+  fetch(url)
     .then(res => res.json())
     .then(data => {
       if (data.success) {
@@ -267,6 +294,16 @@ document.getElementById('addRoomForm').addEventListener('submit', function(e) {
 });
 
 window.addEventListener('load', function() {
+  // Wire filter apply button and load initial rooms with optional filter
+  const applyBtn = document.getElementById('applyRoomFilter');
+  const statusEl = document.getElementById('roomStatusFilter');
+  if (applyBtn && statusEl) {
+    applyBtn.addEventListener('click', function(){
+      // If user clicks apply, reload server-rendered view so GET param is set
+      const val = statusEl.value ? ('?status=' + encodeURIComponent(statusEl.value)) : '';
+      location.href = 'admin_rooms.php' + val;
+    });
+  }
   loadRooms();
 });
 </script>

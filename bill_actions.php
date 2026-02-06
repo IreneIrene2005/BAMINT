@@ -279,6 +279,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'notes' => $notes,
                     'recorded_by' => $_SESSION['admin_id']
                 ]);
+
+                // After successful payment, activate tenant and mark room occupied
+                $updateTenant = $conn->prepare("UPDATE tenants SET status = 'active', start_date = :start_date, room_id = :room_id WHERE id = :tenant_id");
+                $updateTenant->execute([
+                    'start_date' => $booking['checkin_date'] ?: date('Y-m-d'),
+                    'room_id' => $room_id,
+                    'tenant_id' => $tenant_id
+                ]);
+
+                $updateRoom = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id");
+                $updateRoom->execute(['room_id' => $room_id]);
+
+                // Update the room_request to approved
+                $updateReq = $conn->prepare("UPDATE room_requests SET status = 'approved' WHERE id = :booking_id");
+                $updateReq->execute(['booking_id' => $booking_room]);
             }
             
             $conn->commit();

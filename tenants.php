@@ -171,12 +171,18 @@ $available_rooms = $conn->query($sql_available_rooms);
                             </td>
                             <td>
                                 <?php
-                                // Show only start/move-in date (remove end date as requested)
-                                $room_req_stmt = $conn->prepare("SELECT checkin_date, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                // Show stay duration as check-in to check-out when available
+                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                                 $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
                                 $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                if ($dates && $dates['checkin_date'] && in_array($dates['status'], ['approved', 'occupied'])) {
-                                    echo htmlspecialchars(date('M d, Y', strtotime($dates['checkin_date'])));
+                                if ($dates && in_array($dates['status'], ['approved', 'occupied'])) {
+                                    if (!empty($dates['checkin_date']) && !empty($dates['checkout_date'])) {
+                                        echo htmlspecialchars(date('M d, Y', strtotime($dates['checkin_date'])) . ' - ' . date('M d, Y', strtotime($dates['checkout_date'])));
+                                    } elseif (!empty($dates['checkin_date'])) {
+                                        echo htmlspecialchars(date('M d, Y', strtotime($dates['checkin_date'])) . ' - Present');
+                                    } else {
+                                        echo '-';
+                                    }
                                 } else {
                                     echo '-';
                                 }

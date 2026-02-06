@@ -10,7 +10,14 @@ $action = $_GET['action'] ?? '';
 
 switch ($action) {
     case 'list':
-        $result = $conn->query("SELECT * FROM rooms");
+        // optional status filter
+        $status = isset($_GET['status']) ? trim($_GET['status']) : '';
+        if ($status) {
+            $status_esc = $conn->real_escape_string($status);
+            $result = $conn->query("SELECT * FROM rooms WHERE status = '" . $status_esc . "'");
+        } else {
+            $result = $conn->query("SELECT * FROM rooms");
+        }
         $rooms = [];
         while ($row = $result->fetch_assoc()) {
             $rooms[] = $row;
