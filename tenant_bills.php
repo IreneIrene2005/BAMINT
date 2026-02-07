@@ -163,69 +163,10 @@ try {
     <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 sidebar">
-                <div class="position-sticky pt-3">
-                    <div class="user-info">
-                        <h5><i class="bi bi-person-circle"></i> <?php echo htmlspecialchars($_SESSION["name"]); ?></h5>
-                        <p><?php echo htmlspecialchars($_SESSION["email"]); ?></p>
-                    </div>
-
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_dashboard.php">
-                                <i class="bi bi-house-door"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link active" href="tenant_bills.php">
-                                <i class="bi bi-receipt"></i> My Bills
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_payments.php">
-                                <i class="bi bi-coin"></i> Payments
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_maintenance.php">
-                                <i class="bi bi-tools"></i> Maintenance
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_profile.php">
-                                <i class="bi bi-person"></i> My Profile
-                            </a>
-                        </li>
-                    </ul>
-
-                    <form action="logout.php" method="post">
-                        <button type="submit" class="btn btn-logout">
-                            <i class="bi bi-box-arrow-right"></i> Logout
-                        </button>
-                    </form>
-                </div>
-            </nav>
+            <?php include 'templates/tenant_sidebar.php'; ?>
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
-                        <!-- Always show Remaining Balance card at the top -->
-                        <?php
-                        // Calculate unpaid room balance (verified/approved payments only)
-                        $bills_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :customer_id AND status IN ('pending','partial','unpaid','overdue')");
-                        $bills_stmt->execute(['customer_id' => $customer_id]);
-                        $bills = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
-                        $unpaid_room_total = 0.0;
-                        foreach ($bills as $bill) {
-                            $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
-                            $sum_stmt->execute(['bill_id' => $bill['id']]);
-                            $live_paid = floatval($sum_stmt->fetchColumn());
-                            $unpaid_room_total += max(0, floatval($bill['amount_due']) - $live_paid);
-                        }
-                        ?>
-                        <div class="row mb-4">
-                            <!-- Removed duplicate Remaining Balance card at the top -->
-                        </div>
                 <!-- Header -->
                 <div class="header-banner">
                     <div class="d-flex justify-content-between align-items-start">

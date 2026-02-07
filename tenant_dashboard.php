@@ -46,11 +46,24 @@ try {
         }
     }
 
-    // Get current bills (EXCLUDE bills that are only for amenities, i.e., bills where amount_due equals the sum of maintenance_requests costs referenced in notes)
-    $stmt = $conn->prepare("
+    // Get current bills (EXCLUDE bills that are only for amenities and hide advance-payment bills
+    // that are unpaid or linked to cancelled room requests)
+    $stmt = $conn->prepare("        
         SELECT b.* FROM bills b
         WHERE b.tenant_id = :customer_id
-        AND (b.status != 'paid' OR DATE_ADD(b.updated_at, INTERVAL 7 DAY) >= NOW())
+        /* Hide advance payment bills until payment is verified/paid */
+        AND (
+            b.notes NOT LIKE '%ADVANCE PAYMENT%'
+            OR b.status = 'paid'
+            OR EXISTS (SELECT 1 FROM payment_transactions pt2 WHERE pt2.bill_id = b.id AND pt2.payment_status IN ('verified','approved'))
+        )
+        /* If a room request was cancelled for this tenant+room, hide advance payment bills tied to it */
+        AND NOT (
+            b.notes LIKE '%ADVANCE PAYMENT%'
+            AND EXISTS (
+                SELECT 1 FROM room_requests rr WHERE rr.tenant_id = b.tenant_id AND rr.room_id = b.room_id AND rr.status = 'cancelled'
+            )
+        )
         AND NOT (
             b.notes REGEXP 'Request #[0-9]+'
             AND (
@@ -317,67 +330,7 @@ try {
     <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 sidebar">
-                <div class="position-sticky pt-3">
-                    <!-- User Info -->
-                    <div class="user-info">
-                        <h5><i class="bi bi-person-circle"></i> <?php echo htmlspecialchars($_SESSION["name"]); ?></h5>
-                        <p><?php echo htmlspecialchars($_SESSION["email"]); ?></p>
-                    </div>
-
-                    <!-- Navigation -->
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link active" href="tenant_dashboard.php">
-                                <i class="bi bi-house-door"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_bills.php">
-                                <i class="bi bi-receipt"></i> My Bills
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_payments.php">
-                                <i class="bi bi-coin"></i> Payments
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_maintenance.php">
-                                <i class="bi bi-tools"></i> Maintenance
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_messages.php">
-                                <i class="bi bi-envelope"></i> Messages
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_add_room.php">
-                                <i class="bi bi-plus-square"></i> Add Room
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_profile.php">
-                                <i class="bi bi-person"></i> My Profile
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_archives.php">
-                                <i class="bi bi-archive"></i> Archives
-                            </a>
-                        </li>
-                    </ul>
-
-                    <!-- Logout Button -->
-                    <form action="logout.php" method="post">
-                        <button type="submit" class="btn btn-logout">
-                            <i class="bi bi-box-arrow-right"></i> Logout
-                        </button>
-                    </form>
-                </div>
-            </nav>
+            <?php include 'templates/tenant_sidebar.php'; ?>
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">

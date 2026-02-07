@@ -30,6 +30,96 @@ try {
 }
 
 // Handle room request submission
+// Handle room request cancellation (AJAX POST)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'cancel_request') {
+    header('Content-Type: application/json');
+    $resp = ['success' => false, 'message' => ''];
+    $request_id = isset($_POST['request_id']) ? intval($_POST['request_id']) : 0;
+    if ($request_id <= 0) {
+        $resp['message'] = 'Invalid request id.';
+        echo json_encode($resp);
+        exit;
+    }
+
+    try {
+        $check = $conn->prepare("SELECT id, tenant_id, room_id, status FROM room_requests WHERE id = :id LIMIT 1");
+        $check->execute(['id' => $request_id]);
+        $req = $check->fetch(PDO::FETCH_ASSOC);
+        if (!$req || intval($req['tenant_id']) !== intval($tenant_id)) {
+            $resp['message'] = 'Request not found or access denied.';
+            echo json_encode($resp);
+            exit;
+        }
+
+        // Only allow cancelling if not already cancelled or approved/moved-in
+        if ($req['status'] === 'cancelled' || $req['status'] === 'approved' || $req['status'] === 'moved_in') {
+            $resp['message'] = 'This request cannot be cancelled.';
+            echo json_encode($resp);
+            exit;
+        }
+
+        $conn->beginTransaction();
+        // Mark request cancelled
+        $upd = $conn->prepare("UPDATE room_requests SET status = 'cancelled', updated_at = NOW() WHERE id = :id");
+        $upd->execute(['id' => $request_id]);
+
+        // Make room available again (simple approach)
+        $roomUp = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+        $roomUp->execute(['room_id' => $req['room_id']]);
+
+        $conn->commit();
+
+        // Notify all admins about cancellation
+        try {
+            $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($admins as $admin) {
+                createNotification(
+                    $conn,
+                    'admin',
+                    $admin['id'],
+                    'room_request_cancelled',
+                    'Room Request Cancelled',
+                    'Tenant ' . ($tenant_id) . ' cancelled room request #' . $request_id . '.',
+                    $request_id,
+                    'room_request',
+                    'room_requests_queue.php'
+                );
+            }
+        } catch (Exception $e) {
+            error_log('Admin notification on cancel failed: ' . $e->getMessage());
+        }
+
+        // Notify tenant (self) as confirmation
+        try {
+            createNotification(
+                $conn,
+                'tenant',
+                $tenant_id,
+                'room_request_cancelled',
+                'Room Request Cancelled',
+                'Your room request has been cancelled.',
+                $request_id,
+                'room_request',
+                'tenant_add_room.php'
+            );
+        } catch (Exception $e) {
+            error_log('Tenant notification on cancel failed: ' . $e->getMessage());
+        }
+
+        $resp['success'] = true;
+        $resp['message'] = 'Room request cancelled successfully.';
+        echo json_encode($resp);
+        exit;
+
+    } catch (Exception $e) {
+        if ($conn->inTransaction()) $conn->rollBack();
+        error_log('Cancel request failed: ' . $e->getMessage());
+        $resp['message'] = 'Failed to cancel request: ' . $e->getMessage();
+        echo json_encode($resp);
+        exit;
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'request_room') {
     // Debug: Log received POST data for troubleshooting
     file_put_contents('room_request_debug.log', date('Y-m-d H:i:s') . "\n" . print_r($_POST, true) . "\n\n", FILE_APPEND);
@@ -172,8 +262,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         }
 
                         $conn->commit();
-                        
-                        // Do NOT notify admins yet; wait for payment
+
+                        // Notify admins about new room request and confirm to tenant
+                        try {
+                            notifyAdminsNewRoomRequest($conn, $roomRequestId, $tenant_id, $tenant_count);
+                        } catch (Exception $e) {
+                            error_log('notifyAdminsNewRoomRequest failed: ' . $e->getMessage());
+                        }
+
+                        try {
+                            createNotification(
+                                $conn,
+                                'tenant',
+                                $tenant_id,
+                                'room_request_submitted',
+                                'Room Request Submitted',
+                                'Your room request has been submitted. Please proceed to payment to complete your booking.',
+                                $roomRequestId,
+                                'room_request',
+                                'tenant_payments.php?room_request_id=' . $roomRequestId
+                            );
+                        } catch (Exception $e) {
+                            error_log('tenant room request notification failed: ' . $e->getMessage());
+                        }
+
                         $message = "Room request submitted! Please proceed to payment to complete your booking.";
                         $message_type = "success";
                     } catch (Exception $e) {
@@ -240,6 +352,7 @@ try {
     <title>Add Room - BAMINT</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
     <style>
         body { background-color: #f8f9fa; }
         .sidebar {
@@ -280,16 +393,24 @@ try {
             border-radius: 8px;
             margin-bottom: 2rem;
         }
+        .room-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 20px;
+            margin-top: 2rem;
+        }
         .room-card {
             border: 1px solid #e0e0e0;
             border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1rem;
+            padding: 1rem;
             transition: all 0.3s;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
         }
         .room-card:hover {
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            transform: translateY(-4px);
         }
         .room-card.available {
             border-left: 4px solid #28a745;
@@ -300,6 +421,45 @@ try {
         .room-card.unavailable {
             border-left: 4px solid #dc3545;
             opacity: 0.7;
+        }
+        .room-card img {
+            width: 100%;
+            height: 150px;
+            object-fit: cover;
+            border-radius: 6px;
+            margin-bottom: 0.8rem;
+        }
+        .room-card-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .room-card-content h6 {
+            margin: 0 0 0.5rem 0;
+            font-size: 1.1rem;
+        }
+        .room-card-content p {
+            margin: 0.3rem 0;
+            font-size: 0.85rem;
+            color: #666;
+        }
+        .room-card-actions {
+            margin-top: 0.8rem;
+        }
+        .filter-section {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 15px;
+            margin: 2rem 0;
+            flex-wrap: wrap;
+        }
+        .filter-section label {
+            margin-bottom: 0;
+            font-weight: 500;
+        }
+        .filter-section select {
+            min-width: 200px;
         }
         .status-badge {
             display: inline-block;
@@ -383,57 +543,7 @@ try {
     <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 sidebar">
-                <div class="position-sticky pt-3">
-                    <!-- User Info -->
-                    <div class="user-info">
-                        <h5><i class="bi bi-person-circle"></i> <?php echo htmlspecialchars($_SESSION["name"]); ?></h5>
-                        <p><?php echo htmlspecialchars($_SESSION["email"]); ?></p>
-                    </div>
-
-                    <!-- Navigation -->
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_dashboard.php">
-                                <i class="bi bi-house-door"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_bills.php">
-                                <i class="bi bi-receipt"></i> My Bills
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_payments.php">
-                                <i class="bi bi-coin"></i> Payments
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_maintenance.php">
-                                <i class="bi bi-tools"></i> Maintenance
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link active" href="tenant_add_room.php">
-                                <i class="bi bi-search"></i> Browse Room
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_profile.php">
-                                <i class="bi bi-person"></i> My Profile
-                            </a>
-                        </li>
-                    </ul>
-
-                    <!-- Logout Button -->
-                    <form action="logout.php" method="post">
-                        <button type="submit" class="btn btn-logout">
-                            <i class="bi bi-box-arrow-right"></i> Logout
-                        </button>
-                    </form>
-                </div>
-            </nav>
+            <?php include 'templates/tenant_sidebar.php'; ?>
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
@@ -450,47 +560,85 @@ try {
                     </div>
                 <?php endif; ?>
 
-                <!-- Two Column Layout -->
-                <div class="row">
-                    <!-- Filters Section -->
-                    <div class="col-lg-4 mb-4">
-                        <div class="card">
-                            <div class="card-header bg-info text-white">
-                                <i class="bi bi-funnel"></i> Filter Rooms
-                            </div>
-                            <div class="card-body">
-                                <form id="roomFilterForm">
-                                    <div class="mb-3">
-                                        <label for="filterType" class="form-label">Room Type</label>
-                                        <select class="form-select" id="filterType" name="type">
-                                            <option value="">All</option>
-                                            <option value="Single">Single</option>
-                                            <option value="Shared">Shared</option>
-                                            <option value="Bedspace">Bedspace</option>
-                                        </select>
+                <!-- My Requests Section (Improved UI) -->
+                <div class="col-12 mt-4 mb-4">
+                    <div class="card shadow-lg border-primary" style="width: 100%;">
+                        <div class="card-header bg-primary text-white text-center" style="font-size: 1.5rem; font-weight: bold; letter-spacing: 1px;">
+                            <i class="bi bi-clock-history"></i> My Requests
+                        </div>
+                        <div class="card-body" style="background: #fafdff;">
+                            <?php if (empty($my_requests)): ?>
+                                <p class="text-muted text-center">You haven't submitted any room requests yet.</p>
+                            <?php else: ?>
+                                <?php $request = $my_requests[0]; ?>
+                                    <div class="request-card mb-4 p-3 border border-2 rounded-3" style="background: #f4f8ff;">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <span class="fs-5 fw-bold text-primary">Room <?php echo htmlspecialchars($request['room_number']); ?></span>
+                                            <span class="request-status request-<?php echo htmlspecialchars(strtolower($request['status'])); ?> px-3 py-1" style="font-size:1rem;">
+                                                <?php
+                                                    // Show 'Approved' if status is 'approved' or if status is 'pending_payment' but payment is already made and approved
+                                                    if ($request['status'] === 'approved') {
+                                                        echo 'Approved';
+                                                    } elseif ($request['status'] === 'pending_payment') {
+                                                        // Check if there is a verified/approved payment for this request's bill
+                                                        $bill_stmt = $conn->prepare("SELECT id FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' LIMIT 1");
+                                                        $bill_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $request['room_id']]);
+                                                        $bill = $bill_stmt->fetch(PDO::FETCH_ASSOC);
+                                                        $is_paid = false;
+                                                        if ($bill) {
+                                                            $pay_stmt = $conn->prepare("SELECT COUNT(*) FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                                                            $pay_stmt->execute(['bill_id' => $bill['id']]);
+                                                            $is_paid = $pay_stmt->fetchColumn() > 0;
+                                                        }
+                                                        if ($is_paid) {
+                                                            echo 'Approved';
+                                                        } else {
+                                                            echo 'Awaiting Payment';
+                                                        }
+                                                    } else {
+                                                        echo htmlspecialchars(ucfirst($request['status']));
+                                                    }
+                                                ?>
+                                            </span>
+                                        </div>
+                                        <div class="mb-1"><strong>Rate:</strong> <span class="text-success">₱<?php echo number_format($request['rate'], 2); ?></span></div>
+                                        <div class="mb-1"><strong>Occupants:</strong> <?php echo intval($request['tenant_count'] ?? 1); ?> person(s)</div>
+                                        <div class="mb-1"><strong>Requested:</strong> <?php echo date('M d, Y', strtotime($request['request_date'])); ?></div>
+                                        <?php if (!empty($request['tenant_info_name'])): ?>
+                                            <div class="mb-1"><strong>Name:</strong> <?php echo htmlspecialchars($request['tenant_info_name']); ?></div>
+                                        <?php endif; ?>
+                                        <?php if ($request['notes']): ?>
+                                            <div class="mb-0 text-muted small"><strong>Notes:</strong> <?php echo htmlspecialchars($request['notes']); ?></div>
+                                        <?php endif; ?>
+                                        <?php if ($request['status'] === 'pending_payment') : ?>
+                                            <form method="get" action="tenant_make_payment.php" class="mt-2">
+                                                <input type="hidden" name="room_request_id" value="<?php echo $request['id']; ?>">
+                                                <button type="submit" class="btn btn-warning w-100">Proceed to Payment</button>
+                                            </form>
+                                            <button type="button" class="btn btn-secondary w-100 mt-2" id="cancelRequestBtn" data-request-id="<?php echo $request['id']; ?>">Cancel</button>
+                                        <?php endif; ?>
                                     </div>
-                                    <div class="mb-3">
-                                        <label for="filterPrice" class="form-label">Max Price (₱)</label>
-                                        <input type="number" class="form-control" id="filterPrice" name="price" min="0" placeholder="No limit">
-                                    </div>
-                                    <div class="mb-3">
-                                        <label for="filterGuests" class="form-label">Max Guests</label>
-                                        <input type="number" class="form-control" id="filterGuests" name="guests" min="1" placeholder="No limit">
-                                    </div>
-                                    <button type="button" class="btn btn-primary w-100" onclick="filterRooms()"><i class="bi bi-search"></i> Apply Filters</button>
-                                </form>
-                            </div>
+                            <?php endif; ?>
                         </div>
                     </div>
-                    <!-- Available Rooms Section -->
-                    <div class="col-lg-8">
-                        <div class="card">
-                            <div class="card-header bg-light">
-                                <h5 class="mb-0"><i class="bi bi-building"></i> Available Rooms</h5>
-                            </div>
-                            <div class="card-body" id="roomsContainer">
+                </div>
+
+                <!-- Filter Section (Centered) -->
+                <div class="filter-section">
+                    <label for="filterType">Filter by Room Type:</label>
+                    <select class="form-select" id="filterType" name="type" onchange="filterRooms()">
+                        <option value="">All Rooms</option>
+                        <option value="Single">Single</option>
+                        <option value="Double">Double</option>
+                        <option value="Family">Family</option>
+                    </select>
+                </div>
+
+                <!-- Available Rooms Section -->
+                <div>
+                    <div id="roomsContainer" class="room-grid">
                                 <?php if (empty($rooms)): ?>
-                                    <div class="alert alert-info">No rooms available at the moment.</div>
+                                    <div class="alert alert-info w-100">No rooms available at the moment.</div>
                                 <?php else: ?>
                                     <?php foreach ($rooms as $room): ?>
                                         <?php
@@ -500,7 +648,7 @@ try {
                                         // Check database status first (for unavailable rooms)
                                         if ($room['status'] === 'unavailable') {
                                             $actual_status = 'unavailable';
-                                            $status_label = 'Unavailable (Maintenance)';
+                                            $status_label = 'Unavailable';
                                         } else {
                                             $actual_status = $total_occupancy > 0 ? 'occupied' : 'available';
                                             $status_label = ucfirst($actual_status);
@@ -509,127 +657,88 @@ try {
                                         $room_type = strtolower($room['room_type']);
                                         $max_occupancy = 4;
                                         if ($room_type === 'single') $max_occupancy = 1;
-                                        elseif ($room_type === 'shared') $max_occupancy = 2;
-                                        elseif ($room_type === 'bedspace') $max_occupancy = 4;
+                                        elseif ($room_type === 'double') $max_occupancy = 2;
+                                        elseif ($room_type === 'family') $max_occupancy = 4;
                                         ?>
                                         <?php if ($actual_status === 'available'): ?>
-                                        <div class="room-card <?php echo htmlspecialchars(strtolower($actual_status)); ?>">
-                                            <div class="room-info row" data-rate="<?php echo htmlspecialchars($room['rate']); ?>">
-                                                <div class="col-md-4">
-                                                    <!-- Room Images Placeholder -->
-                                                    <img src="<?php echo !empty($room['image_url']) ? htmlspecialchars($room['image_url']) : 'public/img/room-placeholder.png'; ?>" class="img-fluid rounded mb-2" alt="Room Image">
-                                                </div>
-                                                <div class="col-md-8">
-                                                    <h5><?php echo htmlspecialchars($room['room_number']); ?></h5>
-                                                    <p><strong>Type:</strong> <?php echo htmlspecialchars($room['room_type']); ?></p>
-                                                    <p><strong>Price per Night:</strong> ₱<?php echo number_format($room['rate'], 2); ?></p>
-                                                    <p><strong>Description:</strong> <?php echo htmlspecialchars($room['description']); ?></p>
-                                                    <p><strong>Max Guests:</strong> <?php echo $max_occupancy; ?></p>
-                                                    <div class="status-badge status-<?php echo htmlspecialchars(strtolower($actual_status)); ?>">
-                                                        <?php echo htmlspecialchars($status_label); ?>
-                                                    </div>
+                                        <div class="room-card <?php echo htmlspecialchars(strtolower($actual_status)); ?>" data-rate="<?php echo htmlspecialchars($room['rate']); ?>" data-room-type="<?php echo htmlspecialchars($room['room_type']); ?>">
+                                            <!-- Room Image -->
+                                            <img src="<?php echo !empty($room['image_url']) ? htmlspecialchars($room['image_url']) : 'public/img/room-placeholder.png'; ?>" alt="Room <?php echo htmlspecialchars($room['room_number']); ?>">
+                                            
+                                            <!-- Room Details -->
+                                            <div class="room-card-content">
+                                                <h6><?php echo htmlspecialchars($room['room_number']); ?></h6>
+                                                <p><strong><?php echo htmlspecialchars($room['room_type']); ?></strong></p>
+                                                <p><strong>₱<?php echo number_format($room['rate'], 0); ?>/night</strong></p>
+                                                <p class="text-muted small">Guests: <?php echo $max_occupancy; ?></p>
+                                                <div class="status-badge status-<?php echo htmlspecialchars(strtolower($actual_status)); ?>">
+                                                    <?php echo htmlspecialchars($status_label); ?>
                                                 </div>
                                             </div>
-
-                                            <!-- Collapsible Form for available rooms -->
-                                                <?php if ($tenant_has_room): ?>
-                                                    <div class="alert alert-warning mt-3 mb-0">
-                                                        <i class="bi bi-exclamation-triangle"></i> 
-                                                        <strong>Room Already Assigned</strong><br>
-                                                        You already have a room assigned to you. You cannot request another room while your current room is active. Please contact admin if you need to change rooms.
-                                                    </div>
-                                                <?php else: ?>
-                                                    <button class="btn btn-sm btn-outline-primary mt-3 w-100" type="button" data-bs-toggle="collapse" data-bs-target="#room-form-<?php echo htmlspecialchars($room['id']); ?>" aria-expanded="false">
-                                                        <i class="bi bi-plus-circle"></i> Request Room
-                                                    </button>
-
-                                                    <div class="collapse mt-3" id="room-form-<?php echo htmlspecialchars($room['id']); ?>">
-                                                <form method="POST" class="border-top pt-3">
-                                                    <input type="hidden" name="action" value="request_room">
-                                                    <input type="hidden" name="room_id" value="<?php echo htmlspecialchars($room['id']); ?>">
-
-                                                    <h6 class="mb-3"><i class="bi bi-person-check"></i> Guest Information</h6>
-
-                                                    <div class="mb-3">
-                                                        <label for="name_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Full Name <span class="text-danger">*</span></label>
-                                                        <input type="text" class="form-control" id="name_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_info_name" required placeholder="Enter your full name">
-                                                    </div>
-
-                                                    <div class="mb-3">
-                                                        <label for="email_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Email <span class="text-danger">*</span></label>
-                                                        <input type="email" class="form-control" id="email_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_info_email" required placeholder="Enter your email">
-                                                    </div>
-
-                                                    <div class="mb-3">
-                                                        <label for="phone_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Phone Number <span class="text-danger">*</span></label>
-                                                        <input type="tel" class="form-control" id="phone_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_info_phone" required placeholder="Enter your phone number">
-                                                    </div>
-
-                                                    <div class="mb-3">
-                                                        <label for="address_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Address <span class="text-danger">*</span></label>
-                                                        <textarea class="form-control" id="address_<?php echo htmlspecialchars($room['id']); ?>" name="tenant_info_address" rows="2" required placeholder="Enter your address"></textarea>
-                                                    </div>
-
-
-                                                    <div class="mb-3">
-                                                        <label for="checkin_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Check-in Date & Time <span class="text-danger">*</span></label>
-                                                        <input type="text" class="form-control checkin-date" id="checkin_<?php echo htmlspecialchars($room['id']); ?>" name="checkin_date" required data-room-id="<?php echo htmlspecialchars($room['id']); ?>">
-                                                    </div>
-
-                                                    <div class="mb-3">
-                                                        <label for="checkout_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Check-out Date & Time <span class="text-danger">*</span></label>
-                                                        <input type="text" class="form-control checkout-date" id="checkout_<?php echo htmlspecialchars($room['id']); ?>" name="checkout_date" required data-room-id="<?php echo htmlspecialchars($room['id']); ?>">
-                                                    </div>
-
-                                                    <div class="mb-3" id="cost_display_<?php echo htmlspecialchars($room['id']); ?>" style="display:none;">
-                                                        <label class="form-label"><strong>Total Cost of Stay:</strong></label>
-                                                        <div class="alert alert-info mb-2" id="cost_value_<?php echo htmlspecialchars($room['id']); ?>"></div>
-
-                                                    </div>
-
-                                                    <div class="mb-3">
-                                                        <label for="guest_count_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Number of Guests <span class="text-danger">*</span></label>
-                                                        <input type="number" class="form-control guest-count-input" id="guest_count_<?php echo htmlspecialchars($room['id']); ?>" name="guest_count" min="1" max="<?php echo $max_occupancy; ?>" value="1" required data-room-id="<?php echo htmlspecialchars($room['id']); ?>">
-                                                        <small class="text-muted">Maximum <?php echo $max_occupancy; ?> guest(s) for this room type</small>
-                                                    </div>
-
-                                                    <!-- Co-Guests Section (shown when guests > 1) -->
-                                                    <div class="co-guests-section" id="co_guests_<?php echo htmlspecialchars($room['id']); ?>" style="display: none;">
-                                                        <div class="alert alert-info">
-                                                            <i class="bi bi-info-circle"></i> Please provide information for all guests. You will be the primary guest responsible for payments.
-                                                        </div>
-                                                        <div id="co_guest_fields_<?php echo htmlspecialchars($room['id']); ?>"></div>
-                                                    </div>
-
-                                                    <div class="mb-3">
-                                                        <label for="notes_<?php echo htmlspecialchars($room['id']); ?>" class="form-label">Notes (Optional)</label>
-                                                        <textarea class="form-control" id="notes_<?php echo htmlspecialchars($room['id']); ?>" name="notes" rows="2" placeholder="Add any notes about your request..."></textarea>
-                                                    </div>
-
-                                                    <button type="submit" class="btn btn-success w-100">
-                                                        <i class="bi bi-check-circle"></i> Submit Request
-                                                    </button>
-                                                </form>
+                                            
+                                            <!-- Request Button - Opens Modal -->
+                                            <div class="room-card-actions">
+                                                <button class="btn btn-sm btn-primary w-100" type="button" data-bs-toggle="modal" data-bs-target="#requestRoomModal" data-room-id="<?php echo htmlspecialchars($room['id']); ?>" data-room-number="<?php echo htmlspecialchars($room['room_number']); ?>" data-room-type="<?php echo htmlspecialchars($room['room_type']); ?>" data-room-rate="<?php echo htmlspecialchars($room['rate']); ?>" data-max-occupancy="<?php echo $max_occupancy; ?>" onclick="populateModalWithRoom(this)">Request</button>
                                             </div>
-                                                <?php endif; ?>
-                                            <?php elseif ($actual_status === 'unavailable'): ?>
-                                            <div class="alert alert-warning mt-3 mb-0">
-                                                <i class="bi bi-exclamation-triangle"></i>
-                                                <strong>Unavailable:</strong> This room is currently under maintenance. Please check back later.
-                                            </div>
-                                            <?php elseif ($actual_status === 'occupied'): ?>
-                                            <button class="btn btn-sm btn-outline-secondary mt-3 w-100 disabled">
-                                                <i class="bi bi-ban"></i> Room Occupied
-                                            </button>
-                                            <?php endif; ?>
                                         </div>
+                                        <?php elseif ($actual_status === 'unavailable'): ?>
+                                        <div class="room-card unavailable">
+                                            <img src="<?php echo !empty($room['image_url']) ? htmlspecialchars($room['image_url']) : 'public/img/room-placeholder.png'; ?>" alt="Room <?php echo htmlspecialchars($room['room_number']); ?>">
+                                            <div class="room-card-content">
+                                                <h6><?php echo htmlspecialchars($room['room_number']); ?></h6>
+                                                <p><strong><?php echo htmlspecialchars($room['room_type']); ?></strong></p>
+                                                <p><strong>₱<?php echo number_format($room['rate'], 0); ?>/night</strong></p>
+                                                <div class="status-badge status-unavailable">Unavailable</div>
+                                            </div>
+                                        </div>
+                                        <?php elseif ($actual_status === 'occupied'): ?>
+                                        <div class="room-card occupied">
+                                            <img src="<?php echo !empty($room['image_url']) ? htmlspecialchars($room['image_url']) : 'public/img/room-placeholder.png'; ?>" alt="Room <?php echo htmlspecialchars($room['room_number']); ?>">
+                                            <div class="room-card-content">
+                                                <h6><?php echo htmlspecialchars($room['room_number']); ?></h6>
+                                                <p><strong><?php echo htmlspecialchars($room['room_type']); ?></strong></p>
+                                                <p><strong>₱<?php echo number_format($room['rate'], 0); ?>/night</strong></p>
+                                                <div class="status-badge status-occupied">Occupied</div>
+                                            </div>
+                                        </div>
+                                        <?php endif; ?>
                                     <?php endforeach; ?>
                                 <?php endif; ?>
-                            </div>
-                        </div>
                     </div>
                 </div>
                 <script>
+                    // Cancel request handler: sends AJAX POST to cancel the request
+                    document.addEventListener('DOMContentLoaded', function() {
+                        var cancelBtn = document.getElementById('cancelRequestBtn');
+                        if (cancelBtn) {
+                            cancelBtn.addEventListener('click', function(e) {
+                                if (!confirm('Are you sure you want to cancel this room request?')) return;
+                                var reqId = this.getAttribute('data-request-id');
+                                var formData = new FormData();
+                                formData.append('action', 'cancel_request');
+                                formData.append('request_id', reqId);
+
+                                fetch(window.location.href, {
+                                    method: 'POST',
+                                    body: formData,
+                                    credentials: 'same-origin'
+                                }).then(function(resp) {
+                                    return resp.json();
+                                }).then(function(json) {
+                                    if (json && json.success) {
+                                        alert(json.message || 'Request cancelled.');
+                                        // reload to refresh My Requests and room availability
+                                        window.location.reload();
+                                    } else {
+                                        alert('Failed to cancel: ' + (json.message || 'Unknown error'));
+                                    }
+                                }).catch(function(err) {
+                                    console.error(err);
+                                    alert('Failed to cancel request.');
+                                });
+                            });
+                        }
+                    });
                         // Auto-calculate checkout datetime based on check-in and nights, using Flatpickr format
                         document.querySelectorAll('.room-card').forEach(function(card) {
                             const checkinInput = card.querySelector('.checkin-date');
@@ -686,102 +795,76 @@ try {
                         });
                 function filterRooms() {
                     const type = document.getElementById('filterType').value;
-                    const price = document.getElementById('filterPrice').value;
-                    const guests = document.getElementById('filterGuests').value;
                     const cards = document.querySelectorAll('.room-card');
                     cards.forEach(card => {
                         let show = true;
-                        if (type && !card.innerHTML.includes(type)) show = false;
-                        if (price) {
-                            const priceText = card.querySelector('.rate')?.textContent.replace(/[^\d.]/g, '') || '0';
-                            if (parseFloat(priceText) > parseFloat(price)) show = false;
-                        }
-                        if (guests) {
-                            const maxGuestsText = card.innerHTML.match(/Max Guests:\s*(\d+)/);
-                            if (maxGuestsText && parseInt(maxGuestsText[1]) > parseInt(guests)) show = false;
+                        if (type) {
+                            const cardRoomType = card.getAttribute('data-room-type');
+                            show = cardRoomType === type;
                         }
                         card.style.display = show ? '' : 'none';
                     });
                 }
                 </script>
-                                <!-- Flatpickr CSS & JS -->
-                                <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
-                                <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+                                <!-- Flatpickr initialization for date fields -->
                                 <script>
-                                    // Initialize Flatpickr for both check-in and check-out fields (both editable)
-                                    document.querySelectorAll('.checkin-date, .checkout-date').forEach(function(input) {
-                                        flatpickr(input, {
-                                            enableTime: true,
-                                            dateFormat: "Y-m-d h:i K", // 12-hour format with AM/PM
-                                            time_24hr: false,
-                                            minuteIncrement: 1,
-                                            allowInput: true
-                                        });
-                                    });
-                                </script>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- My Requests Section (Improved UI) -->
-                    <div class="col-12 mt-4">
-                        <div class="card shadow-lg border-primary" style="max-width: 500px; margin: 0 auto;">
-                            <div class="card-header bg-primary text-white text-center" style="font-size: 1.5rem; font-weight: bold; letter-spacing: 1px;">
-                                <i class="bi bi-clock-history"></i> My Requests
-                            </div>
-                            <div class="card-body" style="background: #fafdff;">
-                                <?php if (empty($my_requests)): ?>
-                                    <p class="text-muted text-center">You haven't submitted any room requests yet.</p>
-                                <?php else: ?>
-                                    <?php foreach ($my_requests as $request): ?>
-                                        <div class="request-card mb-4 p-3 border border-2 rounded-3" style="background: #f4f8ff;">
-                                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                                <span class="fs-5 fw-bold text-primary">Room <?php echo htmlspecialchars($request['room_number']); ?></span>
-                                                <span class="request-status request-<?php echo htmlspecialchars(strtolower($request['status'])); ?> px-3 py-1" style="font-size:1rem;">
-                                                    <?php
-                                                        // Show 'Approved' if status is 'approved' or if status is 'pending_payment' but payment is already made and approved
-                                                        if ($request['status'] === 'approved') {
-                                                            echo 'Approved';
-                                                        } elseif ($request['status'] === 'pending_payment') {
-                                                            // Check if there is a verified/approved payment for this request's bill
-                                                            $bill_stmt = $conn->prepare("SELECT id FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' LIMIT 1");
-                                                            $bill_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $request['room_id']]);
-                                                            $bill = $bill_stmt->fetch(PDO::FETCH_ASSOC);
-                                                            $is_paid = false;
-                                                            if ($bill) {
-                                                                $pay_stmt = $conn->prepare("SELECT COUNT(*) FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
-                                                                $pay_stmt->execute(['bill_id' => $bill['id']]);
-                                                                $is_paid = $pay_stmt->fetchColumn() > 0;
+                                    // Wait for Flatpickr to load then initialize ALL date inputs
+                                    function initializeFlatpickr() {
+                                        if (typeof flatpickr === 'undefined') {
+                                            // Flatpickr not loaded yet, try again
+                                            setTimeout(initializeFlatpickr, 100);
+                                            return;
+                                        }
+                                        
+                                        const modalCheckinInput = document.getElementById('modalCheckinDate');
+                                        const modalCheckoutInput = document.getElementById('modalCheckoutDate');
+                                        
+                                        // Initialize all date inputs
+                                        document.querySelectorAll('.checkin-date').forEach(function(input) {
+                                            if (!input._flatpickr) {
+                                                flatpickr(input, {
+                                                    enableTime: true,
+                                                    dateFormat: "Y-m-d h:i K",
+                                                    time_24hr: false,
+                                                    minuteIncrement: 1,
+                                                    allowInput: true,
+                                                    onChange: function(selectedDates, dateStr, instance) {
+                                                        // Auto-set checkout for modal check-in
+                                                        if (input === modalCheckinInput && modalCheckoutInput && selectedDates.length > 0) {
+                                                            const checkinDate = selectedDates[0];
+                                                            const checkoutDate = new Date(checkinDate.getTime());
+                                                            checkoutDate.setDate(checkoutDate.getDate() + 1);
+                                                            
+                                                            // Set checkout using its Flatpickr instance with explicit date object
+                                                            if (modalCheckoutInput._flatpickr) {
+                                                                modalCheckoutInput._flatpickr.setDate(checkoutDate);
                                                             }
-                                                            if ($is_paid) {
-                                                                echo 'Approved';
-                                                            } else {
-                                                                echo 'Awaiting Payment';
-                                                            }
-                                                        } else {
-                                                            echo htmlspecialchars(ucfirst($request['status']));
                                                         }
-                                                    ?>
-                                                </span>
-                                            </div>
-                                            <div class="mb-1"><strong>Rate:</strong> <span class="text-success">₱<?php echo number_format($request['rate'], 2); ?></span></div>
-                                            <div class="mb-1"><strong>Occupants:</strong> <?php echo intval($request['tenant_count'] ?? 1); ?> person(s)</div>
-                                            <div class="mb-1"><strong>Requested:</strong> <?php echo date('M d, Y', strtotime($request['request_date'])); ?></div>
-                                            <?php if (!empty($request['tenant_info_name'])): ?>
-                                                <div class="mb-1"><strong>Name:</strong> <?php echo htmlspecialchars($request['tenant_info_name']); ?></div>
-                                            <?php endif; ?>
-                                            <?php if ($request['notes']): ?>
-                                                <div class="mb-0 text-muted small"><strong>Notes:</strong> <?php echo htmlspecialchars($request['notes']); ?></div>
-                                            <?php endif; ?>
-                                            <?php if ($request['status'] === 'pending_payment') : ?>
-                                                <form method="get" action="tenant_make_payment.php" class="mt-2">
-                                                    <input type="hidden" name="room_request_id" value="<?php echo $request['id']; ?>">
-                                                    <button type="submit" class="btn btn-warning w-100">Proceed to Payment</button>
-                                                </form>
-                                            <?php endif; ?>
-                                        </div>
-                                    <?php endforeach; ?>
-                                <?php endif; ?>
+                                                    }
+                                                });
+                                            }
+                                        });
+                                        
+                                        document.querySelectorAll('.checkout-date').forEach(function(input) {
+                                            if (!input._flatpickr) {
+                                                flatpickr(input, {
+                                                    enableTime: true,
+                                                    dateFormat: "Y-m-d h:i K",
+                                                    time_24hr: false,
+                                                    minuteIncrement: 1,
+                                                    allowInput: true
+                                                });
+                                            }
+                                        });
+                                    }
+                                    
+                                    // Initialize when DOM is ready
+                                    if (document.readyState === 'loading') {
+                                        document.addEventListener('DOMContentLoaded', initializeFlatpickr);
+                                    } else {
+                                        initializeFlatpickr();
+                                    }
+                                </script>
                             </div>
                         </div>
                     </div>
@@ -790,6 +873,79 @@ try {
         </div>
     </div>
 
+    <!-- Room Request Modal -->
+    <div class="modal fade" id="requestRoomModal" tabindex="-1" aria-labelledby="requestRoomModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title" id="requestRoomModalLabel">Request Room</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
+                    <!-- Room Information Display -->
+                    <div class="alert alert-info mb-4">
+                        <strong>Room:</strong> <span id="modalRoomNumber"></span><br>
+                        <strong>Type:</strong> <span id="modalRoomType"></span><br>
+                        <strong>Rate:</strong> ₱<span id="modalRoomRate"></span>/night
+                    </div>
+                    
+                    <form method="POST" id="requestRoomForm">
+                        <input type="hidden" name="action" value="request_room">
+                        <input type="hidden" id="modalRoomId" name="room_id" value="">
+                        
+                        <h6 class="mb-3"><i class="bi bi-person-check"></i> Guest Information</h6>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Full Name <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="modalTenantName" name="tenant_info_name" required>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Email <span class="text-danger">*</span></label>
+                            <input type="email" class="form-control" id="modalTenantEmail" name="tenant_info_email" required>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Phone <span class="text-danger">*</span></label>
+                            <input type="tel" class="form-control" id="modalTenantPhone" name="tenant_info_phone" required>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Address <span class="text-danger">*</span></label>
+                            <textarea class="form-control" id="modalTenantAddress" name="tenant_info_address" rows="2" required></textarea>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Check-in Date <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control modalCheckinDate checkin-date" id="modalCheckinDate" name="checkin_date" required>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Check-out Date <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control modalCheckoutDate checkout-date" id="modalCheckoutDate" name="checkout_date" required>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Number of Guests <span class="text-danger">*</span></label>
+                            <input type="number" class="form-control guest-count-input" id="modalGuestCount" name="tenant_count" min="1" value="1" required>
+                            <small class="text-muted">Max: <span id="modalMaxOccupancy">1</span> guest(s)</small>
+                        </div>
+                        
+                        <div class="co-guests-section" id="modalCoGuestsSection" style="display: none;"></div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Notes (Optional)</label>
+                            <textarea class="form-control" id="modalNotes" name="notes" rows="2"></textarea>
+                        </div>
+                        
+                        <button type="submit" class="btn btn-success w-100">Submit Request</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // Handle dynamic co-tenant fields based on occupant count
@@ -889,6 +1045,108 @@ try {
                         total_cost: costValue.textContent.replace(/[^\d.]/g, '')
                     });
                     window.location.href = `tenant_make_payment.php?${params.toString()}`;
+                });
+            }
+        });
+
+        // Populate modal with room details when Request button is clicked
+        function populateModalWithRoom(button) {
+            const roomId = button.getAttribute('data-room-id');
+            const roomNumber = button.getAttribute('data-room-number');
+            const roomType = button.getAttribute('data-room-type');
+            const roomRate = button.getAttribute('data-room-rate');
+            const maxOccupancy = button.getAttribute('data-max-occupancy');
+
+            // Populate modal header info
+            document.getElementById('modalRoomNumber').textContent = roomNumber;
+            document.getElementById('modalRoomType').textContent = roomType;
+            document.getElementById('modalRoomRate').textContent = roomRate;
+            document.getElementById('modalMaxOccupancy').textContent = maxOccupancy;
+            
+            // Set room ID in hidden field
+            document.getElementById('modalRoomId').value = roomId;
+            
+            // Clear form fields
+            document.getElementById('requestRoomForm').reset();
+            document.getElementById('modalGuestCount').max = maxOccupancy;
+            
+            // Reset co-guests section
+            const coGuestsSection = document.getElementById('modalCoGuestsSection');
+            coGuestsSection.innerHTML = '';
+            coGuestsSection.style.display = 'none';
+            
+            // Clear Flatpickr instances if they exist
+            const checkinInput = document.getElementById('modalCheckinDate');
+            const checkoutInput = document.getElementById('modalCheckoutDate');
+            
+            if (checkinInput._flatpickr) {
+                checkinInput._flatpickr.clear();
+            }
+            if (checkoutInput._flatpickr) {
+                checkoutInput._flatpickr.clear();
+            }
+        }
+
+        // Handle modal guest count changes for co-guests
+        document.getElementById('modalGuestCount').addEventListener('change', function() {
+            const count = parseInt(this.value);
+            const maxOccupancy = parseInt(this.max);
+            
+            if (count > maxOccupancy) {
+                this.value = maxOccupancy;
+                return;
+            }
+            
+            const coGuestsSection = document.getElementById('modalCoGuestsSection');
+            const fieldsContainer = document.getElementById('modalCoGuestsFields');
+            
+            if (count > 1) {
+                coGuestsSection.style.display = 'block';
+                let html = '';
+                for (let i = 1; i < count; i++) {
+                    html += `
+                        <div class="card mb-3 border-secondary">
+                            <div class="card-header bg-secondary bg-opacity-10">
+                                <h6 class="mb-0"><i class="bi bi-person-badge"></i> Co-Guest ${i}</h6>
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-2">
+                                    <label class="form-label small">Name <span class="text-danger">*</span></label>
+                                    <input type="text" class="form-control form-control-sm" name="co_tenant_name_${i}" required>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Email <span class="text-danger">*</span></label>
+                                    <input type="email" class="form-control form-control-sm" name="co_tenant_email_${i}" required>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Phone <span class="text-danger">*</span></label>
+                                    <input type="tel" class="form-control form-control-sm" name="co_tenant_phone_${i}" required>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Address <span class="text-danger">*</span></label>
+                                    <textarea class="form-control form-control-sm" name="co_tenant_address_${i}" rows="2" required></textarea>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                coGuestsSection.innerHTML = html;
+            } else {
+                coGuestsSection.style.display = 'none';
+                coGuestsSection.innerHTML = '';
+            }
+        });
+
+        // Ensure pickers are fresh when modal is shown
+        document.addEventListener('DOMContentLoaded', function() {
+            const requestModal = document.getElementById('requestRoomModal');
+            if (requestModal) {
+                requestModal.addEventListener('show.bs.modal', function() {
+                    // Clear values when modal opens for new request
+                    const modalCheckinInput = document.getElementById('modalCheckinDate');
+                    const modalCheckoutInput = document.getElementById('modalCheckoutDate');
+                    if (modalCheckinInput) modalCheckinInput.value = '';
+                    if (modalCheckoutInput) modalCheckoutInput.value = '';
                 });
             }
         });

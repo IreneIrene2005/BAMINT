@@ -448,7 +448,7 @@ try {
                 }
                 ?>
                 <!-- Room Count card removed -->
-                <div class="col-md-3 col-sm-6 mb-3">
+                <div class="col-md-6 col-sm-6 mb-3">
                     <div class="card metric-card bg-warning bg-opacity-10 h-100">
                         <div class="card-body text-center">
                             <div class="metric-label">Total Due</div>
@@ -456,7 +456,7 @@ try {
                         </div>
                     </div>
                 </div>
-                <div class="col-md-3 col-sm-6 mb-3">
+                <div class="col-md-6 col-sm-6 mb-3">
                     <div class="card metric-card bg-info bg-opacity-10 h-100">
                         <div class="card-body text-center">
                             <div class="metric-label">Total Paid</div>
@@ -464,9 +464,7 @@ try {
                         </div>
                     </div>
                 </div>
-                <div class="col-md-3 col-sm-6 mb-3">
-                    <!-- Remaining Balance card removed as requested -->
-                </div>
+                
             </div>
 
             <!-- Walk-in Customers Section -->
@@ -641,7 +639,39 @@ try {
                 <hr>
                 <div class="row g-2">
                     <?php foreach ($pending_payments as $payment): 
-                        $balance = $payment['amount_due'] - $payment['amount_paid'];
+                        // Recompute totals including submitted (pending) payments so admin sees real-time totals
+                        $bill_id_for_calc = isset($payment['bill_id']) ? intval($payment['bill_id']) : 0;
+                        $total_paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status != 'rejected'");
+                        $total_paid_stmt->execute(['bill_id' => $bill_id_for_calc]);
+                        $total_paid_now = floatval($total_paid_stmt->fetchColumn());
+                        $balance = floatval($payment['amount_due']) - $total_paid_now;
+                        // Determine safe billing month display
+                        $billing_display = 'Not set';
+                        if (!empty($payment['billing_month']) && strtotime($payment['billing_month']) !== false && strtotime($payment['billing_month']) > 0) {
+                            $billing_display = date('M Y', strtotime($payment['billing_month']));
+                        } else {
+                            try {
+                                // Try to derive from bill row (created_at) or room_request checkin_date
+                                $brrow = null;
+                                if (!empty($payment['bill_id'])) {
+                                    $br = $conn->prepare("SELECT id, room_id, tenant_id, created_at FROM bills WHERE id = :id LIMIT 1");
+                                    $br->execute(['id' => $payment['bill_id']]);
+                                    $brrow = $br->fetch(PDO::FETCH_ASSOC);
+                                }
+                                if (!empty($brrow) && !empty($brrow['room_id']) && !empty($brrow['tenant_id'])) {
+                                    $rq = $conn->prepare("SELECT checkin_date FROM room_requests WHERE tenant_id = :tid AND room_id = :rid ORDER BY id DESC LIMIT 1");
+                                    $rq->execute(['tid' => $brrow['tenant_id'], 'rid' => $brrow['room_id']]);
+                                    $rqrow = $rq->fetch(PDO::FETCH_ASSOC);
+                                    if ($rqrow && !empty($rqrow['checkin_date']) && strtotime($rqrow['checkin_date']) > 0) {
+                                        $billing_display = date('M Y', strtotime($rqrow['checkin_date']));
+                                    } elseif (!empty($brrow['created_at']) && strtotime($brrow['created_at']) > 0) {
+                                        $billing_display = date('M Y', strtotime($brrow['created_at']));
+                                    }
+                                }
+                            } catch (Exception $e) {
+                                // leave as Not set
+                            }
+                        }
                     ?>
                     <div class="col-md-6 mb-2">
                         <div class="card border-warning h-100">
@@ -651,7 +681,7 @@ try {
                                         <h6 class="card-title mb-1"><?php echo htmlspecialchars($payment['tenant_name']); ?></h6>
                                         <p class="card-text mb-1 text-muted small">
                                             <i class="bi bi-door"></i> Room: <?php echo htmlspecialchars($payment['room_number'] ?? 'N/A'); ?> |
-                                            <i class="bi bi-calendar"></i> <?php echo date('M Y', strtotime($payment['billing_month'])); ?>
+                                            <i class="bi bi-calendar"></i> <?php echo htmlspecialchars($billing_display); ?>
                                         </p>
                                         <p class="card-text mb-1 text-muted small">
                                                         <i class="bi bi-credit-card"></i> <?php
@@ -710,10 +740,51 @@ try {
                                     <div class="row mb-3">
                                         <div class="col-md-12">
                                             <h6 class="text-muted">Billing Information</h6>
-                                            <p><strong>Billing Month:</strong> <?php echo date('F Y', strtotime($payment['billing_month'])); ?><br>
-                                            <strong>Amount Due:</strong> ₱<?php echo number_format($payment['amount_due'], 2); ?><br>
-                                            <strong>Already Paid:</strong> ₱<?php echo number_format($payment['amount_paid'], 2); ?><br>
-                                            <strong>Balance:</strong> ₱<?php echo number_format($balance, 2); ?></p>
+                                            <?php
+                                            // Compute live billing info to ensure accuracy
+                                            $bill_id = isset($payment['bill_id']) ? intval($payment['bill_id']) : 0;
+                                            $bill_amount_due = isset($payment['amount_due']) ? floatval($payment['amount_due']) : 0.0;
+                                            // Recompute already paid including submitted (pending) payments so admin sees real-time totals
+                                            $paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status != 'rejected'");
+                                            $paid_stmt->execute(['bill_id' => $bill_id]);
+                                            $already_paid = floatval($paid_stmt->fetchColumn());
+                                            $balance_now = $bill_amount_due - $already_paid;
+
+                                            // Determine billing month display: prefer billing_month if valid, else derive from room request or bill created_at
+                                            $billing_display = 'Not set';
+                                            if (!empty($payment['billing_month']) && strtotime($payment['billing_month']) !== false && strtotime($payment['billing_month']) > 0) {
+                                                $billing_display = date('F Y', strtotime($payment['billing_month']));
+                                            } else {
+                                                // Try to derive from room_requests (checkin date)
+                                                try {
+                                                    if (!empty($payment['bill_id'])) {
+                                                        $br = $conn->prepare("SELECT b.room_id, b.tenant_id, b.created_at FROM bills b WHERE b.id = :id LIMIT 1");
+                                                        $br->execute(['id' => $payment['bill_id']]);
+                                                        $brrow = $br->fetch(PDO::FETCH_ASSOC);
+                                                    } else {
+                                                        $brrow = null;
+                                                    }
+                                                    if (!empty($brrow) && !empty($brrow['room_id']) && !empty($brrow['tenant_id'])) {
+                                                        $rq = $conn->prepare("SELECT checkin_date FROM room_requests WHERE tenant_id = :tid AND room_id = :rid ORDER BY id DESC LIMIT 1");
+                                                        $rq->execute(['tid' => $brrow['tenant_id'], 'rid' => $brrow['room_id']]);
+                                                        $rqrow = $rq->fetch(PDO::FETCH_ASSOC);
+                                                        if ($rqrow && !empty($rqrow['checkin_date']) && strtotime($rqrow['checkin_date']) > 0) {
+                                                            $billing_display = date('F Y', strtotime($rqrow['checkin_date']));
+                                                        } elseif (!empty($brrow['created_at']) && strtotime($brrow['created_at']) > 0) {
+                                                            $billing_display = date('F Y', strtotime($brrow['created_at']));
+                                                        }
+                                                    }
+                                                } catch (Exception $e) {
+                                                    // fallback below
+                                                }
+                                            }
+                                            ?>
+                                            <p>
+                                                <strong>Billing Month:</strong> <?php echo htmlspecialchars($billing_display); ?><br>
+                                                <strong>Amount Due:</strong> ₱<?php echo number_format($bill_amount_due, 2); ?><br>
+                                                <strong>Already Paid:</strong> ₱<?php echo number_format($already_paid, 2); ?><br>
+                                                <strong>Balance:</strong> ₱<?php echo number_format($balance_now, 2); ?>
+                                            </p>
                                         </div>
                                     </div>
 

@@ -46,7 +46,7 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
         <h1 class="h2"><i class="bi bi-building"></i> Room Management</h1>
         <div>
           <button class="btn btn-outline-secondary btn-sm" onclick="location.reload();"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
-          <button class="btn btn-primary btn-sm ms-2" data-bs-toggle="modal" data-bs-target="#addRoomModal"><i class="bi bi-plus-circle"></i> Add Room</button>
+          <button class="btn btn-primary btn-sm ms-2" onclick="openAddModal()"><i class="bi bi-plus-circle"></i> Add Room</button>
         </div>
       </div>
 
@@ -108,7 +108,7 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
             </div>
             <div>
               <button class="btn btn-primary btn-sm me-2" id="applyRoomFilter">Apply</button>
-              <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addRoomModal"><i class="bi bi-plus-circle"></i> Add Room</button>
+              <button class="btn btn-primary" onclick="openAddModal()"><i class="bi bi-plus-circle"></i> Add Room</button>
             </div>
           </div>
         <div class="card-body p-0">
@@ -142,7 +142,7 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
                 <tr>
                   <td class="fw-bold text-secondary"><?= htmlspecialchars($r['id']) ?></td>
                   <td><?= htmlspecialchars($r['room_number']) ?></td>
-                  <td><?= htmlspecialchars($r['room_type']) ?></td>
+                  <td><?= htmlspecialchars(ucfirst($r['room_type'])) ?></td>
                   <td><span class="badge bg-<?= $badge ?>"><?= $status ?></span></td>
                   <td>₱<?= htmlspecialchars(number_format($r['rate'], 2)) ?></td>
                   <td><?= htmlspecialchars($r['description']) ?></td>
@@ -183,9 +183,9 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
           <div class="mb-3">
             <label for="roomCategory" class="form-label">Category</label>
             <select class="form-select" id="roomCategory" name="category" required>
-              <option value="single">Single</option>
-              <option value="double">Double</option>
-              <option value="suite">Suite</option>
+              <option value="Single">Single</option>
+              <option value="Double">Double</option>
+              <option value="Family">Family</option>
             </select>
           </div>
           <div class="mb-3">
@@ -256,7 +256,31 @@ function confirmDelete(id) {
   if (!confirm('Delete this room?')) return;
   const fd = new FormData(); fd.append('id', id);
   fetch('rooms_api.php?action=delete', { method: 'POST', body: fd })
-    .then(res => res.json()).then(d => { if (d.success) loadRooms(); else alert('Delete failed'); });
+    .then(res => res.json())
+    .then(d => {
+      if (d.success) {
+        loadRooms();
+        alert('Room deleted successfully');
+      } else {
+        alert('⚠️ ' + (d.message || 'Delete failed'));
+      }
+    })
+    .catch(err => alert('Error: ' + err));
+}
+
+function openAddModal() {
+  const modalEl = document.getElementById('addRoomModal');
+  const modal = new bootstrap.Modal(modalEl);
+  document.getElementById('addRoomModalLabel').textContent = 'Add Room';
+  document.getElementById('roomId').value = '';
+  document.getElementById('roomNumber').value = '';
+  document.getElementById('roomCategory').value = 'Single';
+  document.getElementById('roomStatus').value = 'available';
+  document.getElementById('roomRate').value = '1500';
+  document.getElementById('roomDescription').value = '';
+  document.getElementById('roomImage').value = '';
+  document.getElementById('existingImage').value = '';
+  modal.show();
 }
 
 function openEditModal(room) {
@@ -278,7 +302,7 @@ document.getElementById('addRoomForm').addEventListener('submit', function(e) {
   e.preventDefault();
   const form = e.target;
   const fd = new FormData(form);
-  const id = form.id.value;
+  const id = document.getElementById('roomId').value;
   const action = id ? 'edit' : 'add';
   fetch('rooms_api.php?action=' + action, { method: 'POST', body: fd })
     .then(res => res.json()).then(d => {
@@ -294,6 +318,26 @@ document.getElementById('addRoomForm').addEventListener('submit', function(e) {
 });
 
 window.addEventListener('load', function() {
+  // Handle category change to auto-populate rate
+  const categorySelect = document.getElementById('roomCategory');
+  const rateInput = document.getElementById('roomRate');
+  
+  if (categorySelect && rateInput) {
+    categorySelect.addEventListener('change', function() {
+      const category = this.value;
+      if (category) {
+        fetch('rooms_api.php?action=get_rate_by_category&category=' + encodeURIComponent(category))
+          .then(res => res.json())
+          .then(data => {
+            if (data.success && data.rate > 0) {
+              rateInput.value = parseFloat(data.rate).toFixed(2);
+            }
+          })
+          .catch(err => console.error('Error fetching rate:', err));
+      }
+    });
+  }
+
   // Wire filter apply button and load initial rooms with optional filter
   const applyBtn = document.getElementById('applyRoomFilter');
   const statusEl = document.getElementById('roomStatusFilter');

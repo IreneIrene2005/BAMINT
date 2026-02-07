@@ -41,13 +41,73 @@ try {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
         body { background-color: #f8f9fa; }
-        .sidebar { background: linear-gradient(180deg, #667eea 0%, #764ba2 100%); color: white; }
-        .sidebar a { color: rgba(255,255,255,0.8); text-decoration: none; }
-        .sidebar a:hover { color: white; }
-        .sidebar .active { color: white; font-weight: bold; }
+        .sidebar {
+            background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+            padding: 2rem 0;
+        }
+        .sidebar .nav-link {
+            color: rgba(255,255,255,0.7);
+            padding: 1rem 1.5rem;
+            border-left: 3px solid transparent;
+            transition: all 0.3s;
+        }
+        .sidebar .nav-link:hover,
+        .sidebar .nav-link.active {
+            color: white;
+            background: rgba(255,255,255,0.1);
+            border-left-color: white;
+        }
+        .user-info {
+            padding: 1.5rem;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            margin-bottom: 1rem;
+        }
+        .user-info h5 {
+            margin-bottom: 0.25rem;
+        }
+        .user-info p {
+            font-size: 0.9rem;
+            opacity: 0.8;
+            margin-bottom: 0;
+        }
+        .metric-card {
+            border: none;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.3s;
+        }
+        .metric-card:hover {
+            transform: translateY(-5px);
+        }
+        .header-banner {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+        }
+        .header-banner h1 {
+            margin-bottom: 0.5rem;
+        }
+        .header-banner p {
+            margin-bottom: 0;
+        }
         .archive-card { border-left: 4px solid #667eea; margin-bottom: 1rem; }
         .badge-archived { background-color: #6c757d; }
         .table-hover tbody tr:hover { background-color: #f0f0f0; }
+        .btn-logout {
+            background: #dc3545;
+            color: white;
+            border: none;
+            margin-top: 1rem;
+            width: 100%;
+        }
+        .btn-logout:hover {
+            background: #c82333;
+            color: white;
+        }
     </style>
 </head>
 <body>
@@ -56,50 +116,14 @@ try {
 
 <div class="container-fluid">
     <div class="row">
-        <!-- Sidebar -->
-        <nav class="col-md-2 d-md-block sidebar">
-            <div class="position-sticky pt-3">
-                <ul class="nav flex-column">
-                    <li class="nav-item">
-                        <a class="nav-link" href="tenant_dashboard.php">
-                            <i class="bi bi-house-door"></i> Dashboard
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="tenant_profile.php">
-                            <i class="bi bi-person"></i> Profile
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="tenant_bills.php">
-                            <i class="bi bi-receipt"></i> Bills
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="tenant_maintenance.php">
-                            <i class="bi bi-tools"></i> Maintenance
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link active" href="tenant_archives.php">
-                            <i class="bi bi-archive"></i> Archives
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="logout.php">
-                            <i class="bi bi-box-arrow-right"></i> Logout
-                        </a>
-                    </li>
-                </ul>
-            </div>
-        </nav>
+        <?php include 'templates/tenant_sidebar.php'; ?>
 
         <!-- Main content -->
-        <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
-            <div class="d-flex justify-content-between align-items-center pt-3 pb-2 mb-4 border-bottom">
-                <h1 class="h2">
-                    <i class="bi bi-archive"></i> Archives
-                </h1>
+        <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
+            <!-- Header -->
+            <div class="header-banner">
+                <h1><i class="bi bi-archive"></i> Archives</h1>
+                <p>View your archived payments and maintenance records</p>
             </div>
 
             <!-- Archive Statistics -->

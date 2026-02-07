@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $tenant_id = $_SESSION["tenant_id"];
 $message = '';
@@ -151,6 +152,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 'proof_of_payment' => $proof_filename,
                 'notes' => $notes
             ]);
+
+            // Get payment transaction id
+            $paymentId = $conn->lastInsertId();
+
+            // Notify admins about new payment awaiting verification
+            try {
+                notifyAdminsNewPayment($conn, $bill_id, $tenant_id, $payment_amount);
+            } catch (Exception $e) {
+                error_log('notifyAdminsNewPayment failed: ' . $e->getMessage());
+            }
+
+            // Notify tenant that payment was submitted (confirmation)
+            try {
+                createNotification(
+                    $conn,
+                    'tenant',
+                    $tenant_id,
+                    'payment_submitted',
+                    'Payment Submitted',
+                    'Your payment of ₱' . number_format($payment_amount, 2) . ' was submitted and is awaiting admin verification.',
+                    $paymentId,
+                    'payment_transaction',
+                    'tenant_payments.php'
+                );
+            } catch (Exception $e) {
+                error_log('tenant payment notification failed: ' . $e->getMessage());
+            }
+
+            // If this payment is for a room request (advance payment), notify admins about the room request as a booking
+            if (isset($_GET['room_request_id']) && is_numeric($_GET['room_request_id'])) {
+                $room_request_id = intval($_GET['room_request_id']);
+                try {
+                    $rr = $conn->prepare('SELECT tenant_count FROM room_requests WHERE id = :id');
+                    $rr->execute(['id' => $room_request_id]);
+                    $rrData = $rr->fetch(PDO::FETCH_ASSOC);
+                    $tenantCount = $rrData ? intval($rrData['tenant_count']) : 1;
+                    notifyAdminsNewRoomRequest($conn, $room_request_id, $tenant_id, $tenantCount);
+                } catch (Exception $e) {
+                    error_log('notifyAdminsNewRoomRequest failed: ' . $e->getMessage());
+                }
+            }
 
             // Update bill status and amount_paid for all payment types
             $message = "Downpayment/Full payment submitted. Please wait for admin approval.";
@@ -332,49 +374,7 @@ try {
     <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 sidebar">
-                <div class="position-sticky pt-3">
-                    <div class="user-info">
-                        <h5><i class="bi bi-person-circle"></i> <?php echo htmlspecialchars($_SESSION["name"]); ?></h5>
-                        <p><?php echo htmlspecialchars($_SESSION["email"]); ?></p>
-                    </div>
-
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_dashboard.php">
-                                <i class="bi bi-house-door"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_bills.php">
-                                <i class="bi bi-receipt"></i> My Bills
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_payments.php">
-                                <i class="bi bi-coin"></i> Payments
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_maintenance.php">
-                                <i class="bi bi-tools"></i> Maintenance
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_profile.php">
-                                <i class="bi bi-person"></i> My Profile
-                            </a>
-                        </li>
-                    </ul>
-
-                    <form action="logout.php" method="post">
-                        <button type="submit" class="btn btn-logout">
-                            <i class="bi bi-box-arrow-right"></i> Logout
-                        </button>
-                    </form>
-                </div>
-            </nav>
+            <?php include 'templates/tenant_sidebar.php'; ?>
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
@@ -432,74 +432,128 @@ try {
                                         <label for="bill_id" class="form-label">Bill to Pay <span class="text-danger">*</span></label>
                                         <select class="form-control" id="bill_id" name="bill_id" required onchange="updateBillAmount()">
                                             <?php
-                                            // Always show Grand Total Due (Room + Amenities) as a payment option
-                                            $today = date('Y-m-d');
+                                            // Determine what to show in the bill selector.
+                                            // If this page was opened for a `room_request_id`, prefer showing the advance (room-only) payment
+                                            // until the payment is verified/approved (or bill is paid). After that, show the Grand Total (room + amenities).
                                             $show_advance_payment = false;
-                                            // Check for any pending/pending_payment room request for this tenant
-                                                                                        // Remove advance payment option after downpayment/full payment is made
-                                            // Always show Grand Total Due (Room + Amenities) as a payment option
-                                            // 1. Get all unpaid/active bills (room only)
-                                            $bills_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending','partial','unpaid','overdue')");
-                                            $bills_stmt->execute(['tenant_id' => $tenant_id]);
-                                            $bills = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
-                                            // Fetch all completed amenities for this tenant
-                                            $amenities_stmt = $conn->prepare("SELECT id, category, cost, billed, billed_bill_id FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0 ORDER BY submitted_date DESC");
-                                            $amenities_stmt->execute(['tenant_id' => $tenant_id]);
-                                            $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
-                                            // Prepare Additional Charges (amenities that were completed and billed)
-                                            $additional_items = [];
-                                            $additional_total_unpaid = 0.0;
-                                            foreach ($amenities as $a) {
-                                                $bill_id = $a['billed'] && $a['billed_bill_id'] ? $a['billed_bill_id'] : null;
-                                                $billing_month = null;
-                                                $bill_status = 'not_billed';
-                                                $bill_remaining = null;
-                                                if ($bill_id) {
-                                                    $billLookupStmt = $conn->prepare("SELECT id, billing_month, amount_due, amount_paid, status FROM bills WHERE id = :bill_id LIMIT 1");
-                                                    $billLookupStmt->execute(['bill_id' => $bill_id]);
-                                                    $bill = $billLookupStmt->fetch(PDO::FETCH_ASSOC);
-                                                    if ($bill) {
-                                                        $billing_month = $bill['billing_month'];
-                                                        $bill_status = $bill['status'];
-                                                        $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
-                                                        $sum_stmt->execute(['bill_id' => $bill['id']]);
-                                                        $paid = floatval($sum_stmt->fetchColumn());
-                                                        $bill_remaining = max(0, floatval($bill['amount_due']) - $paid);
+                                            if (isset($_GET['room_request_id']) && is_numeric($_GET['room_request_id'])) {
+                                                $room_request_id = intval($_GET['room_request_id']);
+                                                // Use the previously computed $pending_bills (from above) if available
+                                                if (!empty($pending_bills)) {
+                                                    foreach ($pending_bills as $pb) {
+                                                        // If this is a virtual bill (id==0) or notes indicate advance payment, compute room-only amount
+                                                        $is_advance = ($pb['id'] == 0) || (isset($pb['notes']) && stripos($pb['notes'], 'ADVANCE PAYMENT') !== false);
+                                                        if ($is_advance) {
+                                                            // Compute room total (nights * rate)
+                                                            if ($pb['id'] == 0 && isset($pb['amount_due'])) {
+                                                                $room_total = floatval($pb['amount_due']);
+                                                            } else {
+                                                                // Derive from room_requests and rooms table
+                                                                $rrs = $conn->prepare("SELECT rr.checkin_date, rr.checkout_date, r.rate FROM room_requests rr JOIN rooms r ON rr.room_id = r.id WHERE rr.id = :rid LIMIT 1");
+                                                                $rrs->execute(['rid' => $room_request_id]);
+                                                                $rrrow = $rrs->fetch(PDO::FETCH_ASSOC);
+                                                                $room_total = 0.0;
+                                                                if ($rrrow && $rrrow['rate']) {
+                                                                    $nights = 1;
+                                                                    if (!empty($rrrow['checkin_date']) && !empty($rrrow['checkout_date'])) {
+                                                                        $d1 = new DateTime($rrrow['checkin_date']);
+                                                                        $d2 = new DateTime($rrrow['checkout_date']);
+                                                                        $nights = max(1, (int)$d1->diff($d2)->format('%a'));
+                                                                    }
+                                                                    $room_total = floatval($rrrow['rate']) * $nights;
+                                                                }
+                                                            }
+                                                            echo '<option value="' . intval($pb['id']) . '" data-amount="' . $room_total . '">';
+                                                            echo 'Advance Payment (Room Only) - ₱' . number_format($room_total, 2);
+                                                            echo '</option>';
+                                                            $show_advance_payment = true;
+                                                        } else {
+                                                            // Non-advance bill option (fallback) - show bill's amount_due
+                                                            $amount = isset($pb['amount_due']) ? floatval($pb['amount_due']) : 0.0;
+                                                            echo '<option value="' . intval($pb['id']) . '" data-amount="' . $amount . '">';
+                                                            echo 'Bill #' . intval($pb['id']) . ' - ₱' . number_format($amount, 2);
+                                                            echo '</option>';
+                                                        }
                                                     }
-                                                }
-                                                $alloc = $bill_remaining !== null ? min(floatval($a['cost']), $bill_remaining) : 0;
-                                                if ($alloc > 0) $additional_total_unpaid += $alloc;
-                                                $additional_items[] = [
-                                                    'request_id' => $a['id'],
-                                                    'category' => $a['category'],
-                                                    'cost' => floatval($a['cost']),
-                                                    'bill_id' => $bill_id,
-                                                    'billing_month' => $billing_month,
-                                                    'bill_status' => $bill_status,
-                                                    'bill_remaining' => $bill_remaining,
-                                                    'unpaid_alloc' => $alloc
-                                                ];
-                                            }
-                                            // Calculate remaining balance for the most recent unpaid bill (room only, no amenities)
-                                            $recent_bill_balance = 0.0;
-                                            $room_rate = null;
-                                            $nights = 1;
-                                            if (!empty($bills)) {
-                                                usort($bills, function($a, $b) {
-                                                    $a_time = strtotime($a['billing_month']);
-                                                    $b_time = strtotime($b['billing_month']);
-                                                    if ($b_time === $a_time) {
-                                                        return intval($b['id']) - intval($a['id']);
+                                                } else {
+                                                    // No pending advance bill found; fall back to showing Grand Total (room + amenities)
+                                                    // Compute grand total as before
+                                                    $bills_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending','partial','unpaid','overdue')");
+                                                    $bills_stmt->execute(['tenant_id' => $tenant_id]);
+                                                    $bills = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                                    // Fetch amenities
+                                                    $amenities_stmt = $conn->prepare("SELECT id, category, cost, billed, billed_bill_id FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0 ORDER BY submitted_date DESC");
+                                                    $amenities_stmt->execute(['tenant_id' => $tenant_id]);
+                                                    $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                                    $additional_items = [];
+                                                    foreach ($amenities as $a) {
+                                                        $additional_items[] = $a;
                                                     }
-                                                    return $b_time - $a_time;
-                                                });
-                                                foreach ($bills as $bill) {
-                                                    if (!isset($room_rate)) {
+                                                    // Determine recent bill room balance
+                                                    $recent_bill_balance = 0.0;
+                                                    $room_rate = null;
+                                                    $nights = 1;
+                                                    if (!empty($bills)) {
+                                                        usort($bills, function($a, $b) {
+                                                            $a_time = strtotime($a['billing_month']);
+                                                            $b_time = strtotime($b['billing_month']);
+                                                            if ($b_time === $a_time) {
+                                                                return intval($b['id']) - intval($a['id']);
+                                                            }
+                                                            return $b_time - $a_time;
+                                                        });
+                                                        $bill = $bills[0];
+                                                        // derive room_total similar to above
                                                         $room_stmt = $conn->prepare("SELECT r.rate FROM rooms r JOIN tenants t ON t.room_id = r.id WHERE t.id = :tenant_id LIMIT 1");
                                                         $room_stmt->execute(['tenant_id' => $tenant_id]);
                                                         $room_row = $room_stmt->fetch(PDO::FETCH_ASSOC);
                                                         $room_rate = $room_row && isset($room_row['rate']) ? floatval($room_row['rate']) : 0.0;
+                                                        $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                                        $room_req_stmt->execute(['tenant_id' => $bill['tenant_id'], 'room_id' => $bill['room_id']]);
+                                                        $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                                        if ($dates && $dates['checkin_date'] && $dates['checkout_date']) {
+                                                            $dt1 = new DateTime($dates['checkin_date']);
+                                                            $dt2 = new DateTime($dates['checkout_date']);
+                                                            $interval = $dt1->diff($dt2);
+                                                            $nights = max(1, (int)$interval->format('%a'));
+                                                        }
+                                                        $room_total = $room_rate * $nights;
+                                                        $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                                                        $sum_stmt->execute(['bill_id' => $bill['id']]);
+                                                        $live_paid = floatval($sum_stmt->fetchColumn());
+                                                        if ($live_paid > 0 && $live_paid < $room_total) {
+                                                            $recent_bill_balance = $room_total - $live_paid;
+                                                        } else {
+                                                            $recent_bill_balance = $room_total;
+                                                        }
                                                     }
+                                                    $grand_total_due = $recent_bill_balance;
+                                                    foreach ($additional_items as $ai) {
+                                                        $grand_total_due += floatval($ai['cost']);
+                                                    }
+                                                    echo '<option value="grand_total_due" data-amount="' . $grand_total_due . '">';
+                                                    echo 'Grand Total Due (Room + Amenities) - ₱' . number_format($grand_total_due, 2);
+                                                    echo '</option>';
+                                                }
+                                            } else {
+                                                // Not a room_request flow: show Grand Total as before
+                                                $bills_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending','partial','unpaid','overdue')");
+                                                $bills_stmt->execute(['tenant_id' => $tenant_id]);
+                                                $bills = $bills_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                                $amenities_stmt = $conn->prepare("SELECT id, category, cost, billed, billed_bill_id FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0 ORDER BY submitted_date DESC");
+                                                $amenities_stmt->execute(['tenant_id' => $tenant_id]);
+                                                $amenities = $amenities_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                                $additional_items = [];
+                                                foreach ($amenities as $a) $additional_items[] = $a;
+                                                $recent_bill_balance = 0.0;
+                                                $room_rate = null;
+                                                $nights = 1;
+                                                if (!empty($bills)) {
+                                                    $bill = $bills[0];
+                                                    $room_stmt = $conn->prepare("SELECT r.rate FROM rooms r JOIN tenants t ON t.room_id = r.id WHERE t.id = :tenant_id LIMIT 1");
+                                                    $room_stmt->execute(['tenant_id' => $tenant_id]);
+                                                    $room_row = $room_stmt->fetch(PDO::FETCH_ASSOC);
+                                                    $room_rate = $room_row && isset($room_row['rate']) ? floatval($room_row['rate']) : 0.0;
                                                     $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                                                     $room_req_stmt->execute(['tenant_id' => $bill['tenant_id'], 'room_id' => $bill['room_id']]);
                                                     $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
@@ -518,18 +572,15 @@ try {
                                                     } else {
                                                         $recent_bill_balance = $room_total;
                                                     }
-                                                    if ($recent_bill_balance < 0) $recent_bill_balance = 0.0;
-                                                    break;
                                                 }
+                                                $grand_total_due = $recent_bill_balance;
+                                                foreach ($additional_items as $ai) {
+                                                    $grand_total_due += floatval($ai['cost']);
+                                                }
+                                                echo '<option value="grand_total_due" data-amount="' . $grand_total_due . '">';
+                                                echo 'Grand Total Due (Room + Amenities) - ₱' . number_format($grand_total_due, 2);
+                                                echo '</option>';
                                             }
-                                            // Grand Total Due = recent bill balance + all additional charges
-                                            $grand_total_due = $recent_bill_balance;
-                                            foreach ($additional_items as $ai) {
-                                                $grand_total_due += floatval($ai['cost']);
-                                            }
-                                            echo '<option value="grand_total_due" data-amount="' . $grand_total_due . '">';
-                                            echo 'Grand Total Due (Room + Amenities) - ₱' . number_format($grand_total_due, 2);
-                                            echo '</option>';
                                             ?>
                                         </select>
                                         <small class="text-muted">

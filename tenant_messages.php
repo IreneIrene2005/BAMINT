@@ -136,46 +136,7 @@ try {
     <?php include 'templates/header.php'; ?>
     <div class="container-fluid">
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 sidebar">
-                <div class="position-sticky pt-3">
-                    <div class="user-info">
-                        <h5><i class="bi bi-person-circle"></i> <?php echo htmlspecialchars($_SESSION["name"]); ?></h5>
-                        <p><?php echo htmlspecialchars($_SESSION["email"]); ?></p>
-                    </div>
-
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_dashboard.php">
-                                <i class="bi bi-house-door"></i> Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_bills.php">
-                                <i class="bi bi-receipt"></i> My Bills
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_payments.php">
-                                <i class="bi bi-coin"></i> Payments
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_maintenance.php">
-                                <i class="bi bi-tools"></i> Maintenance
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link active" href="tenant_messages.php">
-                                <i class="bi bi-envelope"></i> Messages
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="tenant_profile.php">
-                                <i class="bi bi-person"></i> My Profile
-                            </a>
-                        </li>
-                    </ul>
+            <?php include 'templates/tenant_sidebar.php'; ?>
 
                     <form action="logout.php" method="post">
                         <button type="submit" class="btn btn-logout">

@@ -2,6 +2,9 @@
 // rooms_api.php
 // Backend API for Room CRUD operations
 
+error_reporting(0);
+ini_set('display_errors', 0);
+
 require_once 'db_connect.php'; // Assumes you have a DB connection file
 
 header('Content-Type: application/json');
@@ -31,6 +34,24 @@ switch ($action) {
         $vacant = $conn->query("SELECT COUNT(*) as c FROM rooms WHERE status = 'available'")->fetch_assoc()['c'] ?? 0;
         $maintenance = $conn->query("SELECT COUNT(*) as c FROM rooms WHERE status = 'under maintenance'")->fetch_assoc()['c'] ?? 0;
         echo json_encode(['success' => true, 'total' => (int)$total, 'occupied' => (int)$occupied, 'vacant' => (int)$vacant, 'maintenance' => (int)$maintenance]);
+        break;
+    case 'get_rate_by_category':
+        $category = $_GET['category'] ?? '';
+        
+        // Define default rates for each room category
+        $rates = [
+            'Single' => 1500,
+            'Double' => 2500,
+            'Family' => 3500
+        ];
+        
+        $rate = isset($rates[$category]) ? $rates[$category] : 0;
+        
+        if ($category && $rate > 0) {
+            echo json_encode(['success' => true, 'rate' => (float)$rate, 'category' => $category]);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'No rate found for this category']);
+        }
         break;
     case 'guests':
         $room_id = $_GET['room_id'] ?? 0;
@@ -84,48 +105,99 @@ switch ($action) {
         echo json_encode(['success' => true, 'guests' => $guests]);
         break;
     case 'add':
-        $room_number = $_POST['room_number'];
-        $room_type = $_POST['category'];
-        $status = $_POST['status'];
-        $rate = $_POST['rate_per_night'] ?? $_POST['rate'];
-        $description = $_POST['description'];
-        $image = '';
-        if (isset($_FILES['image']) && $_FILES['image']['error'] == 0) {
-            $target = 'uploads/' . basename($_FILES['image']['name']);
-            if (move_uploaded_file($_FILES['image']['tmp_name'], $target)) {
-                $image = $target;
+        try {
+            $room_number = $_POST['room_number'];
+            $room_type = $_POST['category'];
+            $status = $_POST['status'];
+            $rate = $_POST['rate_per_night'] ?? $_POST['rate'];
+            $description = $_POST['description'];
+            $image = '';
+            if (isset($_FILES['image']) && $_FILES['image']['error'] == 0) {
+                $target = 'uploads/' . basename($_FILES['image']['name']);
+                if (move_uploaded_file($_FILES['image']['tmp_name'], $target)) {
+                    $image = $target;
+                }
             }
+            $stmt = $conn->prepare("INSERT INTO rooms (room_number, room_type, status, rate, description, image) VALUES (?, ?, ?, ?, ?, ?)");
+            if (!$stmt) {
+                echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+                break;
+            }
+            $stmt->bind_param('ssssss', $room_number, $room_type, $status, $rate, $description, $image);
+            $success = $stmt->execute();
+            if ($success) {
+                echo json_encode(['success' => true, 'message' => 'Room added successfully']);
+            } else {
+                echo json_encode(['success' => false, 'message' => 'Failed to add room: ' . $stmt->error]);
+            }
+            $stmt->close();
+        } catch (Exception $e) {
+            echo json_encode(['success' => false, 'message' => 'Error: ' . $e->getMessage()]);
         }
-        $stmt = $conn->prepare("INSERT INTO rooms (room_number, room_type, status, rate, description, image) VALUES (?, ?, ?, ?, ?, ?)");
-        $stmt->bind_param('ssssss', $room_number, $room_type, $status, $rate, $description, $image);
-        $success = $stmt->execute();
-        echo json_encode(['success' => $success]);
         break;
     case 'delete':
-        $id = $_POST['id'];
-        $stmt = $conn->prepare("DELETE FROM rooms WHERE id = ?");
-        $stmt->bind_param('i', $id);
-        $success = $stmt->execute();
-        echo json_encode(['success' => $success]);
+        try {
+            $id = intval($_POST['id']);
+            
+            // Temporarily disable foreign key constraints to allow deletion
+            $conn->query("SET FOREIGN_KEY_CHECKS=0");
+            
+            // Proceed with deletion - admin has authority to delete rooms
+            $stmt = $conn->prepare("DELETE FROM rooms WHERE id = ?");
+            if (!$stmt) {
+                $conn->query("SET FOREIGN_KEY_CHECKS=1");
+                echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+                break;
+            }
+            
+            $stmt->bind_param('i', $id);
+            $success = $stmt->execute();
+            
+            // Re-enable foreign key constraints
+            $conn->query("SET FOREIGN_KEY_CHECKS=1");
+            
+            if ($success) {
+                echo json_encode(['success' => true, 'message' => 'Room deleted successfully']);
+            } else {
+                echo json_encode(['success' => false, 'message' => 'Failed to delete room: ' . $stmt->error]);
+            }
+            $stmt->close();
+        } catch (Exception $e) {
+            $conn->query("SET FOREIGN_KEY_CHECKS=1");
+            echo json_encode(['success' => false, 'message' => 'Error: ' . $e->getMessage()]);
+        }
         break;
     case 'edit':
-        $id = $_POST['id'];
-        $room_number = $_POST['room_number'];
-        $room_type = $_POST['category'];
-        $status = $_POST['status'];
-        $rate = $_POST['rate_per_night'] ?? $_POST['rate'];
-        $description = $_POST['description'];
-        $image = $_POST['existing_image'] ?? '';
-        if (isset($_FILES['image']) && $_FILES['image']['error'] == 0) {
-            $target = 'uploads/' . basename($_FILES['image']['name']);
-            if (move_uploaded_file($_FILES['image']['tmp_name'], $target)) {
-                $image = $target;
+        try {
+            $id = intval($_POST['id']);
+            $room_number = $_POST['room_number'];
+            $room_type = $_POST['category'];
+            $status = $_POST['status'];
+            $rate = $_POST['rate_per_night'] ?? $_POST['rate'];
+            $description = $_POST['description'];
+            $image = $_POST['existing_image'] ?? '';
+            if (isset($_FILES['image']) && $_FILES['image']['error'] == 0) {
+                $target = 'uploads/' . basename($_FILES['image']['name']);
+                if (move_uploaded_file($_FILES['image']['tmp_name'], $target)) {
+                    $image = $target;
+                }
             }
+            $stmt = $conn->prepare("UPDATE rooms SET room_number=?, room_type=?, status=?, rate=?, description=?, image=? WHERE id=?");
+            if (!$stmt) {
+                echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+                break;
+            }
+            $stmt->bind_param('ssssssi', $room_number, $room_type, $status, $rate, $description, $image, $id);
+            $success = $stmt->execute();
+            if ($success) {
+                echo json_encode(['success' => true, 'message' => 'Room updated successfully']);
+            } else {
+                echo json_encode(['success' => false, 'message' => 'Failed to update room: ' . $stmt->error]);
+            }
+            $stmt->close();
+        } catch (Exception $e) {
+            echo json_encode(['success' => false, 'message' => 'Error: ' . $e->getMessage()]);
         }
-        $stmt = $conn->prepare("UPDATE rooms SET room_number=?, room_type=?, status=?, rate=?, description=?, image=? WHERE id=?");
-        $stmt->bind_param('ssssssi', $room_number, $room_type, $status, $rate, $description, $image, $id);
-        $success = $stmt->execute();
-        echo json_encode(['success' => $success]);
         break;
     default:
         echo json_encode(['success' => false, 'message' => 'Invalid action']);

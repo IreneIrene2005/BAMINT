@@ -244,7 +244,7 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
 
                 <!-- Statistics Cards -->
                 <div class="row g-3 mb-4">
-                    <div class="col-md-3 col-sm-6">
+                    <div class="col-md-6 col-sm-6">
                         <div class="card stat-card bg-primary bg-opacity-10 h-100">
                             <div class="card-body text-center">
                                 <p class="text-muted mb-2"><i class="bi bi-gift"></i> Total Amenities</p>
@@ -252,7 +252,7 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3 col-sm-6">
+                    <div class="col-md-6 col-sm-6">
                         <div class="card stat-card bg-success bg-opacity-10 h-100">
                             <div class="card-body text-center">
                                 <p class="text-muted mb-2"><i class="bi bi-check-circle"></i> Active</p>
@@ -260,22 +260,7 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3 col-sm-6">
-                        <div class="card stat-card bg-info bg-opacity-10 h-100">
-                            <div class="card-body text-center">
-                                <p class="text-muted mb-2"><i class="bi bi-currency-peso"></i> Avg Price</p>
-                                <div class="stat-value text-info">₱<?php echo $total_amenities > 0 ? number_format($total_revenue_potential / $total_amenities, 2) : '0'; ?></div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-3 col-sm-6">
-                        <div class="card stat-card bg-warning bg-opacity-10 h-100">
-                            <div class="card-body text-center">
-                                <p class="text-muted mb-2"><i class="bi bi-calculator"></i> Max Price</p>
-                                <div class="stat-value text-warning">₱<?php echo $total_amenities > 0 ? number_format(max(array_column($amenities, 'price')), 2) : '0'; ?></div>
-                            </div>
-                        </div>
-                    </div>
+                    <!-- Avg/Max Price cards removed as requested -->
                 </div>
 
                 <!-- Amenities Grid -->
