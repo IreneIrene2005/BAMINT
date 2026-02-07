@@ -86,17 +86,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                                 'room_id' => $payment_info['room_id']
                             ]);
                         } elseif ($bill_status === 'partial') {
-                            // Partial/downpayment: assign room to tenant and mark room as 'booked' (not yet occupied)
+                            // Partial/downpayment: assign tenant, mark active, set room occupied (approved payment = occupied)
                             $tenant_update = $conn->prepare("
                                 UPDATE tenants 
-                                SET room_id = :room_id
+                                SET status = 'active', start_date = NOW(), room_id = :room_id
                                 WHERE id = :tenant_id
                             ");
                             $tenant_update->execute(['tenant_id' => $payment_info['tenant_id'], 'room_id' => $payment_info['room_id']]);
 
                             $room_update = $conn->prepare("
                                 UPDATE rooms 
-                                SET status = 'booked'
+                                SET status = 'occupied'
                                 WHERE id = :room_id
                             ");
                             $room_update->execute(['room_id' => $payment_info['room_id']]);

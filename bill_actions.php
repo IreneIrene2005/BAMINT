@@ -459,9 +459,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
             $bill_id = $conn->lastInsertId();
 
-            // Mark room booked so it's reserved
+            // Mark room occupied so it's reserved
             if ($room_id) {
-                $upd = $conn->prepare("UPDATE rooms SET status = 'booked' WHERE id = :id");
+                $upd = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :id");
                 $upd->execute(['id' => $room_id]);
             }
 

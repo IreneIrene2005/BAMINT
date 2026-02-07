@@ -14,8 +14,56 @@ $message_type = '';
 
 // Handle approve/reject actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    // Allow admins to update request guest info
+    if ($_POST['action'] === 'update_request') {
+        $request_id = intval($_POST['request_id'] ?? 0);
+        $name = trim($_POST['tenant_info_name'] ?? '');
+        $email = trim($_POST['tenant_info_email'] ?? '');
+        $phone = trim($_POST['tenant_info_phone'] ?? '');
+        $address = trim($_POST['tenant_info_address'] ?? '');
+        if ($request_id > 0) {
+            try {
+                $upd = $conn->prepare("UPDATE room_requests SET tenant_info_name = :name, tenant_info_email = :email, tenant_info_phone = :phone, tenant_info_address = :address, updated_at = NOW() WHERE id = :id");
+                $upd->execute(['name'=>$name, 'email'=>$email, 'phone'=>$phone, 'address'=>$address, 'id'=>$request_id]);
+                $message = 'Request details updated.';
+                $message_type = 'success';
+            } catch (Exception $e) {
+                $message = 'Failed to update request: ' . $e->getMessage();
+                $message_type = 'danger';
+            }
+        }
+    }
     $request_id = intval($_POST['request_id'] ?? 0);
     $action = $_POST['action'];
+
+    // Delete request handler
+    if ($request_id > 0 && $action === 'delete_request') {
+        try {
+            // Mark request as deleted to keep audit trail
+            $del = $conn->prepare("UPDATE room_requests SET status = 'deleted', updated_at = NOW() WHERE id = :id");
+            $del->execute(['id' => $request_id]);
+
+            // If the room was only booked (not occupied), make it available again
+            $rstmt = $conn->prepare("SELECT room_id FROM room_requests WHERE id = :id");
+            $rstmt->execute(['id' => $request_id]);
+            $rrow = $rstmt->fetch(PDO::FETCH_ASSOC);
+            if ($rrow && $rrow['room_id']) {
+                $roomId = $rrow['room_id'];
+                $roomStatusStmt = $conn->prepare("SELECT status FROM rooms WHERE id = :id");
+                $roomStatusStmt->execute(['id' => $roomId]);
+                $current = $roomStatusStmt->fetchColumn();
+                if ($current !== 'occupied') {
+                    $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :id")->execute(['id' => $roomId]);
+                }
+            }
+
+            $message = 'Request deleted.';
+            $message_type = 'success';
+        } catch (Exception $e) {
+            $message = 'Failed to delete request: ' . $e->getMessage();
+            $message_type = 'danger';
+        }
+    }
 
     if ($request_id > 0 && in_array($action, ['approve', 'reject'])) {
         try {
@@ -398,6 +446,7 @@ try {
                                             <h6 class="mb-1">
                                                 <i class="bi bi-person"></i> 
                                                 <strong><?php echo htmlspecialchars($request['tenant_info_name'] ?? $request['tenant_name']); ?></strong>
+                                                &nbsp; <a href="#" class="btn btn-link btn-sm" data-bs-toggle="modal" data-bs-target="#editModal<?php echo $request['id']; ?>">Edit</a>
                                             </h6>
                                             <p class="mb-1 text-muted small">
                                                 <i class="bi bi-envelope"></i> 
@@ -584,6 +633,13 @@ try {
                                                                 <i class="bi bi-x-circle"></i> Reject
                                                             </button>
                                                         </form>
+                                                           <form method="POST" style="display: inline; margin-left:4px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
+                                                                <input type="hidden" name="action" value="delete_request">
+                                                                <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
+                                                                <button type="submit" class="btn btn-sm btn-outline-danger">
+                                                                    <i class="bi bi-trash"></i> Delete
+                                                                </button>
+                                                            </form>
                                                     </div>
                                                     <?php
                                                 }
@@ -664,6 +720,43 @@ try {
                                                                                             </div>
                                                                                         </div>
                                         </div>
+                        <!-- Edit Request Modal -->
+                        <div class="modal fade" id="editModal<?php echo $request['id']; ?>" tabindex="-1" aria-labelledby="editModalLabel<?php echo $request['id']; ?>" aria-hidden="true">
+                            <div class="modal-dialog modal-lg modal-dialog-centered">
+                                <div class="modal-content">
+                                    <div class="modal-header">
+                                        <h5 class="modal-title" id="editModalLabel<?php echo $request['id']; ?>">Edit Request - <?php echo htmlspecialchars($request['room_number']); ?></h5>
+                                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                    </div>
+                                    <div class="modal-body">
+                                        <form method="POST">
+                                            <input type="hidden" name="action" value="update_request">
+                                            <input type="hidden" name="request_id" value="<?php echo (int)$request['id']; ?>">
+                                            <div class="mb-3">
+                                                <label class="form-label">Full Name</label>
+                                                <input type="text" name="tenant_info_name" class="form-control" value="<?php echo htmlspecialchars($request['tenant_info_name'] ?? $request['tenant_name']); ?>">
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">Email</label>
+                                                <input type="email" name="tenant_info_email" class="form-control" value="<?php echo htmlspecialchars($request['tenant_info_email'] ?? $request['tenant_email']); ?>">
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">Phone</label>
+                                                <input type="tel" name="tenant_info_phone" class="form-control" value="<?php echo htmlspecialchars($request['tenant_info_phone'] ?? $request['tenant_phone']); ?>">
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">Address</label>
+                                                <textarea name="tenant_info_address" class="form-control" rows="2"><?php echo htmlspecialchars($request['tenant_info_address']); ?></textarea>
+                                            </div>
+                                            <div class="text-end">
+                                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                                <button type="submit" class="btn btn-primary">Save Changes</button>
+                                            </div>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                                     </div>
                                 </div>
                             </div>

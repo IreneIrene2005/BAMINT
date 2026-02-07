@@ -86,8 +86,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $billing_month = $checkin_date ? (new DateTime($checkin_date))->format('Y-m') : date('Y-m');
                 $due_date = $checkin_date ?: date('Y-m-d');
 
-                // Mark room as booked until payment is verified
-                $update_room_booked = $conn->prepare("UPDATE rooms SET status = 'booked' WHERE id = :room_id");
+                // Mark room as occupied
+                $update_room_booked = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id");
                 $update_room_booked->execute(['room_id' => $room_id]);
             } else {
                 // No bill is created here. Bills will be created when payment is recorded via Add New Bill.

@@ -233,6 +233,19 @@ try {
         $advance_payment = $stmt->fetch(PDO::FETCH_ASSOC);
     }
 
+    // Check for approved cancellation
+    $cancellation_approved = null;
+    $stmt = $conn->prepare("
+        SELECT bc.*, r.room_number
+        FROM booking_cancellations bc
+        LEFT JOIN rooms r ON bc.room_id = r.id
+        WHERE bc.tenant_id = :customer_id AND bc.refund_approved = 1
+        ORDER BY bc.refund_date DESC
+        LIMIT 1
+    ");
+    $stmt->execute(['customer_id' => $customer_id]);
+    $cancellation_approved = $stmt->fetch(PDO::FETCH_ASSOC);
+
 } catch (Exception $e) {
     $error = "Error loading customer data: " . $e->getMessage();
 }
@@ -312,6 +325,40 @@ try {
             background: #c82333;
             color: white;
         }
+        @media print {
+            body {
+                background: white;
+            }
+            .sidebar, .btn-toolbar, .header-banner, .alert:not(#checkInReceipt), 
+            .metric-card, .table-responsive, .modal, .d-flex.gap-2, 
+            [data-bs-toggle="modal"] {
+                display: none !important;
+            }
+            main {
+                margin-left: 0 !important;
+                padding: 0 !important;
+            }
+            .row {
+                margin-left: 0 !important;
+                margin-right: 0 !important;
+            }
+            #checkInReceipt {
+                box-shadow: none !important;
+                border: 1px solid #ddd !important;
+                page-break-inside: avoid;
+            }
+            #checkInReceipt .card-header {
+                background: #fff !important;
+                color: #333 !important;
+                border-bottom: 2px solid #333;
+            }
+            #checkInReceipt h5 {
+                color: #333;
+            }
+            #checkInReceipt strong {
+                color: #000;
+            }
+        }
     </style>
 </head>
 <body>
@@ -332,8 +379,45 @@ try {
                     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
                 <?php endif; ?>
 
+                <!-- Cancellation Approved Notification -->
+                <?php if ($cancellation_approved): ?>
+                    <div class="alert alert-info fade show mb-4" role="alert" style="border-left: 5px solid #17a2b8;">
+                        <div class="d-flex align-items-start gap-3">
+                            <div class="flex-shrink-0">
+                                <i class="bi bi-check-circle-fill" style="font-size: 1.5rem; color: #17a2b8;"></i>
+                            </div>
+                            <div class="flex-grow-1">
+                                <h5 class="alert-heading mb-3">
+                                    <i class="bi bi-x-circle"></i> Booking Cancelled
+                                </h5>
+                                <p class="mb-3">
+                                    Your booking has been cancelled.
+                                </p>
+                                
+                                <div class="bg-light p-3 rounded mb-3">
+                                    <div class="row g-3">
+                                        <div class="col-md-6">
+                                            <small class="text-muted d-block"><i class="bi bi-door-open"></i> Room</small>
+                                            <strong class="text-dark" style="font-size: 1.2rem;"><?php echo htmlspecialchars($cancellation_approved['room_number'] ?? 'N/A'); ?></strong>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <small class="text-muted d-block"><i class="bi bi-calendar-check"></i> Original Check-in</small>
+                                            <strong class="text-dark" style="font-size: 1.1rem;"><?php echo date('M d, Y', strtotime($cancellation_approved['checkin_date'])); ?></strong>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <?php if ($cancellation_approved['refund_notes']): ?>
+                                    <div class="bg-light p-3 rounded">
+                                        <small class="text-muted"><strong>Admin Notes:</strong></small>
+                                        <p class="mb-0 mt-2"><?php echo htmlspecialchars($cancellation_approved['refund_notes']); ?></p>
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
                 <!-- Advance Payment Approval Notification -->
-                <?php if ($advance_payment && $customer['start_date']): ?>
+                <?php elseif ($advance_payment && $customer['start_date']): ?>
                     <div class="alert alert-success fade show mb-4" role="alert" style="border-left: 5px solid #28a745;">
                         <div class="d-flex align-items-start gap-3">
                             <div class="flex-shrink-0">
@@ -341,10 +425,21 @@ try {
                             </div>
                             <div class="flex-grow-1">
                                 <h5 class="alert-heading mb-3">
-                                    <i class="bi bi-check2-square"></i> Payment Approved! Your Room is Reserved
+                                    <i class="bi bi-check2-square"></i> 
+                                    <?php 
+                                        if ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): 
+                                            echo "Check-in Successful! You are now in the hotel";
+                                        else: 
+                                            echo "Payment Approved! Your Room is Reserved";
+                                        endif; 
+                                    ?>
                                 </h5>
                                 <p class="mb-3">
-                                    Your payment of <strong>₱<?php echo number_format($advance_payment['payment_amount'] ?? $advance_payment['amount_due'], 2); ?></strong> has been verified and approved.
+                                    <?php if ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): ?>
+                                        Your check-in was approved at <strong><?php echo date('M d, Y \a\t h:i A', strtotime($customer['checkin_time'])); ?></strong>. Welcome to our hotel!
+                                    <?php else: ?>
+                                        Your payment of <strong>₱<?php echo number_format($advance_payment['payment_amount'] ?? $advance_payment['amount_due'], 2); ?></strong> has been verified and approved.
+                                    <?php endif; ?>
                                 </p>
                                 
                                 <div class="bg-light p-3 rounded mb-3">
@@ -378,6 +473,7 @@ try {
                                 </div>
 
                                 <!-- Non-Refundable Warning -->
+                                <?php if (!($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00')): ?>
                                 <div class="alert alert-warning mb-3" style="border-left: 4px solid #ffc107;">
                                     <div class="d-flex gap-2">
                                         <i class="bi bi-exclamation-triangle-fill" style="font-size: 1.3rem; color: #ff6b6b;"></i>
@@ -389,12 +485,126 @@ try {
                                         </div>
                                     </div>
                                 </div>
+                                <?php endif; ?>
+
+                                <!-- Check-in Receipt -->
+                                <?php if (!($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00')): ?>
+                                <div class="card border-success mb-3" id="checkInReceipt" style="page-break-inside: avoid;">
+                                    <div class="card-header bg-success text-white">
+                                        <div class="d-flex justify-content-between align-items-center">
+                                            <h6 class="mb-0"><i class="bi bi-receipt"></i> Check-in Receipt</h6>
+                                            <button type="button" class="btn btn-sm btn-light" onclick="window.print();" title="Print Receipt">
+                                                <i class="bi bi-printer"></i> Print
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="card-body">
+                                        <!-- Receipt Header -->
+                                        <div class="text-center border-bottom pb-3 mb-3">
+                                            <h5 class="mb-1">Hotel Check-in Receipt</h5>
+                                            <small class="text-muted">Please present this receipt at the front desk upon arrival</small>
+                                        </div>
+
+                                        <!-- Confirmation Number -->
+                                        <div class="mb-3">
+                                            <div class="row">
+                                                <div class="col-6">
+                                                    <small class="text-muted d-block">Confirmation Number</small>
+                                                    <strong style="font-size: 1.1rem; font-family: monospace;">RES-<?php echo str_pad($advance_payment['id'], 6, '0', STR_PAD_LEFT); ?></strong>
+                                                </div>
+                                                <div class="col-6 text-end">
+                                                    <small class="text-muted d-block">Verified Date</small>
+                                                    <strong><?php echo date('M d, Y', strtotime($advance_payment['verification_date'])); ?></strong>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Guest Information -->
+                                        <div class="border-top border-bottom py-3 mb-3">
+                                            <h6 class="mb-2">Guest Information</h6>
+                                            <div class="row">
+                                                <div class="col-6">
+                                                    <small class="text-muted d-block">Name</small>
+                                                    <strong><?php echo htmlspecialchars($customer['name']); ?></strong>
+                                                </div>
+                                                <div class="col-6">
+                                                    <small class="text-muted d-block">Email</small>
+                                                    <small><?php echo htmlspecialchars($customer['email']); ?></small>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Room & Dates -->
+                                        <div class="border-bottom py-3 mb-3">
+                                            <h6 class="mb-2">Room Details</h6>
+                                            <div class="row g-3">
+                                                <div class="col-md-6">
+                                                    <small class="text-muted d-block"><i class="bi bi-door-open"></i> Room Number</small>
+                                                    <strong style="font-size: 1.2rem;"><?php echo htmlspecialchars($advance_payment['room_number']); ?></strong>
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <small class="text-muted d-block"><i class="bi bi-calendar-check"></i> Scheduled Check-in</small>
+                                                    <strong><?php echo date('M d, Y', strtotime($checkin_date)); ?></strong>
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <small class="text-muted d-block"><i class="bi bi-calendar-x"></i> Scheduled Check-out</small>
+                                                    <strong><?php echo $checkout_date ? date('M d, Y', strtotime($checkout_date)) : 'TBD'; ?></strong>
+                                                </div>
+                                                <?php if ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): ?>
+                                                <div class="col-md-6">
+                                                    <small class="text-muted d-block"><i class="bi bi-clock-history"></i> Actual Check-in Time</small>
+                                                    <strong class="text-success"><?php echo date('M d, Y \a\t h:i A', strtotime($customer['checkin_time'])); ?></strong>
+                                                </div>
+                                                <?php endif; ?>
+                                                <?php if ($customer['checkout_time'] && $customer['checkout_time'] !== '0000-00-00 00:00:00'): ?>
+                                                <div class="col-md-6">
+                                                    <small class="text-muted d-block"><i class="bi bi-clock-history"></i> Actual Check-out Time</small>
+                                                    <strong class="text-info"><?php echo date('M d, Y \a\t h:i A', strtotime($customer['checkout_time'])); ?></strong>
+                                                </div>
+                                                <?php endif; ?>
+                                            </div>
+                                        </div>
+
+                                        <!-- Payment Summary -->
+                                        <div class="border-bottom py-3 mb-3">
+                                            <h6 class="mb-2">Payment Summary</h6>
+                                            <div class="row mb-2">
+                                                <div class="col-8">
+                                                    <small class="text-muted">Amount Paid</small>
+                                                </div>
+                                                <div class="col-4 text-end">
+                                                    <strong>₱<?php echo number_format($advance_payment['payment_amount'] ?? $advance_payment['amount_due'], 2); ?></strong>
+                                                </div>
+                                            </div>
+                                            <div class="row">
+                                                <div class="col-8">
+                                                    <small class="text-muted">Status</small>
+                                                </div>
+                                                <div class="col-4 text-end">
+                                                    <span class="badge bg-success">Verified & Approved</span>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Instructions -->
+                                        <div class="bg-light p-3 rounded">
+                                            <small class="d-block mb-2"><strong>📋 Check-in Instructions:</strong></small>
+                                            <ul class="small mb-0 ps-3">
+                                                <li>Please present this receipt at the front desk upon arrival</li>
+                                                <li>Ensure you arrive on or after your scheduled check-in time</li>
+                                                <li>Have a valid ID ready for verification</li>
+                                                <li>Contact the front desk immediately if you have any issues</li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </div>
 
                                 <div class="d-flex gap-2 mt-3">
                                     <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#cancelBookingModal">
                                         <i class="bi bi-x-circle"></i> Cancel Booking
                                     </button>
                                 </div>
+                                <?php endif; ?>
                             </div>
                         </div>
                     </div>
@@ -564,8 +774,14 @@ try {
                                             $checkin = $dates ? $dates['checkin_date'] : null;
                                             $checkout = $dates ? $dates['checkout_date'] : null;
 
-                                            // Display month - use checkin/checkout if available, else fall back to billing_month or created_at
-                                            if ($checkin && $checkout && strtotime($checkin) > 0 && strtotime($checkout) > 0) {
+                                            // Use actual check-in/check-out times from tenants table if available, otherwise use scheduled dates
+                                            $actual_checkin = $customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00' ? $customer['checkin_time'] : null;
+                                            $actual_checkout = $customer['checkout_time'] && $customer['checkout_time'] !== '0000-00-00 00:00:00' ? $customer['checkout_time'] : null;
+                                            
+                                            // Display month - prioritize actual times, then requested dates
+                                            if ($actual_checkin && $actual_checkout) {
+                                                $month_display = date('M d, Y \a\t h:i A', strtotime($actual_checkin)) . ' - ' . date('M d, Y \a\t h:i A', strtotime($actual_checkout));
+                                            } elseif ($checkin && $checkout && strtotime($checkin) > 0 && strtotime($checkout) > 0) {
                                                 $month_display = date('M d, Y \a\t h:i A', strtotime($checkin)) . ' - ' . date('M d, Y \a\t h:i A', strtotime($checkout));
                                             } elseif (!empty($bill['billing_month']) && strtotime($bill['billing_month']) > 0) {
                                                 $month_display = date('F Y', strtotime($bill['billing_month']));

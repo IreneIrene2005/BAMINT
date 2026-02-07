@@ -335,6 +335,12 @@ ALTER TABLE `tenants` MODIFY `room_id` int(11) DEFAULT NULL;
 ALTER TABLE `tenants` MODIFY `start_date` date DEFAULT NULL;
 ALTER TABLE `tenants` ADD COLUMN `created_at` timestamp DEFAULT CURRENT_TIMESTAMP;
 ALTER TABLE `tenants` ADD COLUMN `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+ALTER TABLE `tenants` ADD COLUMN `checkin_time` DATETIME NULL DEFAULT NULL;
+ALTER TABLE `tenants` ADD COLUMN `checkout_time` DATETIME NULL DEFAULT NULL;
+ALTER TABLE `tenants` ADD COLUMN `checkin_approved` TINYINT DEFAULT 0;
+ALTER TABLE `tenants` ADD COLUMN `checkin_rejected` TINYINT DEFAULT 0;
+ALTER TABLE `tenants` ADD COLUMN `checkout_approved` TINYINT DEFAULT 0;
+ALTER TABLE `tenants` ADD COLUMN `checkout_rejected` TINYINT DEFAULT 0;
 
 -- Create co_tenants table for roommates
 CREATE TABLE IF NOT EXISTS `co_tenants` (
@@ -379,8 +385,8 @@ ALTER TABLE `room_requests` CHANGE COLUMN `customer_info_name` `tenant_info_name
 ALTER TABLE `room_requests` CHANGE COLUMN `customer_info_email` `tenant_info_email` varchar(255) DEFAULT NULL;
 ALTER TABLE `room_requests` CHANGE COLUMN `customer_info_phone` `tenant_info_phone` varchar(20) DEFAULT NULL;
 ALTER TABLE `room_requests` CHANGE COLUMN `customer_info_address` `tenant_info_address` text;
-ALTER TABLE `room_requests` ADD COLUMN IF NOT EXISTS `checkin_date` date DEFAULT NULL;
-ALTER TABLE `room_requests` ADD COLUMN IF NOT EXISTS `checkout_date` date DEFAULT NULL;
+ALTER TABLE `room_requests` ADD COLUMN IF NOT EXISTS `checkin_date` DATETIME DEFAULT NULL;
+ALTER TABLE `room_requests` ADD COLUMN IF NOT EXISTS `checkout_date` DATETIME DEFAULT NULL;
 
 -- Update room_requests foreign key constraint
 ALTER TABLE `room_requests` DROP FOREIGN KEY `room_requests_ibfk_1`;
@@ -431,7 +437,7 @@ CREATE TABLE IF NOT EXISTS `extra_amenities` (
 
 -- Insert default amenities from tenant_maintenance.php
 INSERT IGNORE INTO `extra_amenities` (`name`, `description`, `price`) VALUES
-('Extra pillow', 'Additional pillow for comfort', 150),
+('Extra pillow', 'Additional pillow for comfort', 150),filter
 ('Extra blanket', 'Extra blanket for warmth', 200),
 ('Extra towel', 'Additional set of towels', 100),
 ('Extra bed / rollaway bed', 'Additional bed or rollaway bed setup', 1000),
@@ -441,3 +447,29 @@ INSERT IGNORE INTO `extra_amenities` (`name`, `description`, `price`) VALUES
 ('Drinking water refill', 'Bottled drinking water refill', 50),
 ('Iron & ironing board rental', 'Iron and ironing board for use', 200),
 ('Electric kettle rental', 'Electric kettle for hot water/beverages', 250);
+
+-- Create booking_cancellations table if it doesn't exist
+CREATE TABLE IF NOT EXISTS `booking_cancellations` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `bill_id` INT NOT NULL,
+  `tenant_id` INT NOT NULL,
+  `room_id` INT NOT NULL,
+  `payment_amount` DECIMAL(10, 2) NOT NULL,
+  `checkin_date` DATE,
+  `checkout_date` DATE,
+  `cancelled_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `reason` TEXT,
+  `refund_approved` TINYINT(1) DEFAULT 0,
+  `refund_amount` DECIMAL(10, 2) DEFAULT NULL,
+  `refund_notes` TEXT,
+  `refund_date` TIMESTAMP NULL,
+  `admin_notes` TEXT,
+  `reviewed_at` TIMESTAMP NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (`bill_id`) REFERENCES `bills`(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`tenant_id`) REFERENCES `tenants`(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`room_id`) REFERENCES `rooms`(`id`) ON DELETE CASCADE,
+  INDEX `idx_tenant_id` (`tenant_id`),
+  INDEX `idx_cancelled_at` (`cancelled_at`),
+  INDEX `idx_refund_approved` (`refund_approved`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -50,24 +50,6 @@
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'overdue_reminders.php') ? 'active' : ''; ?>" href="overdue_reminders.php">
-                    <i class="bi bi-exclamation-triangle"></i>
-                    Overdue Reminders
-                </a>
-            </li>
-            <li class="nav-item">
-                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_payment_verification.php') ? 'active' : ''; ?>" href="admin_payment_verification.php">
-                    <i class="bi bi-check-circle"></i>
-                    Payment
-                </a>
-            </li>
-            <li class="nav-item">
-                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_record_payment.php') ? 'active' : ''; ?>" href="admin_record_payment.php">
-                    <i class="bi bi-cash-coin"></i>
-                    Record Cash Payment
-                </a>
-            </li>
-            <li class="nav-item">
                 <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_maintenance_queue.php') ? 'active' : ''; ?>" href="admin_maintenance_queue.php">
                     <i class="bi bi-tools"></i>
                     Maintenance Queue
@@ -86,15 +68,15 @@
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'maintenance_history.php') ? 'active' : ''; ?>" href="maintenance_history.php">
-                    <i class="bi bi-clock-history"></i>
-                    Maintenance History
+                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_checkin_checkout.php') ? 'active' : ''; ?>" href="admin_checkin_checkout.php">
+                    <i class="bi bi-door-open"></i>
+                    Check-in & Check-out
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'reports.php') ? 'active' : ''; ?>" href="reports.php">
-                    <i class="bi bi-file-earmark-bar-graph"></i>
-                    Reports & Analytics
+                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'maintenance_history.php') ? 'active' : ''; ?>" href="maintenance_history.php">
+                    <i class="bi bi-clock-history"></i>
+                    Maintenance History
                 </a>
             </li>
             <li class="nav-item">
@@ -103,12 +85,7 @@
                     Tenant Management
                 </a>
             </li>
-            <li class="nav-item">
-                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_checkin_checkout.php') ? 'active' : ''; ?>" href="admin_checkin_checkout.php">
-                    <i class="bi bi-door-open"></i>
-                    Check-in / Check-out
-                </a>
-            </li>
+            <!-- Removed: Overdue Reminders, Payment verification, Record Cash Payment, secondary Reports & Analytics, and Check-in/Check-out per admin UI update -->
             <li class="nav-item border-top mt-3 pt-3">
                 <a class="nav-link text-danger" href="logout.php">
                     <i class="bi bi-box-arrow-right"></i>

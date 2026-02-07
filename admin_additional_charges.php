@@ -81,11 +81,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Fetch tenants for selector (exclude archived tenants: inactive with end_date set)
+// Fetch tenants for selector (exclude archived tenants: status = 'inactive')
 $tenants = [];
 try {
     // Use room_number for display (join rooms)
-    $tstmt = $pdo->query("SELECT t.id, t.name, t.room_id, r.room_number FROM tenants t LEFT JOIN rooms r ON t.room_id = r.id WHERE NOT (t.status = 'inactive' AND t.end_date IS NOT NULL) ORDER BY t.name ASC");
+    $tstmt = $pdo->query("SELECT t.id, t.name, t.room_id, r.room_number FROM tenants t LEFT JOIN rooms r ON t.room_id = r.id WHERE t.status != 'inactive' ORDER BY t.name ASC");
     $tenants = $tstmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     // ignore
@@ -95,9 +95,16 @@ try {
 $selectedTenant = null;
 if ($tenant_id > 0) {
     try {
-        $pt = $pdo->prepare("SELECT t.id, t.name, r.room_number FROM tenants t LEFT JOIN rooms r ON t.room_id = r.id WHERE t.id = :id LIMIT 1");
+        $pt = $pdo->prepare("SELECT t.id, t.name, r.room_number, t.status FROM tenants t LEFT JOIN rooms r ON t.room_id = r.id WHERE t.id = :id LIMIT 1");
         $pt->execute(['id' => $tenant_id]);
         $selectedTenant = $pt->fetch(PDO::FETCH_ASSOC);
+        
+        // Prevent viewing archived tenants
+        if ($selectedTenant && $selectedTenant['status'] === 'inactive') {
+            $selectedTenant = null;
+            $error = 'This customer is archived and cannot be accessed.';
+            $tenant_id = 0;
+        }
     } catch (Exception $e) {
         // ignore
     }

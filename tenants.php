@@ -8,6 +8,22 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 
 require_once "db/database.php";
 
+// Handle archive action
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'archive') {
+    $tenant_id = intval($_POST['tenant_id'] ?? 0);
+    if ($tenant_id > 0) {
+        try {
+            $stmt = $conn->prepare("UPDATE tenants SET status = 'inactive' WHERE id = :id");
+            $stmt->execute(['id' => $tenant_id]);
+            $_SESSION['flash_message'] = 'Customer archived successfully.';
+            header("location: tenants.php?view=active");
+            exit;
+        } catch (Exception $e) {
+            $_SESSION['flash_error'] = 'Error archiving customer: ' . $e->getMessage();
+        }
+    }
+}
+
 // Search and filter variables
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
 $filter_status = isset($_GET['status']) ? $_GET['status'] : '';
@@ -16,19 +32,14 @@ $filter_room = isset($_GET['room']) ? $_GET['room'] : '';
 $view = isset($_GET['view']) ? $_GET['view'] : 'active';
 
 // Build the SQL query with search and filter
-// Only show tenants who have approved/verified payments for NON-CANCELLED bills
+// Show all active tenants (with or without payments)
 $sql = "SELECT DISTINCT tenants.*, COALESCE(rooms.room_number, (
             SELECT r2.room_number FROM bills b 
             JOIN rooms r2 ON b.room_id = r2.id 
-            LEFT JOIN payment_transactions pt ON pt.bill_id = b.id AND pt.payment_status IN ('verified','approved')
-            WHERE b.tenant_id = tenants.id AND (
-                b.amount_paid > 0 OR b.status IN ('partial','paid') OR pt.id IS NOT NULL
-            ) ORDER BY b.id DESC LIMIT 1
+            WHERE b.tenant_id = tenants.id ORDER BY b.id DESC LIMIT 1
         )) as room_number FROM tenants 
         LEFT JOIN rooms ON tenants.room_id = rooms.id
-        INNER JOIN payment_transactions pt ON tenants.id = pt.tenant_id AND pt.payment_status IN ('verified','approved')
-        INNER JOIN bills b ON pt.bill_id = b.id AND b.status != 'cancelled'
-        WHERE 1=1";
+        WHERE tenants.status != 'inactive'";
 
 if ($search) {
     $sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR tenants.phone LIKE :search OR tenants.id_number LIKE :search)";
@@ -64,15 +75,13 @@ if ($filter_room) {
     $stmt->bindParam(':room_id', $filter_room);
 }
 
-// Prepare archive query - also filter by approved payments and non-cancelled bills
+// Prepare archive query - show all archived tenants
 $archive_sql = "SELECT DISTINCT tenants.*, COALESCE(rooms.room_number, (
             SELECT r2.room_number FROM bills b 
             JOIN rooms r2 ON b.room_id = r2.id 
             WHERE b.tenant_id = tenants.id ORDER BY b.id DESC LIMIT 1
         )) as room_number FROM tenants 
         LEFT JOIN rooms ON tenants.room_id = rooms.id
-        INNER JOIN payment_transactions pt ON tenants.id = pt.tenant_id AND pt.payment_status IN ('verified','approved')
-        INNER JOIN bills b ON pt.bill_id = b.id AND b.status != 'cancelled'
         WHERE tenants.status = 'inactive'";
 
 if ($search) {
@@ -136,6 +145,20 @@ $available_rooms = $conn->query($sql_available_rooms);
 <body>
 
 <?php include 'templates/header.php'; ?>
+
+<!-- Flash Messages -->
+<?php if (isset($_SESSION['flash_message'])): ?>
+    <div class="alert alert-success alert-dismissible fade show m-3" role="alert">
+        <?php echo htmlspecialchars($_SESSION['flash_message']); unset($_SESSION['flash_message']); ?>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+    </div>
+<?php endif; ?>
+<?php if (isset($_SESSION['flash_error'])): ?>
+    <div class="alert alert-danger alert-dismissible fade show m-3" role="alert">
+        <?php echo htmlspecialchars($_SESSION['flash_error']); unset($_SESSION['flash_error']); ?>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+    </div>
+<?php endif; ?>
 
 <div class="container-fluid">
     <div class="row">
@@ -260,7 +283,11 @@ $available_rooms = $conn->query($sql_available_rooms);
                                     <a href="tenant_actions.php?action=restore&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Restore" onclick="return confirm('Restore this customer from archive?');"><i class="bi bi-arrow-counterclockwise"></i></a>
                                 <?php else: ?>
                                     <?php if($row['status'] === 'active'): ?>
-                                        <a href="tenant_actions.php?action=deactivate&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-warning" title="Deactivate" onclick="return confirm('Deactivate this tenant?');"><i class="bi bi-pause-circle"></i></a>
+                                        <form method="POST" style="display:inline;">
+                                            <input type="hidden" name="action" value="archive">
+                                            <input type="hidden" name="tenant_id" value="<?php echo $row['id']; ?>">
+                                            <button type="submit" class="btn btn-sm btn-outline-warning" title="Archive" onclick="return confirm('Archive this customer?');"><i class="bi bi-archive"></i></button>
+                                        </form>
                                     <?php else: ?>
                                         <a href="tenant_actions.php?action=activate&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Activate"><i class="bi bi-play-circle"></i></a>
                                     <?php endif; ?>

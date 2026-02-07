@@ -55,6 +55,23 @@ try {
     $has_approved_payment = false;
 }
 
+// Fetch tenant contact info for pre-filling request modal
+$tenant_name = '';
+$tenant_email = '';
+$tenant_phone = '';
+try {
+    $tstmt = $conn->prepare("SELECT name, email, phone FROM tenants WHERE id = :tenant_id LIMIT 1");
+    $tstmt->execute(['tenant_id' => $tenant_id]);
+    $trow = $tstmt->fetch(PDO::FETCH_ASSOC);
+    if ($trow) {
+        $tenant_name = $trow['name'] ?? '';
+        $tenant_email = $trow['email'] ?? '';
+        $tenant_phone = $trow['phone'] ?? '';
+    }
+} catch (Exception $e) {
+    // ignore
+}
+
 // Handle room request submission
 // Handle room request cancellation (AJAX POST)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'cancel_request') {
@@ -684,12 +701,24 @@ try {
                                         <?php
                                         // Calculate actual occupancy and status
                                         $total_occupancy = intval($room['tenant_count']) + intval($room['co_tenant_count']);
-                                        
-                                        // Check database status first (for unavailable rooms)
-                                        if ($room['status'] === 'unavailable') {
+
+                                        // Prefer the canonical rooms.status (admin view) to determine availability.
+                                        $room_status = strtolower(trim($room['status'] ?? ''));
+                                        if ($room_status === 'available') {
+                                            $actual_status = 'available';
+                                            $status_label = 'Available';
+                                        } elseif ($room_status === 'booked' || $room_status === 'occupied') {
+                                            // Treat booked/occupied as not available for customers
+                                            $actual_status = 'occupied';
+                                            $status_label = ucfirst($room_status);
+                                        } elseif ($room_status === 'under maintenance' || $room_status === 'under_maintenance' || $room_status === 'maintenance') {
+                                            $actual_status = 'unavailable';
+                                            $status_label = 'Under Maintenance';
+                                        } elseif ($room_status === 'unavailable') {
                                             $actual_status = 'unavailable';
                                             $status_label = 'Unavailable';
                                         } else {
+                                            // Fallback: infer from tenant/co-tenant counts
                                             $actual_status = $total_occupancy > 0 ? 'occupied' : 'available';
                                             $status_label = ucfirst($actual_status);
                                         }
@@ -956,14 +985,44 @@ try {
                             <textarea class="form-control" id="modalTenantAddress" name="tenant_info_address" rows="2" required></textarea>
                         </div>
                         
-                        <div class="mb-3">
-                            <label class="form-label">Check-in Date <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control modalCheckinDate checkin-date" id="modalCheckinDate" name="checkin_date" required>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Check-in Date <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control modalCheckinDate checkin-date" id="modalCheckinDate" name="checkin_date" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Check-in Time <span class="text-danger">*</span></label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="modalCheckinHour" name="checkin_hour" min="0" max="23" placeholder="HH" step="1" required style="max-width: 70px;">
+                                    <span class="input-group-text">:</span>
+                                    <input type="number" class="form-control" id="modalCheckinMinute" name="checkin_minute" min="0" max="59" placeholder="MM" step="1" required style="max-width: 70px;">
+                                    <select class="form-select" id="modalCheckinAmpm" name="checkin_ampm" required style="max-width: 80px;">
+                                        <option value="AM">AM</option>
+                                        <option value="PM">PM</option>
+                                    </select>
+                                </div>
+                                <small class="text-muted">e.g., 02:30 PM</small>
+                            </div>
                         </div>
                         
-                        <div class="mb-3">
-                            <label class="form-label">Check-out Date <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control modalCheckoutDate checkout-date" id="modalCheckoutDate" name="checkout_date" required>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Check-out Date <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control modalCheckoutDate checkout-date" id="modalCheckoutDate" name="checkout_date" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Check-out Time <span class="text-danger">*</span></label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="modalCheckoutHour" name="checkout_hour" min="0" max="23" placeholder="HH" step="1" required style="max-width: 70px;">
+                                    <span class="input-group-text">:</span>
+                                    <input type="number" class="form-control" id="modalCheckoutMinute" name="checkout_minute" min="0" max="59" placeholder="MM" step="1" required style="max-width: 70px;">
+                                    <select class="form-select" id="modalCheckoutAmpm" name="checkout_ampm" required style="max-width: 80px;">
+                                        <option value="AM">AM</option>
+                                        <option value="PM" selected>PM</option>
+                                    </select>
+                                </div>
+                                <small class="text-muted">e.g., 11:00 AM</small>
+                            </div>
                         </div>
                         
                         <div class="mb-3">
@@ -989,6 +1048,74 @@ try {
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Combine date and time fields before form submission
+        document.getElementById('requestRoomForm').addEventListener('submit', function(e) {
+            const checkinDateInput = document.getElementById('modalCheckinDate');
+            const checkinHour = parseInt(document.getElementById('modalCheckinHour').value);
+            const checkinMinute = parseInt(document.getElementById('modalCheckinMinute').value);
+            const checkinAmpm = document.getElementById('modalCheckinAmpm').value;
+            
+            const checkoutDateInput = document.getElementById('modalCheckoutDate');
+            const checkoutHour = parseInt(document.getElementById('modalCheckoutHour').value);
+            const checkoutMinute = parseInt(document.getElementById('modalCheckoutMinute').value);
+            const checkoutAmpm = document.getElementById('modalCheckoutAmpm').value;
+            
+            // Convert 12-hour to 24-hour format
+            let checkinHour24 = checkinHour;
+            if (checkinAmpm === 'PM' && checkinHour !== 12) {
+                checkinHour24 = checkinHour + 12;
+            } else if (checkinAmpm === 'AM' && checkinHour === 12) {
+                checkinHour24 = 0;
+            }
+            
+            let checkoutHour24 = checkoutHour;
+            if (checkoutAmpm === 'PM' && checkoutHour !== 12) {
+                checkoutHour24 = checkoutHour + 12;
+            } else if (checkoutAmpm === 'AM' && checkoutHour === 12) {
+                checkoutHour24 = 0;
+            }
+            
+            // Extract date from the input (format: Y-m-d)
+            const checkinDateOnly = checkinDateInput.value.split(' ')[0];
+            const checkoutDateOnly = checkoutDateInput.value.split(' ')[0];
+            
+            // Combine date and time in proper format
+            const checkinDateTime = checkinDateOnly + ' ' + String(checkinHour24).padStart(2, '0') + ':' + String(checkinMinute).padStart(2, '0') + ':00';
+            const checkoutDateTime = checkoutDateOnly + ' ' + String(checkoutHour24).padStart(2, '0') + ':' + String(checkoutMinute).padStart(2, '0') + ':00';
+            
+            // Set the combined values
+            checkinDateInput.value = checkinDateTime;
+            checkoutDateInput.value = checkoutDateTime;
+        });
+        
+        // Set default times when modal opens
+        const requestRoomModal = document.getElementById('requestRoomModal');
+        if (requestRoomModal) {
+            requestRoomModal.addEventListener('show.bs.modal', function(e) {
+                // Set check-in time to 2:00 PM (default) if not already set
+                const checkinHour = document.getElementById('modalCheckinHour');
+                const checkinMinute = document.getElementById('modalCheckinMinute');
+                const checkinAmpm = document.getElementById('modalCheckinAmpm');
+                
+                if (!checkinHour.value) {
+                    checkinHour.value = 14; // 2:00 PM
+                    checkinMinute.value = 0;
+                    checkinAmpm.value = 'PM';
+                }
+                
+                // Set check-out time to 11:00 AM (default) if not already set
+                const checkoutHour = document.getElementById('modalCheckoutHour');
+                const checkoutMinute = document.getElementById('modalCheckoutMinute');
+                const checkoutAmpm = document.getElementById('modalCheckoutAmpm');
+                
+                if (!checkoutHour.value) {
+                    checkoutHour.value = 11; // 11:00 AM
+                    checkoutMinute.value = 0;
+                    checkoutAmpm.value = 'AM';
+                }
+            });
+        }
+        
         // Handle dynamic co-tenant fields based on occupant count
         document.querySelectorAll('.tenant-count-input').forEach(input => {
             input.addEventListener('change', function() {
@@ -1125,6 +1252,14 @@ try {
             }
             if (checkoutInput._flatpickr) {
                 checkoutInput._flatpickr.clear();
+            }
+            // Pre-fill guest info with logged-in customer's details
+            try {
+                document.getElementById('modalTenantName').value = <?php echo json_encode($tenant_name); ?> || '';
+                document.getElementById('modalTenantEmail').value = <?php echo json_encode($tenant_email); ?> || '';
+                document.getElementById('modalTenantPhone').value = <?php echo json_encode($tenant_phone); ?> || '';
+            } catch (e) {
+                // ignore
             }
         }
 

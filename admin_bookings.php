@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $filter_status = $_GET['status'] ?? 'all';
 $search_query = $_GET['search'] ?? '';
@@ -76,6 +77,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
 
             $conn->beginTransaction();
 
+            // Get tenant_id from cancellation record first
+            $cancel_stmt = $conn->prepare("SELECT tenant_id FROM booking_cancellations WHERE id = :id");
+            $cancel_stmt->execute(['id' => $cancellation_id]);
+            $cancel_row = $cancel_stmt->fetch(PDO::FETCH_ASSOC);
+            $tenant_id = $cancel_row ? $cancel_row['tenant_id'] : null;
+
             // Update cancellation record with refund info
             $stmt = $conn->prepare("
                 UPDATE booking_cancellations 
@@ -89,6 +96,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
             ]);
 
             $conn->commit();
+            
+            // Send notification to customer about approved cancellation
+            if ($tenant_id) {
+                createNotification($conn, 'tenant', $tenant_id, 'booking_cancelled', 'Booking Cancelled', 'Your booking has been cancelled.', $cancellation_id, 'cancellation', 'tenant_dashboard.php');
+            }
+            
             $success_msg = "Refund approved and processed.";
         } catch (Exception $e) {
             $conn->rollBack();
