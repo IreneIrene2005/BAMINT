@@ -1,0 +1,25 @@
+-- Create booking_cancellations table if it doesn't exist
+CREATE TABLE IF NOT EXISTS `booking_cancellations` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `bill_id` INT NOT NULL,
+  `tenant_id` INT NOT NULL,
+  `room_id` INT NOT NULL,
+  `payment_amount` DECIMAL(10, 2) NOT NULL,
+  `checkin_date` DATE,
+  `checkout_date` DATE,
+  `cancelled_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `reason` TEXT,
+  `refund_approved` TINYINT(1) DEFAULT 0,
+  `refund_amount` DECIMAL(10, 2) DEFAULT NULL,
+  `refund_notes` TEXT,
+  `refund_date` TIMESTAMP NULL,
+  `admin_notes` TEXT,
+  `reviewed_at` TIMESTAMP NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (`bill_id`) REFERENCES `bills`(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`tenant_id`) REFERENCES `tenants`(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`room_id`) REFERENCES `rooms`(`id`) ON DELETE CASCADE,
+  INDEX `idx_tenant_id` (`tenant_id`),
+  INDEX `idx_cancelled_at` (`cancelled_at`),
+  INDEX `idx_refund_approved` (`refund_approved`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -46,33 +46,16 @@ try {
         }
     }
 
-    // Get current bills (EXCLUDE bills that are only for amenities and hide advance-payment bills
-    // that are unpaid or linked to cancelled room requests)
+    // Get current bills: show advance-payment bills with verified payments, and regular bills
     $stmt = $conn->prepare("        
         SELECT b.* FROM bills b
         WHERE b.tenant_id = :customer_id
-        /* Hide advance payment bills until payment is verified/paid */
         AND (
-            b.notes NOT LIKE '%ADVANCE PAYMENT%'
-            OR b.status = 'paid'
-            OR EXISTS (SELECT 1 FROM payment_transactions pt2 WHERE pt2.bill_id = b.id AND pt2.payment_status IN ('verified','approved'))
+            EXISTS (SELECT 1 FROM payment_transactions pt WHERE pt.bill_id = b.id AND pt.payment_status IN ('verified','approved'))
+            OR (b.notes NOT LIKE '%ADVANCE PAYMENT%')
         )
-        /* If a room request was cancelled for this tenant+room, hide advance payment bills tied to it */
-        AND NOT (
-            b.notes LIKE '%ADVANCE PAYMENT%'
-            AND EXISTS (
-                SELECT 1 FROM room_requests rr WHERE rr.tenant_id = b.tenant_id AND rr.room_id = b.room_id AND rr.status = 'cancelled'
-            )
-        )
-        AND NOT (
-            b.notes REGEXP 'Request #[0-9]+'
-            AND (
-                SELECT COALESCE(SUM(mr.cost),0) FROM maintenance_requests mr
-                WHERE b.notes LIKE CONCAT('%Request #', mr.id, '%')
-            ) = b.amount_due
-        )
-        ORDER BY b.billing_month DESC
-        LIMIT 5
+        ORDER BY COALESCE(b.billing_month, b.created_at) DESC, b.id DESC
+        LIMIT 10
     ");
     $stmt->execute(['customer_id' => $customer_id]);
     $bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -220,7 +203,7 @@ try {
     $stmt->execute(['customer_id' => $customer_id]);
     $overdue_info = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    // Get approved advance payment notification (only if not dismissed)
+    // Get approved payment notification for any customer with approved payment (advance or regular billing)
     $advance_payment = null;
     $stmt = $conn->prepare("
         SELECT advance_payment_dismissed FROM tenants WHERE id = :customer_id
@@ -228,17 +211,22 @@ try {
     $stmt->execute(['customer_id' => $customer_id]);
     $customer_flags = $stmt->fetch(PDO::FETCH_ASSOC);
     
-    // Only fetch advance payment if not dismissed
+    // Only fetch approved payment if not dismissed - show for any verified/approved payment with room booking
     if (!$customer_flags || !$customer_flags['advance_payment_dismissed']) {
         $stmt = $conn->prepare("
-            SELECT b.id, b.amount_due, pt.verified_by, pt.verification_date, r.room_number
+            SELECT DISTINCT 
+                b.id, 
+                b.amount_due, 
+                pt.payment_amount,
+                pt.verified_by, 
+                pt.verification_date, 
+                r.room_number,
+                r.id as room_id
             FROM bills b
-            LEFT JOIN payment_transactions pt ON b.id = pt.bill_id AND pt.payment_status = 'verified'
-            LEFT JOIN rooms r ON b.room_id = r.id
-            WHERE b.tenant_id = :customer_id 
-            AND b.notes LIKE '%ADVANCE PAYMENT%'
-            AND b.status = 'paid'
-            ORDER BY b.created_at DESC
+            INNER JOIN payment_transactions pt ON b.id = pt.bill_id AND pt.payment_status IN ('verified', 'approved')
+            INNER JOIN rooms r ON b.room_id = r.id
+            WHERE b.tenant_id = :customer_id
+            ORDER BY pt.verification_date DESC
             LIMIT 1
         ");
         $stmt->execute(['customer_id' => $customer_id]);
@@ -254,7 +242,7 @@ try {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tenant Dashboard - BAMINT</title>
+    <title>Customer Dashboard - BAMINT</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
@@ -336,8 +324,8 @@ try {
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
                 <!-- Header -->
                 <div class="header-banner">
-                    <h1><i class="bi bi-house-door"></i> Tenant Dashboard</h1>
-                    <p class="mb-0">Welcome back, <?php echo htmlspecialchars($customer['name'] ?? 'Tenant'); ?>!</p>
+                    <h1><i class="bi bi-house-door"></i> Customer Dashboard</h1>
+                    <p class="mb-0">Welcome back, <?php echo htmlspecialchars($customer['name'] ?? 'Customer'); ?>!</p>
                 </div>
 
                 <?php if (isset($error)): ?>
@@ -346,47 +334,128 @@ try {
 
                 <!-- Advance Payment Approval Notification -->
                 <?php if ($advance_payment && $customer['start_date']): ?>
-                    <div class="alert alert-success alert-dismissible fade show mb-4" role="alert">
+                    <div class="alert alert-success fade show mb-4" role="alert" style="border-left: 5px solid #28a745;">
                         <div class="d-flex align-items-start gap-3">
                             <div class="flex-shrink-0">
-                                <i class="bi bi-check-circle-fill" style="font-size: 1.5rem;"></i>
+                                <i class="bi bi-check-circle-fill" style="font-size: 1.5rem; color: #28a745;"></i>
                             </div>
                             <div class="flex-grow-1">
-                                <h5 class="alert-heading mb-2">
-                                    <i class="bi bi-check2-square"></i> Advance Payment Approved!
+                                <h5 class="alert-heading mb-3">
+                                    <i class="bi bi-check2-square"></i> Payment Approved! Your Room is Reserved
                                 </h5>
-                                <p class="mb-2">
-                                    Your advance payment of <strong>₱<?php echo number_format($advance_payment['amount_due'], 2); ?></strong> has been verified and approved by admin.
+                                <p class="mb-3">
+                                    Your payment of <strong>₱<?php echo number_format($advance_payment['payment_amount'] ?? $advance_payment['amount_due'], 2); ?></strong> has been verified and approved.
                                 </p>
-                                <hr class="my-2">
-                                <div class="row g-3">
-                                    <div class="col-md-6">
-                                        <small class="text-muted d-block">Room Number</small>
-                                        <strong class="text-dark"><?php echo htmlspecialchars($advance_payment['room_number']); ?></strong>
-                                    </div>
-                                    <div class="col-md-6">
-                                        <small class="text-muted d-block">Move-in Date & Time</small>
-                                        <?php
-                                            // Show stay duration from room_requests if available
-                                            $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
-                                            $room_req_stmt->execute(['tenant_id' => $customer_id, 'room_id' => $customer['room_id']]);
-                                            $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                            if ($dates && $dates['checkin_date'] && $dates['checkout_date']) {
-                                                echo '<strong class="text-dark">' . date('M d, Y', strtotime($dates['checkin_date'])) . ' - ' . date('M d, Y', strtotime($dates['checkout_date'])) . '</strong>';
-                                            } else {
-                                                echo '<strong class="text-dark">' . date('M d, Y • H:i A', strtotime($customer['start_date'])) . '</strong>';
-                                            }
-                                        ?>
+                                
+                                <div class="bg-light p-3 rounded mb-3">
+                                    <div class="row g-3">
+                                        <div class="col-md-4">
+                                            <small class="text-muted d-block"><i class="bi bi-door-open"></i> Room Number</small>
+                                            <strong class="text-dark" style="font-size: 1.2rem;"><?php echo htmlspecialchars($advance_payment['room_number']); ?></strong>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <small class="text-muted d-block"><i class="bi bi-calendar-check"></i> Check-in Date</small>
+                                            <?php
+                                                $room_id_for_dates = $customer['room_id'] ?? ($advance_payment['room_id'] ?? null);
+                                                $dates = null;
+                                                if ($room_id_for_dates) {
+                                                    $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                                    $room_req_stmt->execute(['tenant_id' => $customer_id, 'room_id' => $room_id_for_dates]);
+                                                    $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                                }
+                                                $checkin_date = $dates && $dates['checkin_date'] ? $dates['checkin_date'] : ($customer['start_date'] ?? date('Y-m-d'));
+                                                $checkout_date = $dates && $dates['checkout_date'] ? $dates['checkout_date'] : null;
+                                            ?>
+                                            <strong class="text-dark" style="font-size: 1.1rem;"><?php echo date('M d, Y', strtotime($checkin_date)); ?></strong>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <small class="text-muted d-block"><i class="bi bi-calendar-x"></i> Check-out Date</small>
+                                            <strong class="text-dark" style="font-size: 1.1rem;">
+                                                <?php echo $checkout_date ? date('M d, Y', strtotime($checkout_date)) : 'TBD'; ?>
+                                            </strong>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="mt-3">
-                                    <p class="mb-0 text-muted">
-                                        <i class="bi bi-info-circle"></i> You are now approved to move in. Please contact management if you have any questions.
-                                    </p>
+
+                                <!-- Non-Refundable Warning -->
+                                <div class="alert alert-warning mb-3" style="border-left: 4px solid #ffc107;">
+                                    <div class="d-flex gap-2">
+                                        <i class="bi bi-exclamation-triangle-fill" style="font-size: 1.3rem; color: #ff6b6b;"></i>
+                                        <div>
+                                            <strong>Important: Non-Refundable Booking</strong>
+                                            <p class="mb-0 mt-1" style="font-size: 0.95rem;">
+                                                Once you check in, your payment is <strong>non-refundable</strong>. Even if you cancel before or after check-in, no refund will be issued as the hotel has reserved and booked your room. Please ensure your travel plans are final before proceeding.
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="d-flex gap-2 mt-3">
+                                    <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#cancelBookingModal">
+                                        <i class="bi bi-x-circle"></i> Cancel Booking
+                                    </button>
                                 </div>
                             </div>
                         </div>
-                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close" onclick="dismissAdvancePaymentNotification()"></button>
+                    </div>
+
+                    <!-- Cancel Booking Confirmation Modal -->
+                    <div class="modal fade" id="cancelBookingModal" tabindex="-1" aria-hidden="true">
+                        <div class="modal-dialog modal-dialog-centered">
+                            <div class="modal-content border-danger">
+                                <div class="modal-header bg-danger text-white">
+                                    <h5 class="modal-title">
+                                        <i class="bi bi-exclamation-circle"></i> Cancel Booking Confirmation
+                                    </h5>
+                                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                                </div>
+                                <div class="modal-body">
+                                    <div class="alert alert-danger mb-3">
+                                        <strong><i class="bi bi-exclamation-triangle"></i> WARNING: Non-Refundable Payment</strong>
+                                        <p class="mt-2 mb-0">
+                                            Your payment of <strong>₱<?php echo number_format($advance_payment['amount_due'], 2); ?></strong> is <strong>NON-REFUNDABLE</strong>. 
+                                            If you cancel this booking, whether before or after check-in, <strong>you will not receive a refund</strong> 
+                                            because the hotel has already reserved and booked your room.
+                                        </p>
+                                    </div>
+
+                                    <h6 class="mb-3">Booking Details:</h6>
+                                    <div class="row g-2 mb-3">
+                                        <div class="col-6">
+                                            <small class="text-muted">Room:</small>
+                                            <div class="fw-bold"><?php echo htmlspecialchars($advance_payment['room_number']); ?></div>
+                                        </div>
+                                        <div class="col-6">
+                                            <small class="text-muted">Check-in:</small>
+                                            <div class="fw-bold"><?php echo date('M d, Y', strtotime($checkin_date)); ?></div>
+                                        </div>
+                                        <div class="col-6">
+                                            <small class="text-muted">Check-out:</small>
+                                            <div class="fw-bold"><?php echo $checkout_date ? date('M d, Y', strtotime($checkout_date)) : 'TBD'; ?></div>
+                                        </div>
+                                        <div class="col-6">
+                                            <small class="text-muted">Payment Amount:</small>
+                                            <div class="fw-bold text-danger">₱<?php echo number_format($advance_payment['payment_amount'] ?? $advance_payment['amount_due'], 2); ?></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="mb-3">
+                                        <label for="cancellationReason" class="form-label">Reason for Cancellation <span class="text-muted">(Optional)</span></label>
+                                        <textarea class="form-control" id="cancellationReason" placeholder="Please tell us why you're cancelling (optional)..." rows="3"></textarea>
+                                    </div>
+
+                                    <p class="text-muted mb-0">
+                                        <i class="bi bi-info-circle"></i> Please confirm that you understand the cancellation policy and wish to proceed.
+                                    </p>
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Keep Booking</button>
+                                    <button type="button" class="btn btn-danger" onclick="confirmBookingCancellation()">
+                                        <i class="bi bi-x-circle"></i> Cancel Booking
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 <?php endif; ?>
 
@@ -426,18 +495,7 @@ try {
                             <div class="card-body">
                                 <p class="text-muted mb-2"><i class="bi bi-exclamation-circle"></i> Balance</p>
                                 <p class="metric-value <?php echo $remaining_balance > 0 ? 'text-danger' : 'text-success'; ?>">
-                                    <?php
-                                    // Room balance only
-                                    $final_remaining_balance = 0.0;
-                                    foreach ($bills as $bill) {
-                                        $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                                        $sum_stmt->execute(['bill_id' => $bill['id']]);
-                                        $live_paid = floatval($sum_stmt->fetchColumn());
-                                        $balance = max(0, floatval($bill['amount_due']) - $live_paid);
-                                        $final_remaining_balance += $balance;
-                                    }
-                                    echo '₱' . number_format($final_remaining_balance, 2);
-                                    ?>
+                                    <?php echo '₱' . number_format($remaining_balance, 2); ?>
                                 </p>
                                 <small class="text-muted">Room balance + amenities</small>
                             </div>
@@ -466,33 +524,54 @@ try {
                                 <table class="table table-striped table-sm">
                                     <thead>
                                         <tr>
-                                            <th>Month</th>
-                                            <th class="text-end">Total Cost Room</th>
-                                            <th class="text-end">Paid</th>
-                                            <th class="text-end">Balance</th>
+                                            <th>Stay Duration</th>
+                                            <th class="text-end">Total Cost (₱)</th>
+                                            <th class="text-end">Amount Paid (₱)</th>
+                                            <th class="text-end">Balance (₱)</th>
                                             <th>Status</th>
-                                            <th>Due Date</th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         <?php foreach ($bills as $bill): ?>
                                             <?php
-                                            // Live sum of all payments for this bill (used for accurate paid and balance)
-                                            $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id");
+                                            // Live sum of verified/approved payments for this bill (used for accurate paid and balance)
+                                            $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
                                             $sum_stmt->execute(['bill_id' => $bill['id']]);
                                             $live_paid = floatval($sum_stmt->fetchColumn());
 
-                                            // Fetch stay duration from room_requests (used for month display and due date fallback)
-                                            $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
-                                            $room_req_stmt->execute(['tenant_id' => $bill['tenant_id'], 'room_id' => $bill['room_id']]);
-                                            $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                            // Fetch stay duration from room_requests
+                                            // First, try to extract Request ID from notes (e.g., "Request #123")
+                                            $request_id = null;
+                                            if (!empty($bill['notes']) && preg_match('/Request #(\d+)/', $bill['notes'], $m)) {
+                                                $request_id = intval($m[1]);
+                                            }
+                                            
+                                            $dates = null;
+                                            if ($request_id) {
+                                                // Use the specific request ID
+                                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE id = :request_id LIMIT 1");
+                                                $room_req_stmt->execute(['request_id' => $request_id]);
+                                                $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                            }
+                                            
+                                            if (!$dates) {
+                                                // Fall back to fetching by tenant_id and room_id (most recent)
+                                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                                $room_req_stmt->execute(['tenant_id' => $bill['tenant_id'], 'room_id' => $bill['room_id']]);
+                                                $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                            }
+                                            
                                             $checkin = $dates ? $dates['checkin_date'] : null;
                                             $checkout = $dates ? $dates['checkout_date'] : null;
 
-                                            // Only show bills with a valid stay (checkin and checkout)
-                                            if (!$checkin || !$checkout) continue;
-
-                                            $month_display = date('M d, Y \a\t h:i A', strtotime($checkin)) . ' - ' . date('M d, Y \a\t h:i A', strtotime($checkout));
+                                            // Display month - use checkin/checkout if available, else fall back to billing_month or created_at
+                                            if ($checkin && $checkout && strtotime($checkin) > 0 && strtotime($checkout) > 0) {
+                                                $month_display = date('M d, Y \a\t h:i A', strtotime($checkin)) . ' - ' . date('M d, Y \a\t h:i A', strtotime($checkout));
+                                            } elseif (!empty($bill['billing_month']) && strtotime($bill['billing_month']) > 0) {
+                                                $month_display = date('F Y', strtotime($bill['billing_month']));
+                                            } else {
+                                                $month_display = 'Billing period N/A';
+                                            }
 
                                             // Compute total amenity cost that has been billed to this bill (notes contain 'Request #<id>')
                                             $amenity_sum = 0.0;
@@ -527,16 +606,24 @@ try {
                                                 $due_ts = null;
                                             }
 
-                                            // Show only the room cost as Total Cost Room (room rate x nights)
-                                            $room_rate = isset($customer['rate']) ? floatval($customer['rate']) : 0.0;
+                                            // Show only the room cost as Total Cost Room (room rate x nights, or bill amount if dates unavailable)
+                                            // Fetch the room rate for the bill's room
+                                            $room_rate_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id LIMIT 1");
+                                            $room_rate_stmt->execute(['room_id' => $bill['room_id']]);
+                                            $rate_row = $room_rate_stmt->fetch(PDO::FETCH_ASSOC);
+                                            $room_rate = $rate_row ? floatval($rate_row['rate']) : (isset($customer['rate']) ? floatval($customer['rate']) : 0.0);
+                                            
                                             $nights = 1;
-                                            if ($checkin && $checkout) {
+                                            if ($checkin && $checkout && strtotime($checkin) > 0 && strtotime($checkout) > 0) {
                                                 $dt1 = new DateTime($checkin);
                                                 $dt2 = new DateTime($checkout);
                                                 $interval = $dt1->diff($dt2);
                                                 $nights = max(1, (int)$interval->format('%a'));
+                                                $room_total = $room_rate * $nights;
+                                            } else {
+                                                // Fall back to bill's amount_due if dates are unavailable
+                                                $room_total = floatval($bill['amount_due']);
                                             }
-                                            $room_total = $room_rate * $nights;
                                             $display_amount_due = $room_total;
                                             // Paid and balance should be based on room only (not amenities)
                                             // If payments exceed room_total, cap paid at room_total for display
@@ -560,20 +647,11 @@ try {
                                             }
                                             ?>
                                             <tr>
-                                                <td>
-                                                    <?php echo $month_display; ?>
-                                                    <?php
-                                                    // ...existing code...
-                                                    ?>
-                                                    <!-- Includes suppressed here to avoid duplication. See Additional Charges section below for amenity details. -->
-                                                </td>
+                                                <td><small><?php echo $month_display; ?></small></td>
                                                 <td class="text-end">₱<?php echo number_format($display_amount_due, 2); ?></td>
                                                 <td class="text-end">₱<?php echo number_format($paid_on_base, 2); ?></td>
                                                 <td class="text-end">₱<?php echo number_format($base_balance, 2); ?></td>
-                                                <td>
-                                                    <span class="badge bg-<?php echo $status_class; ?>"><?php echo ucfirst($display_status); ?></span>
-                                                </td>
-                                                <td><?php echo $due_display; ?></td>
+                                                <td><span class="badge bg-<?php echo $status_class; ?>"><?php echo ucfirst($display_status); ?></span></td>
                                             </tr>
                                         <?php endforeach; ?>
                                     </tbody>
@@ -647,7 +725,7 @@ try {
         function dismissAdvancePaymentNotification() {
             fetch('api_dismiss_notification.php?action=dismiss_advance_payment')
                 .then(response => response.json())
-                .then data => {
+                .then(data => {
                     if (data.success) {
                         // Notification dismissed successfully in database
                         console.log('Advance payment notification dismissed permanently');
@@ -656,6 +734,43 @@ try {
                     }
                 })
                 .catch(error => console.error('Error:', error));
+        }
+
+        /**
+         * Confirm and process booking cancellation
+         * Calls API to record cancellation and notify admins
+         */
+        function confirmBookingCancellation() {
+            // Get cancellation reason
+            const reason = document.getElementById('cancellationReason').value;
+
+            // Close the modal
+            const cancelModal = bootstrap.Modal.getInstance(document.getElementById('cancelBookingModal'));
+            if (cancelModal) {
+                cancelModal.hide();
+            }
+
+            // Call the cancellation API with reason
+            fetch('api_cancel_booking.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: 'reason=' + encodeURIComponent(reason)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Your booking cancellation has been submitted successfully.\n\nManagement will review your request. Please contact us for any questions regarding your non-refundable payment.');
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.message || 'Failed to cancel booking'));
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error processing cancellation. Please try again.');
+            });
         }
     </script>
 </body>

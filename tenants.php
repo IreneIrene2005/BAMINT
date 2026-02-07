@@ -16,14 +16,19 @@ $filter_room = isset($_GET['room']) ? $_GET['room'] : '';
 $view = isset($_GET['view']) ? $_GET['view'] : 'active';
 
 // Build the SQL query with search and filter
-$sql = "SELECT tenants.*, COALESCE(rooms.room_number, (
+// Only show tenants who have approved/verified payments for NON-CANCELLED bills
+$sql = "SELECT DISTINCT tenants.*, COALESCE(rooms.room_number, (
             SELECT r2.room_number FROM bills b 
             JOIN rooms r2 ON b.room_id = r2.id 
             LEFT JOIN payment_transactions pt ON pt.bill_id = b.id AND pt.payment_status IN ('verified','approved')
             WHERE b.tenant_id = tenants.id AND (
                 b.amount_paid > 0 OR b.status IN ('partial','paid') OR pt.id IS NOT NULL
             ) ORDER BY b.id DESC LIMIT 1
-        )) as room_number FROM tenants LEFT JOIN rooms ON tenants.room_id = rooms.id WHERE 1=1";
+        )) as room_number FROM tenants 
+        LEFT JOIN rooms ON tenants.room_id = rooms.id
+        INNER JOIN payment_transactions pt ON tenants.id = pt.tenant_id AND pt.payment_status IN ('verified','approved')
+        INNER JOIN bills b ON pt.bill_id = b.id AND b.status != 'cancelled'
+        WHERE 1=1";
 
 if ($search) {
     $sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR tenants.phone LIKE :search OR tenants.id_number LIKE :search)";
@@ -59,12 +64,16 @@ if ($filter_room) {
     $stmt->bindParam(':room_id', $filter_room);
 }
 
-// Prepare archive query
-$archive_sql = "SELECT tenants.*, COALESCE(rooms.room_number, (
+// Prepare archive query - also filter by approved payments and non-cancelled bills
+$archive_sql = "SELECT DISTINCT tenants.*, COALESCE(rooms.room_number, (
             SELECT r2.room_number FROM bills b 
             JOIN rooms r2 ON b.room_id = r2.id 
             WHERE b.tenant_id = tenants.id ORDER BY b.id DESC LIMIT 1
-        )) as room_number FROM tenants LEFT JOIN rooms ON tenants.room_id = rooms.id WHERE tenants.status = 'inactive'";
+        )) as room_number FROM tenants 
+        LEFT JOIN rooms ON tenants.room_id = rooms.id
+        INNER JOIN payment_transactions pt ON tenants.id = pt.tenant_id AND pt.payment_status IN ('verified','approved')
+        INNER JOIN bills b ON pt.bill_id = b.id AND b.status != 'cancelled'
+        WHERE tenants.status = 'inactive'";
 
 if ($search) {
     $archive_sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR tenants.phone LIKE :search OR tenants.id_number LIKE :search)";
@@ -118,7 +127,7 @@ $available_rooms = $conn->query($sql_available_rooms);
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Tenants</title>
+    <title>Customers</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
@@ -248,7 +257,7 @@ $available_rooms = $conn->query($sql_available_rooms);
                             <td>
                                 <a href="tenant_actions.php?action=edit&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-primary" title="Edit"><i class="bi bi-pencil-square"></i></a>
                                 <?php if ($view === 'archive'): ?>
-                                    <a href="tenant_actions.php?action=restore&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Restore" onclick="return confirm('Restore this tenant from archive?');"><i class="bi bi-arrow-counterclockwise"></i></a>
+                                    <a href="tenant_actions.php?action=restore&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Restore" onclick="return confirm('Restore this customer from archive?');"><i class="bi bi-arrow-counterclockwise"></i></a>
                                 <?php else: ?>
                                     <?php if($row['status'] === 'active'): ?>
                                         <a href="tenant_actions.php?action=deactivate&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-warning" title="Deactivate" onclick="return confirm('Deactivate this tenant?');"><i class="bi bi-pause-circle"></i></a>
@@ -256,7 +265,7 @@ $available_rooms = $conn->query($sql_available_rooms);
                                         <a href="tenant_actions.php?action=activate&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Activate"><i class="bi bi-play-circle"></i></a>
                                     <?php endif; ?>
                                 <?php endif; ?>
-                                <a href="tenant_actions.php?action=delete&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-danger" title="Delete" onclick="return confirm('Are you sure you want to delete this tenant?');"><i class="bi bi-trash"></i></a>
+                                <a href="tenant_actions.php?action=delete&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-danger" title="Delete" onclick="return confirm('Are you sure you want to delete this customer?');"><i class="bi bi-trash"></i></a>
                             </td>
                         </tr>
                         <?php endwhile; ?>

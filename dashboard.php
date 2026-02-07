@@ -37,12 +37,7 @@ $vacant_rooms = $total_rooms - $occupied_rooms;
 // Occupancy rate percentage
 $occupancy_rate = $total_rooms > 0 ? round(($occupied_rooms / $total_rooms) * 100, 1) : 0;
 
-// Total income this month (from bills with current month)
-$current_month = date('Y-m');
-$sql_income = "SELECT COALESCE(SUM(amount_paid), 0) FROM bills WHERE billing_month = :month";
-$stmt = $conn->prepare($sql_income);
-$stmt->execute(['month' => $current_month]);
-$total_income = $stmt->fetchColumn();
+
 
 // Overdue payments count removed — card eliminated per request
 
@@ -202,7 +197,7 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                 <h4 class="mb-3">Key Metrics</h4>
                 
                 <!-- Total Tenants -->
-                <div class="col-md-2 col-sm-4 mb-3">
+                <div class="col-md-3 col-sm-6 mb-3">
                     <div class="card metric-card bg-primary text-white h-100">
                         <div class="card-body text-center">
                             <div class="metric-icon">
@@ -215,7 +210,7 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                 </div>
 
                 <!-- Total Rooms -->
-                <div class="col-md-2 col-sm-4 mb-3">
+                <div class="col-md-3 col-sm-6 mb-3">
                     <div class="card metric-card bg-success text-white h-100">
                         <div class="card-body text-center">
                             <div class="metric-icon">
@@ -228,7 +223,7 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                 </div>
 
                 <!-- Occupancy Rate -->
-                <div class="col-md-2 col-sm-4 mb-3">
+                <div class="col-md-3 col-sm-6 mb-3">
                     <div class="card metric-card bg-info text-white h-100">
                         <div class="card-body text-center">
                             <div class="metric-icon">
@@ -240,23 +235,8 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                     </div>
                 </div>
 
-                <!-- Monthly Income -->
-                <div class="col-md-2 col-sm-4 mb-3">
-                    <div class="card metric-card bg-success text-white h-100">
-                        <div class="card-body text-center">
-                            <div class="metric-icon">
-                                <i class="bi bi-cash-coin"></i>
-                            </div>
-                            <div class="metric-label">This Month</div>
-                            <div id="totalIncomeValue" class="metric-value">₱<?php echo number_format($total_income, 0); ?></div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Overdue Payments card removed -->
-
                 <!-- Pending Maintenance -->
-                <div class="col-md-2 col-sm-4 mb-3">
+                <div class="col-md-3 col-sm-6 mb-3">
                     <div class="card metric-card bg-danger text-white h-100">
                         <div class="card-body text-center">
                             <div class="metric-icon">
@@ -437,7 +417,6 @@ function refreshDashboard() {
             document.getElementById('totalTenantsValue').textContent = json.total_tenants;
             document.getElementById('totalRoomsValue').textContent = json.total_rooms;
             document.getElementById('occupancyRateValue').textContent = json.occupancy_rate + '%';
-            document.getElementById('totalIncomeValue').textContent = '₱' + Math.round(json.total_income).toLocaleString();
             document.getElementById('pendingMaintenanceValue').textContent = json.pending_maintenance;
             document.getElementById('updateTime').textContent = new Date().toLocaleString();
             // Update charts if data available

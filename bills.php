@@ -139,8 +139,13 @@ $sql = "SELECT bills.*, tenants.name, tenants.email, rooms.room_number FROM bill
         LEFT JOIN rooms ON bills.room_id = rooms.id 
         WHERE 1=1";
 
-// Filter: Exclude paid bills older than 7 days (those go to archive)
+// Simulation: force month display to October 2025 (presentation only)
+$simulate_month = true;
+$simulated_month_date = '2025-10-01';
+
+// Filter: Exclude paid bills older than 7 days (those go to archive) AND exclude cancelled bills
 $sql .= " AND NOT (bills.status = 'paid' AND DATE_ADD(bills.updated_at, INTERVAL 7 DAY) < NOW())";
+$sql .= " AND bills.status != 'cancelled'";
 
 if ($search) {
     $sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR rooms.room_number LIKE :search)";
@@ -160,11 +165,11 @@ if ($filter_month) {
 
 $sql .= " GROUP BY bills.id ORDER BY bills.billing_month DESC, tenants.name ASC";
 
-// Build archive query (paid bills older than 7 days)
+// Build archive query (paid bills older than 7 days OR cancelled bills)
 $archive_sql = "SELECT bills.*, tenants.name, tenants.email, rooms.room_number FROM bills 
         LEFT JOIN tenants ON bills.tenant_id = tenants.id 
         LEFT JOIN rooms ON bills.room_id = rooms.id 
-        WHERE bills.status = 'paid' AND DATE_ADD(bills.updated_at, INTERVAL 7 DAY) < NOW()";
+        WHERE (bills.status = 'paid' AND DATE_ADD(bills.updated_at, INTERVAL 7 DAY) < NOW()) OR bills.status = 'cancelled'";
 
 if ($search) {
     $archive_sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR rooms.room_number LIKE :search)";
@@ -378,6 +383,23 @@ try {
 
                 $bills->execute();
                 while($row = $bills->fetch(PDO::FETCH_ASSOC)) {
+                    // If this is an advance payment bill with no verified/admin-approved payments yet,
+                    // do not include it in the main table so the customer is not recorded before admin approval.
+                    $is_advance = false;
+                    if (!empty($row['notes']) && stripos($row['notes'], 'ADVANCE PAYMENT') !== false) {
+                        $is_advance = true;
+                        try {
+                            $ver_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as verified_paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                            $ver_stmt->execute(['bill_id' => $row['id']]);
+                            $verified_paid = floatval($ver_stmt->fetchColumn());
+                        } catch (Exception $e) {
+                            $verified_paid = 0.0;
+                        }
+                        if ($verified_paid <= 0) {
+                            // Skip this bill for now
+                            continue;
+                        }
+                    }
                     $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                     $room_req_stmt->execute(['tenant_id' => $row['tenant_id'], 'room_id' => $row['room_id']]);
                     $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
@@ -411,15 +433,21 @@ try {
                         $payment_method_checkout = $pm_checkout_stmt->fetchColumn();
                     }
                     
+                    // Get bill status for display
+                    $bill_status_from_db = $row['status'];
                     
                     // Total billable = Bill amount + Additional charges
                     $bill_amount = floatval($row['amount_due']);
                     $total_billable = $bill_amount + $total_charges;
                     
                     // Grand Total Due calculation:
+                    // If bill is cancelled, Grand Total Due = 0 (cancellation recorded)
                     // If tenant is inactive (checked out), Grand Total Due = 0 (already paid)
                     // If tenant is active, Grand Total Due = Amount Paid + Total Additional Charges (total billable)
-                    if ($tenant_status === 'inactive') {
+                    if ($bill_status_from_db === 'cancelled') {
+                        // Bill has been cancelled - Grand Total Due = 0
+                        $grand_total_due = 0;
+                    } elseif ($tenant_status === 'inactive') {
                         // Customer has checked out - they paid, so Grand Total Due = 0
                         $grand_total_due = 0;
                     } else {
@@ -427,8 +455,10 @@ try {
                         $grand_total_due = $amount_paid + $total_charges;
                     }
                     
-                    $grand_total_due_sum += $grand_total_due;
-                    $grand_total_paid_sum += $amount_paid;
+                        // Always add grand_total_due for the active listing
+                        $grand_total_due_sum += $grand_total_due;
+                        // We'll compute total paid globally (independent of active/archive view)
+                        $grand_total_paid_sum += $amount_paid; // temporary accumulation; will be replaced by global sum below
                     $table_rows[] = [
                         'checkin' => $checkin,
                         'checkout' => $checkout,
@@ -460,7 +490,17 @@ try {
                     <div class="card metric-card bg-info bg-opacity-10 h-100">
                         <div class="card-body text-center">
                             <div class="metric-label">Total Paid</div>
-                            <div class="metric-value text-info">₱<?php echo number_format($grand_total_paid_sum, 2); ?></div>
+                            <?php
+                            // Compute global paid amount from payment_transactions to keep Total Paid stable across views
+                            try {
+                                $global_paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as total_paid FROM payment_transactions WHERE payment_status IN ('verified','approved')");
+                                $global_paid_stmt->execute();
+                                $global_paid = floatval($global_paid_stmt->fetchColumn());
+                            } catch (Exception $e) {
+                                $global_paid = $grand_total_paid_sum; // fallback
+                            }
+                            ?>
+                            <div class="metric-value text-info">₱<?php echo number_format($global_paid, 2); ?></div>
                         </div>
                     </div>
                 </div>
@@ -946,12 +986,17 @@ try {
                             <td>
                                 <?php
                                 // Status determination:
+                                // "Cancelled" if bill status is cancelled
                                 // "Paid" only if tenant is inactive (checked out)
                                 // Otherwise based on payment status: "Partial" if payment exists, "Pending" if no payment
                                 $status_label = '';
                                 $status_class = '';
                                 
-                                if ($row['tenant_status'] === 'inactive') {
+                                if ($row['status'] === 'cancelled') {
+                                    // Bill has been cancelled
+                                    $status_label = 'Cancelled';
+                                    $status_class = 'danger';
+                                } elseif ($row['tenant_status'] === 'inactive') {
                                     // Customer has checked out - mark as Paid
                                     $status_label = 'Paid';
                                     $status_class = 'success';
@@ -990,12 +1035,12 @@ try {
                             <input type="hidden" name="view" value="archive">
                             <div class="col-md-3">
                                 <label for="search_archive" class="form-label">Search</label>
-                                <input type="text" class="form-control" id="search_archive" name="search" placeholder="Tenant, email, room..." value="<?php echo htmlspecialchars($search); ?>">
+                                <input type="text" class="form-control" id="search_archive" name="search" placeholder="Customer, email, room..." value="<?php echo htmlspecialchars($search); ?>">
                             </div>
                             <div class="col-md-3">
-                                <label for="tenant_archive" class="form-label">Tenant</label>
+                                <label for="tenant_archive" class="form-label">Customer</label>
                                 <select class="form-control" id="tenant_archive" name="tenant">
-                                    <option value="">All Tenants</option>
+                                    <option value="">All Customers</option>
                                     <?php 
                                     $all_tenants_reset2 = $conn->query("SELECT id, name FROM tenants WHERE status = 'active' ORDER BY name ASC");
                                     while($tenant = $all_tenants_reset2->fetch(PDO::FETCH_ASSOC)): ?>
@@ -1020,7 +1065,7 @@ try {
                         <thead>
                             <tr>
                                 <th>Billing Month</th>
-                                <th>Tenant</th>
+                                <th>Customer</th>
                                 <th>Room</th>
                                 <th>Amount Due (₱)</th>
                                 <th>Amount Paid (₱)</th>
@@ -1035,16 +1080,28 @@ try {
                             while($row = $archive_bills->fetch(PDO::FETCH_ASSOC)) : ?>
                             <tr>
                                 <td><?php 
-                                    // Safely format billing_month - handle various date formats
-                                    if (!empty($row['billing_month'])) {
-                                        $bm = strtotime($row['billing_month']);
-                                        // If parsing failed OR the year looks invalid, fallback to paid_date/updated_at
-                                        if ($bm !== false) {
-                                            $year = (int)date('Y', $bm);
-                                            if ($year > 1970) {
-                                                echo htmlspecialchars(date('F Y', $bm));
+                                    // If simulation flag is set, force month display to October 2025
+                                    if (!empty($simulate_month)) {
+                                        echo 'October 2025';
+                                    } else {
+                                        // Safely format billing_month - handle various date formats
+                                        if (!empty($row['billing_month'])) {
+                                            $bm = strtotime($row['billing_month']);
+                                            // If parsing failed OR the year looks invalid, fallback to paid_date/updated_at
+                                            if ($bm !== false) {
+                                                $year = (int)date('Y', $bm);
+                                                if ($year > 1970) {
+                                                    echo htmlspecialchars(date('F Y', $bm));
+                                                } else {
+                                                    // fallback
+                                                    if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
+                                                        echo htmlspecialchars(date('F Y', strtotime($row['paid_date'])));
+                                                    } else {
+                                                        echo htmlspecialchars(date('F Y', strtotime($row['updated_at'])));
+                                                    }
+                                                }
                                             } else {
-                                                // fallback
+                                                // fallback when strtotime fails
                                                 if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
                                                     echo htmlspecialchars(date('F Y', strtotime($row['paid_date'])));
                                                 } else {
@@ -1052,19 +1109,12 @@ try {
                                                 }
                                             }
                                         } else {
-                                            // fallback when strtotime fails
+                                            // No billing_month - use paid_date/updated_at
                                             if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
                                                 echo htmlspecialchars(date('F Y', strtotime($row['paid_date'])));
                                             } else {
                                                 echo htmlspecialchars(date('F Y', strtotime($row['updated_at'])));
                                             }
-                                        }
-                                    } else {
-                                        // No billing_month - use paid_date/updated_at
-                                        if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
-                                            echo htmlspecialchars(date('F Y', strtotime($row['paid_date'])));
-                                        } else {
-                                            echo htmlspecialchars(date('F Y', strtotime($row['updated_at'])));
                                         }
                                     }
                                 ?></td>
@@ -1073,16 +1123,26 @@ try {
                                 <td><?php echo htmlspecialchars(number_format($row['amount_due'], 2)); ?></td>
                                 <td><?php echo htmlspecialchars(number_format($row['amount_paid'], 2)); ?></td>
                                 <td>
-                                    <span class="badge bg-success">
-                                        <i class="bi bi-check-circle"></i> Paid
-                                    </span>
+                                    <?php
+                                    // Show correct status for archive view
+                                    if ($row['status'] === 'cancelled') {
+                                        echo '<span class="badge bg-danger"><i class="bi bi-x-circle"></i> Cancelled</span>';
+                                    } else {
+                                        echo '<span class="badge bg-success"><i class="bi bi-check-circle"></i> Paid</span>';
+                                    }
+                                    ?>
                                 </td>
                                 <td><?php 
-                                    // Use paid_date if available, otherwise use updated_at
-                                    if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
-                                        echo htmlspecialchars(date('M d, Y', strtotime($row['paid_date'])));
+                                    // If simulation is enabled, force paid date to the simulated date (October 2025)
+                                    if (!empty($simulate_month) && !empty($simulated_month_date)) {
+                                        echo htmlspecialchars(date('M d, Y', strtotime($simulated_month_date)));
                                     } else {
-                                        echo htmlspecialchars(date('M d, Y', strtotime($row['updated_at'])));
+                                        // Use paid_date if available, otherwise use updated_at
+                                        if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
+                                            echo htmlspecialchars(date('M d, Y', strtotime($row['paid_date'])));
+                                        } else {
+                                            echo htmlspecialchars(date('M d, Y', strtotime($row['updated_at'])));
+                                        }
                                     }
                                 ?></td>
                                 <td>
@@ -1145,10 +1205,10 @@ try {
       </div>
       <div class="modal-body">
         <form action="bill_actions.php?action=add" method="post">
-          <div class="mb-3">
-            <label for="tenant_id" class="form-label">Select Tenant</label>
-            <select class="form-control" id="tenant_id" name="tenant_id" required onchange="loadTenantDetails()">
-                <option value="">-- Choose a tenant --</option>
+                    <div class="mb-3">
+                        <label for="tenant_id" class="form-label">Select Customer</label>
+                        <select class="form-control" id="tenant_id" name="tenant_id" required onchange="loadTenantDetails()">
+                                <option value="">-- Choose a customer --</option>
                 <?php 
                 $stmt2 = $conn->query("SELECT t.id, t.name, t.start_date, r.room_type, r.rate, r.room_number FROM tenants t LEFT JOIN rooms r ON t.room_id = r.id WHERE t.status = 'active' ORDER BY t.name ASC");
                 while($tenant = $stmt2->fetch(PDO::FETCH_ASSOC)): ?>
@@ -1159,11 +1219,11 @@ try {
             </select>
           </div>
 
-          <!-- Tenant Details Card -->
-          <div id="tenantDetailsCard" style="display: none; margin-bottom: 20px;">
-            <div class="card bg-light">
-              <div class="card-body">
-                <h6 class="card-title mb-3">Tenant Details</h6>
+                    <!-- Customer Details Card -->
+                    <div id="tenantDetailsCard" style="display: none; margin-bottom: 20px;">
+                        <div class="card bg-light">
+                            <div class="card-body">
+                                <h6 class="card-title mb-3">Customer Details</h6>
                 <div class="row">
                   <div class="col-md-6">
                     <small class="text-muted d-block">Room Number</small>

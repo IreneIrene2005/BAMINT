@@ -27,8 +27,8 @@
             </li>
             <li class="nav-item">
                 <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_bookings.php') ? 'active' : ''; ?>" href="admin_bookings.php">
-                    <i class="bi bi-calendar-check"></i>
-                    Booking
+                    <i class="bi bi-x-circle"></i>
+                    Cancellations
                 </a>
             </li>
             <li class="nav-item">

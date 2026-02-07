@@ -20,6 +20,9 @@ $message_type = '';
 
 // Get tenant status and check if they already have a room
 $tenant_has_room = false;
+$has_approved_payment = false;
+$approved_payment_info = null;
+
 try {
     $status_stmt = $conn->prepare("SELECT room_id FROM tenants WHERE id = :tenant_id");
     $status_stmt->execute(['tenant_id' => $tenant_id]);
@@ -27,6 +30,29 @@ try {
     $tenant_has_room = ($tenant_status && !empty($tenant_status['room_id']));
 } catch (Exception $e) {
     $tenant_has_room = false;
+}
+
+// Check if tenant has any approved/verified payment
+try {
+    $payment_stmt = $conn->prepare("
+        SELECT DISTINCT 
+            b.id as bill_id,
+            b.room_id,
+            r.room_number,
+            pt.payment_amount,
+            pt.verification_date
+        FROM bills b
+        INNER JOIN payment_transactions pt ON b.id = pt.bill_id AND pt.payment_status IN ('verified', 'approved')
+        INNER JOIN rooms r ON b.room_id = r.id
+        WHERE b.tenant_id = :tenant_id
+        ORDER BY pt.verification_date DESC
+        LIMIT 1
+    ");
+    $payment_stmt->execute(['tenant_id' => $tenant_id]);
+    $approved_payment_info = $payment_stmt->fetch(PDO::FETCH_ASSOC);
+    $has_approved_payment = ($approved_payment_info !== false && !empty($approved_payment_info));
+} catch (Exception $e) {
+    $has_approved_payment = false;
 }
 
 // Handle room request submission
@@ -560,7 +586,19 @@ try {
                     </div>
                 <?php endif; ?>
 
-                <!-- My Requests Section (Improved UI) -->
+                <!-- Approved Booking Confirmation -->
+                <?php if ($has_approved_payment): ?>
+                    <div class="alert alert-success alert-dismissible fade show mb-4" role="alert">
+                        <i class="bi bi-check-circle"></i>
+                        <strong>Payment Approved!</strong> Your booking for Room <?php echo htmlspecialchars($approved_payment_info['room_number']); ?> has been confirmed.
+                        Your payment of <strong>₱<?php echo number_format($approved_payment_info['payment_amount'], 2); ?></strong> has been verified and approved.
+                        You can view your booking details on the dashboard.
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                <?php endif; ?>
+
+                <!-- My Requests Section (Improved UI) - Only show if no approved payment -->
+                <?php if (!$has_approved_payment): ?>
                 <div class="col-12 mt-4 mb-4">
                     <div class="card shadow-lg border-primary" style="width: 100%;">
                         <div class="card-header bg-primary text-white text-center" style="font-size: 1.5rem; font-weight: bold; letter-spacing: 1px;">
@@ -622,8 +660,10 @@ try {
                         </div>
                     </div>
                 </div>
+                <?php endif; ?>
 
-                <!-- Filter Section (Centered) -->
+                <!-- Filter Section (Centered) - Only show if no approved payment -->
+                <?php if (!$has_approved_payment): ?>
                 <div class="filter-section">
                     <label for="filterType">Filter by Room Type:</label>
                     <select class="form-select" id="filterType" name="type" onchange="filterRooms()">
@@ -706,6 +746,7 @@ try {
                                 <?php endif; ?>
                     </div>
                 </div>
+                <?php endif; ?>
                 <script>
                     // Cancel request handler: sends AJAX POST to cancel the request
                     document.addEventListener('DOMContentLoaded', function() {

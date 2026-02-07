@@ -13,9 +13,9 @@ if (isset($_SESSION["loggedin"]) && $_SESSION["loggedin"] === true) {
 
 require_once "db/database.php";
 
-$username = $email = $name = $password = $confirm_password = "";
-$username_err = $email_err = $name_err = $password_err = $confirm_password_err = "";
-$role = isset($_GET['role']) ? $_GET['role'] : 'admin';
+$username = $email = $name = $password = $confirm_password = $phone = "";
+$username_err = $email_err = $name_err = $password_err = $confirm_password_err = $phone_err = "";
+$role = isset($_GET['role']) ? $_GET['role'] : 'tenant';
 
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $role = isset($_POST['role']) ? $_POST['role'] : 'admin';
@@ -103,6 +103,18 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             $name = trim($_POST["name"]);
         }
 
+        // Validate phone
+        if (empty(trim($_POST["phone"]))) {
+            $phone_err = "Please enter your phone number.";
+        } else {
+            $phone = trim($_POST["phone"]);
+            // Normalize phone: keep digits only
+            $phone = preg_replace('/\D/', '', $phone);
+            if (strlen($phone) < 7) {
+                $phone_err = "Please enter a valid phone number.";
+            }
+        }
+
         // Validate email
         if (empty(trim($_POST["email"]))) {
             $email_err = "Please enter your email.";
@@ -150,18 +162,20 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         }
 
         // Check for errors before inserting in database
-        if (empty($name_err) && empty($email_err) && empty($password_err) && empty($confirm_password_err)) {
+        if (empty($name_err) && empty($email_err) && empty($password_err) && empty($confirm_password_err) && empty($phone_err)) {
             
             // First create a tenant record
-            $sql = "INSERT INTO tenants (name, email, phone, id_number, room_id, start_date, status) 
-                    VALUES (:name, :email, '0000000000', 'PENDING', NULL, CURDATE(), 'active')";
+                $sql = "INSERT INTO tenants (name, email, phone, id_number, room_id, start_date, status) 
+                    VALUES (:name, :email, :phone, 'PENDING', NULL, CURDATE(), 'active')";
             
             if ($stmt = $conn->prepare($sql)) {
                 $stmt->bindParam(":name", $param_name, PDO::PARAM_STR);
                 $stmt->bindParam(":email", $param_email, PDO::PARAM_STR);
+                $stmt->bindParam(":phone", $param_phone, PDO::PARAM_STR);
                 
                 $param_name = $name;
                 $param_email = $email;
+                $param_phone = $phone;
                 
                 if ($stmt->execute()) {
                     $tenant_id = $conn->lastInsertId();
@@ -180,7 +194,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                         $param_password = password_hash($password, PASSWORD_DEFAULT);
                         
                         if ($stmt->execute()) {
-                            header("location: index.php?role=tenant&success=Tenant account created successfully. Please login.");
+                            header("location: index.php?role=tenant&success=Customer account created successfully. Please login.");
                             exit();
                         } else {
                             echo "Oops! Something went wrong. Please try again later.";
@@ -335,50 +349,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             <p>Create your account</p>
         </div>
 
-        <!-- Role Selection Tabs -->
-        <div class="role-tabs">
-            <button type="button" class="role-tab <?php echo $role === 'admin' ? 'active' : ''; ?>" data-role="admin" onclick="switchRole('admin')">
-                <i class="bi bi-shield-check"></i> Admin
-            </button>
-            <button type="button" class="role-tab <?php echo $role === 'tenant' ? 'active' : ''; ?>" data-role="tenant" onclick="switchRole('tenant')">
-                <i class="bi bi-person"></i> Tenant
-            </button>
-        </div>
-
-        <!-- Admin Registration Form -->
-        <form id="adminForm" class="form-section <?php echo $role === 'admin' ? 'active' : ''; ?>" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
-            <input type="hidden" name="role" value="admin">
-
-            <div class="form-group <?php echo (!empty($username_err)) ? 'has-error' : ''; ?>">
-                <label class="form-label">Username</label>
-                <input type="text" name="username" class="form-control" value="<?php echo htmlspecialchars($username); ?>" placeholder="Choose a username">
-                <?php if (!empty($username_err)): ?>
-                    <span class="text-danger"><?php echo htmlspecialchars($username_err); ?></span>
-                <?php endif; ?>
-            </div>
-
-            <div class="form-group <?php echo (!empty($password_err)) ? 'has-error' : ''; ?>">
-                <label class="form-label">Password</label>
-                <input type="password" name="password" class="form-control" placeholder="At least 6 characters">
-                <?php if (!empty($password_err)): ?>
-                    <span class="text-danger"><?php echo htmlspecialchars($password_err); ?></span>
-                <?php endif; ?>
-            </div>
-
-            <div class="form-group <?php echo (!empty($confirm_password_err)) ? 'has-error' : ''; ?>">
-                <label class="form-label">Confirm Password</label>
-                <input type="password" name="confirm_password" class="form-control" placeholder="Re-enter password">
-                <?php if (!empty($confirm_password_err)): ?>
-                    <span class="text-danger"><?php echo htmlspecialchars($confirm_password_err); ?></span>
-                <?php endif; ?>
-            </div>
-
-            <button type="submit" class="btn-register">Register as Admin</button>
-
-            <div class="link-login">
-                <p>Already have an account? <a href="index.php?role=admin">Login here</a></p>
-            </div>
-        </form>
+        <!-- Customer Registration (admin account creation removed) -->
 
         <!-- Tenant Registration Form -->
         <form id="tenantForm" class="form-section <?php echo $role === 'tenant' ? 'active' : ''; ?>" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
@@ -400,6 +371,14 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 <?php endif; ?>
             </div>
 
+            <div class="form-group <?php echo (!empty($phone_err)) ? 'has-error' : ''; ?>">
+                <label class="form-label">Phone Number</label>
+                <input type="text" name="phone" class="form-control" value="<?php echo htmlspecialchars($phone); ?>" placeholder="Enter your phone number">
+                <?php if (!empty($phone_err)): ?>
+                    <span class="text-danger"><?php echo htmlspecialchars($phone_err); ?></span>
+                <?php endif; ?>
+            </div>
+
             <div class="form-group <?php echo (!empty($password_err)) ? 'has-error' : ''; ?>">
                 <label class="form-label">Password</label>
                 <input type="password" name="password" class="form-control" placeholder="At least 6 characters">
@@ -416,28 +395,14 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 <?php endif; ?>
             </div>
 
-            <button type="submit" class="btn-register">Register as Tenant</button>
+            <button type="submit" class="btn-register">Register as Customer</button>
 
             <div class="link-login">
-                <p>Already have an account? <a href="index.php?role=tenant">Login here</a></p>
+                <p>Already have an account? <a href="index.php?role=tenant">Customer login</a> or <a href="index.php?role=admin">Admin login</a></p>
             </div>
         </form>
     </div>
-
-    <script>
-        function switchRole(role) {
-            // Update tab styles
-            document.querySelectorAll('.role-tab').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            document.querySelector(`[data-role="${role}"]`).classList.add('active');
-
-            // Show/hide forms
-            document.querySelectorAll('.form-section').forEach(form => {
-                form.classList.remove('active');
-            });
-            document.getElementById(role + 'Form').classList.add('active');
-        }
-    </script>
+</body>
+</html>
 </body>
 </html>

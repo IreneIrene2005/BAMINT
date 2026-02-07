@@ -276,7 +276,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 <i class="bi bi-shield-check"></i> Admin
             </button>
             <button type="button" class="role-tab" data-role="tenant" onclick="switchRole('tenant')">
-                <i class="bi bi-person"></i> Tenant
+                <i class="bi bi-person"></i> Customer
             </button>
         </div>
 
@@ -306,9 +306,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 
             <button type="submit" class="btn-login">Login as Admin</button>
 
-            <div class="link-register">
-                <p>Don't have an account? <a href="register.php?role=admin">Create admin account</a></p>
-            </div>
+            <!-- Admin account creation link intentionally removed to prevent admin self-registration -->
         </form>
 
         <!-- Tenant Login Form -->
@@ -331,10 +329,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 <?php endif; ?>
             </div>
 
-            <button type="submit" class="btn-login">Login as Tenant</button>
+            <button type="submit" class="btn-login">Login as Customer</button>
 
             <div class="link-register">
-                <p>Don't have an account? <a href="register.php?role=tenant">Create tenant account</a></p>
+                <p>Don't have an account? <a href="register.php?role=tenant">Create customer account</a></p>
             </div>
         </form>
     </div>
