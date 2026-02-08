@@ -442,32 +442,78 @@ try {
                                     <?php endif; ?>
                                 </p>
                                 
-                                <div class="bg-light p-3 rounded mb-3">
-                                    <div class="row g-3">
-                                        <div class="col-md-4">
-                                            <small class="text-muted d-block"><i class="bi bi-door-open"></i> Room Number</small>
-                                            <strong class="text-dark" style="font-size: 1.2rem;"><?php echo htmlspecialchars($advance_payment['room_number']); ?></strong>
+                                <div class="bg-light p-4 rounded mb-3" style="border: 1px solid #e9ecef;">
+                                    <div class="row g-4">
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <div style="padding: 1rem; background: white; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                <i class="bi bi-door-open" style="font-size: 1.8rem; color: #667eea; margin-bottom: 0.5rem; display: block;"></i>
+                                                <small class="text-muted d-block mb-2">Room Number</small>
+                                                <strong class="text-dark" style="font-size: 1.5rem;"><?php echo htmlspecialchars($advance_payment['room_number']); ?></strong>
+                                            </div>
                                         </div>
-                                        <div class="col-md-4">
-                                            <small class="text-muted d-block"><i class="bi bi-calendar-check"></i> Check-in Date</small>
-                                            <?php
-                                                $room_id_for_dates = $customer['room_id'] ?? ($advance_payment['room_id'] ?? null);
-                                                $dates = null;
-                                                if ($room_id_for_dates) {
-                                                    $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
-                                                    $room_req_stmt->execute(['tenant_id' => $customer_id, 'room_id' => $room_id_for_dates]);
-                                                    $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                                }
-                                                $checkin_date = $dates && $dates['checkin_date'] ? $dates['checkin_date'] : ($customer['start_date'] ?? date('Y-m-d'));
-                                                $checkout_date = $dates && $dates['checkout_date'] ? $dates['checkout_date'] : null;
-                                            ?>
-                                            <strong class="text-dark" style="font-size: 1.1rem;"><?php echo date('M d, Y', strtotime($checkin_date)); ?></strong>
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <div style="padding: 1rem; background: white; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                <i class="bi bi-calendar-check" style="font-size: 1.8rem; color: #28a745; margin-bottom: 0.5rem; display: block;"></i>
+                                                <small class="text-muted d-block mb-2">Check-in Date</small>
+                                                <?php
+                                                    $room_id_for_dates = $customer['room_id'] ?? ($advance_payment['room_id'] ?? null);
+                                                    $dates = null;
+                                                    $checkin_time_val = null;
+                                                    $checkout_time_val = null;
+                                                    
+                                                    if ($room_id_for_dates) {
+                                                        try {
+                                                            $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date, checkin_time, checkout_time FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                                            $room_req_stmt->execute(['tenant_id' => $customer_id, 'room_id' => $room_id_for_dates]);
+                                                            $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                                            
+                                                            if ($dates) {
+                                                                if (isset($dates['checkin_time']) && $dates['checkin_time']) {
+                                                                    $checkin_time_val = date('g:i A', strtotime($dates['checkin_time']));
+                                                                }
+                                                                if (isset($dates['checkout_time']) && $dates['checkout_time']) {
+                                                                    $checkout_time_val = date('g:i A', strtotime($dates['checkout_time']));
+                                                                }
+                                                            }
+                                                        } catch (Exception $e) {
+                                                            // Fallback if columns don't exist yet
+                                                            try {
+                                                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                                                $room_req_stmt->execute(['tenant_id' => $customer_id, 'room_id' => $room_id_for_dates]);
+                                                                $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                                            } catch (Exception $e2) {
+                                                                // Continue with defaults
+                                                            }
+                                                        }
+                                                    }
+                                                    $checkin_date = $dates && $dates['checkin_date'] ? $dates['checkin_date'] : ($customer['start_date'] ?? date('Y-m-d'));
+                                                    $checkout_date = $dates && $dates['checkout_date'] ? $dates['checkout_date'] : null;
+                                                ?>
+                                                <strong class="text-dark" style="font-size: 1.2rem;"><?php echo date('M d, Y', strtotime($checkin_date)); ?></strong>
+                                            </div>
                                         </div>
-                                        <div class="col-md-4">
-                                            <small class="text-muted d-block"><i class="bi bi-calendar-x"></i> Check-out Date</small>
-                                            <strong class="text-dark" style="font-size: 1.1rem;">
-                                                <?php echo $checkout_date ? date('M d, Y', strtotime($checkout_date)) : 'TBD'; ?>
-                                            </strong>
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <div style="padding: 1rem; background: white; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                <i class="bi bi-clock" style="font-size: 1.8rem; color: #0dcaf0; margin-bottom: 0.5rem; display: block;"></i>
+                                                <small class="text-muted d-block mb-2">Check-in Time</small>
+                                                <strong class="text-dark" style="font-size: 1.2rem;"><?php echo $checkin_time_val ? htmlspecialchars($checkin_time_val) : 'Not provided'; ?></strong>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <div style="padding: 1rem; background: white; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                <i class="bi bi-calendar-x" style="font-size: 1.8rem; color: #fd7e14; margin-bottom: 0.5rem; display: block;"></i>
+                                                <small class="text-muted d-block mb-2">Check-out Date</small>
+                                                <strong class="text-dark" style="font-size: 1.2rem;">
+                                                    <?php echo $checkout_date ? date('M d, Y', strtotime($checkout_date)) : 'TBD'; ?>
+                                                </strong>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <div style="padding: 1rem; background: white; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                <i class="bi bi-clock-history" style="font-size: 1.8rem; color: #6f42c1; margin-bottom: 0.5rem; display: block;"></i>
+                                                <small class="text-muted d-block mb-2">Check-out Time</small>
+                                                <strong class="text-dark" style="font-size: 1.2rem;"><?php echo $checkout_time_val ? htmlspecialchars($checkout_time_val) : 'Not provided'; ?></strong>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -521,67 +567,103 @@ try {
 
                                         <!-- Guest Information -->
                                         <div class="border-top border-bottom py-3 mb-3">
-                                            <h6 class="mb-2">Guest Information</h6>
-                                            <div class="row">
-                                                <div class="col-6">
-                                                    <small class="text-muted d-block">Name</small>
-                                                    <strong><?php echo htmlspecialchars($customer['name']); ?></strong>
+                                            <h6 class="mb-3">Guest Information</h6>
+                                            <div class="row g-3">
+                                                <div class="col-md-6 text-center">
+                                                    <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                        <i class="bi bi-person" style="font-size: 1.5rem; color: #667eea; margin-bottom: 0.5rem; display: block;"></i>
+                                                        <small class="text-muted d-block mb-2">Name</small>
+                                                        <strong><?php echo htmlspecialchars($customer['name']); ?></strong>
+                                                    </div>
                                                 </div>
-                                                <div class="col-6">
-                                                    <small class="text-muted d-block">Email</small>
-                                                    <small><?php echo htmlspecialchars($customer['email']); ?></small>
+                                                <div class="col-md-6 text-center">
+                                                    <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                        <i class="bi bi-envelope" style="font-size: 1.5rem; color: #0dcaf0; margin-bottom: 0.5rem; display: block;"></i>
+                                                        <small class="text-muted d-block mb-2">Email</small>
+                                                        <small><?php echo htmlspecialchars($customer['email']); ?></small>
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>
 
                                         <!-- Room & Dates -->
                                         <div class="border-bottom py-3 mb-3">
-                                            <h6 class="mb-2">Room Details</h6>
+                                            <h6 class="mb-3">Room Details</h6>
                                             <div class="row g-3">
-                                                <div class="col-md-6">
-                                                    <small class="text-muted d-block"><i class="bi bi-door-open"></i> Room Number</small>
-                                                    <strong style="font-size: 1.2rem;"><?php echo htmlspecialchars($advance_payment['room_number']); ?></strong>
+                                                <div class="col-md-6 col-lg-3 text-center">
+                                                    <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                        <i class="bi bi-door-open" style="font-size: 1.5rem; color: #667eea; margin-bottom: 0.5rem; display: block;"></i>
+                                                        <small class="text-muted d-block mb-2">Room Number</small>
+                                                        <strong style="font-size: 1.3rem;"><?php echo htmlspecialchars($advance_payment['room_number']); ?></strong>
+                                                    </div>
                                                 </div>
-                                                <div class="col-md-6">
-                                                    <small class="text-muted d-block"><i class="bi bi-calendar-check"></i> Scheduled Check-in</small>
-                                                    <strong><?php echo date('M d, Y', strtotime($checkin_date)); ?></strong>
+                                                <div class="col-md-6 col-lg-3 text-center">
+                                                    <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                        <i class="bi bi-calendar-check" style="font-size: 1.5rem; color: #28a745; margin-bottom: 0.5rem; display: block;"></i>
+                                                        <small class="text-muted d-block mb-2">Check-in Date</small>
+                                                        <strong><?php echo date('M d, Y', strtotime($checkin_date)); ?></strong>
+                                                    </div>
                                                 </div>
-                                                <div class="col-md-6">
-                                                    <small class="text-muted d-block"><i class="bi bi-calendar-x"></i> Scheduled Check-out</small>
-                                                    <strong><?php echo $checkout_date ? date('M d, Y', strtotime($checkout_date)) : 'TBD'; ?></strong>
+                                                <div class="col-md-6 col-lg-3 text-center">
+                                                    <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                        <i class="bi bi-clock" style="font-size: 1.5rem; color: #0dcaf0; margin-bottom: 0.5rem; display: block;"></i>
+                                                        <small class="text-muted d-block mb-2">Check-in Time</small>
+                                                        <strong><?php echo $checkin_time_val ? htmlspecialchars($checkin_time_val) : 'Not provided'; ?></strong>
+                                                    </div>
                                                 </div>
-                                                <?php if ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): ?>
-                                                <div class="col-md-6">
-                                                    <small class="text-muted d-block"><i class="bi bi-clock-history"></i> Actual Check-in Time</small>
-                                                    <strong class="text-success"><?php echo date('M d, Y \a\t h:i A', strtotime($customer['checkin_time'])); ?></strong>
+                                                <div class="col-md-6 col-lg-3 text-center">
+                                                    <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                        <i class="bi bi-calendar-x" style="font-size: 1.5rem; color: #fd7e14; margin-bottom: 0.5rem; display: block;"></i>
+                                                        <small class="text-muted d-block mb-2">Check-out Date</small>
+                                                        <strong><?php echo $checkout_date ? date('M d, Y', strtotime($checkout_date)) : 'TBD'; ?></strong>
+                                                    </div>
                                                 </div>
-                                                <?php endif; ?>
-                                                <?php if ($customer['checkout_time'] && $customer['checkout_time'] !== '0000-00-00 00:00:00'): ?>
-                                                <div class="col-md-6">
-                                                    <small class="text-muted d-block"><i class="bi bi-clock-history"></i> Actual Check-out Time</small>
-                                                    <strong class="text-info"><?php echo date('M d, Y \a\t h:i A', strtotime($customer['checkout_time'])); ?></strong>
+                                                <div class="col-md-6 col-lg-3 text-center">
+                                                    <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+                                                        <i class="bi bi-clock-history" style="font-size: 1.5rem; color: #6f42c1; margin-bottom: 0.5rem; display: block;"></i>
+                                                        <small class="text-muted d-block mb-2">Check-out Time</small>
+                                                        <strong><?php echo $checkout_time_val ? htmlspecialchars($checkout_time_val) : 'Not provided'; ?></strong>
+                                                    </div>
                                                 </div>
-                                                <?php endif; ?>
                                             </div>
                                         </div>
+                                        
+                                        <?php if ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): ?>
+                                        <div class="row g-3 mb-3">
+                                            <div class="col-md-6">
+                                                <div style="padding: 1rem; background: #d4edda; border-radius: 8px; border: 1px solid #c3e6cb;">
+                                                    <small class="text-muted d-block mb-2"><i class="bi bi-clock-history"></i> Actual Check-in Time</small>
+                                                    <strong class="text-success"><?php echo date('M d, Y \a\t h:i A', strtotime($customer['checkin_time'])); ?></strong>
+                                                </div>
+                                            </div>
+                                            <?php if ($customer['checkout_time'] && $customer['checkout_time'] !== '0000-00-00 00:00:00'): ?>
+                                            <div class="col-md-6">
+                                                <div style="padding: 1rem; background: #cce5ff; border-radius: 8px; border: 1px solid #b6d4fe;">
+                                                    <small class="text-muted d-block mb-2"><i class="bi bi-clock-history"></i> Actual Check-out Time</small>
+                                                    <strong class="text-info"><?php echo date('M d, Y \a\t h:i A', strtotime($customer['checkout_time'])); ?></strong>
+                                                </div>
+                                            </div>
+                                            <?php endif; ?>
+                                        </div>
+                                        <?php endif; ?>
 
                                         <!-- Payment Summary -->
                                         <div class="border-bottom py-3 mb-3">
-                                            <h6 class="mb-2">Payment Summary</h6>
-                                            <div class="row mb-2">
-                                                <div class="col-8">
-                                                    <small class="text-muted">Amount Paid</small>
+                                            <h6 class="mb-3">Payment Summary</h6>
+                                            <div class="row g-3">
+                                                <div class="col-md-6 text-center">
+                                                    <div style="padding: 1rem; background: #d4edda; border-radius: 8px; border: 1px solid #c3e6cb;">
+                                                        <i class="bi bi-cash-coin" style="font-size: 1.5rem; color: #28a745; margin-bottom: 0.5rem; display: block;"></i>
+                                                        <small class="text-muted d-block mb-2">Amount Paid</small>
+                                                        <strong style="font-size: 1.3rem; color: #28a745;">₱<?php echo number_format($advance_payment['payment_amount'] ?? $advance_payment['amount_due'], 2); ?></strong>
+                                                    </div>
                                                 </div>
-                                                <div class="col-4 text-end">
-                                                    <strong>₱<?php echo number_format($advance_payment['payment_amount'] ?? $advance_payment['amount_due'], 2); ?></strong>
-                                                </div>
-                                            </div>
-                                            <div class="row">
-                                                <div class="col-8">
-                                                    <small class="text-muted">Status</small>
-                                                </div>
-                                                <div class="col-4 text-end">
-                                                    <span class="badge bg-success">Verified & Approved</span>
+                                                <div class="col-md-6 text-center">
+                                                    <div style="padding: 1rem; background: #d4edda; border-radius: 8px; border: 1px solid #c3e6cb;">
+                                                        <i class="bi bi-check-circle" style="font-size: 1.5rem; color: #28a745; margin-bottom: 0.5rem; display: block;"></i>
+                                                        <small class="text-muted d-block mb-2">Payment Status</small>
+                                                        <strong style="font-size: 1.1rem; color: #28a745;">Verified & Approved</strong>
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>

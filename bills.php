@@ -533,9 +533,14 @@ try {
                                     <td><?php echo htmlspecialchars($customer['phone']); ?></td>
                                     <td><?php echo date('M d, Y', strtotime($customer['created_at'])); ?></td>
                                     <td>
-                                        <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#walkInModal<?php echo $customer['id']; ?>">
-                                            <i class="bi bi-credit-card"></i> Process Payment & Room
-                                        </button>
+                                        <div class="btn-group" role="group">
+                                            <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#walkInModal<?php echo $customer['id']; ?>">
+                                                <i class="bi bi-credit-card"></i> Process Payment & Room
+                                            </button>
+                                            <button type="button" class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#cancelWalkInModal<?php echo $customer['id']; ?>">
+                                                <i class="bi bi-x-circle"></i> Cancel
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
 
@@ -629,6 +634,35 @@ try {
                                                     <input type="hidden" name="payment_option" value="">
                                                     <button type="submit" class="btn btn-primary" onclick="document.querySelector('#walkInModal<?php echo $customer['id']; ?> form').submit();">
                                                         <i class="bi bi-check-circle"></i> Generate Invoice & Payment Link
+                                                    </button>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Cancel Walk-in Customer Modal -->
+                                <div class="modal fade" id="cancelWalkInModal<?php echo $customer['id']; ?>" tabindex="-1" aria-hidden="true">
+                                    <div class="modal-dialog modal-dialog-centered">
+                                        <div class="modal-content border-danger">
+                                            <div class="modal-header bg-danger bg-opacity-10">
+                                                <h5 class="modal-title text-danger">
+                                                    <i class="bi bi-x-circle"></i> Cancel Walk-in Customer Registration
+                                                </h5>
+                                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                            </div>
+                                            <div class="modal-body">
+                                                <div class="alert alert-danger" role="alert">
+                                                    <i class="bi bi-exclamation-triangle"></i> <strong>Warning:</strong> This will permanently remove this walk-in customer and any associated data.
+                                                </div>
+                                                <p>Are you sure you want to cancel the registration for <strong><?php echo htmlspecialchars($customer['name']); ?></strong>?</p>
+                                                <p class="text-muted"><small>This action cannot be undone.</small></p>
+                                            </div>
+                                            <div class="modal-footer">
+                                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Keep Registration</button>
+                                                <form method="POST" action="bill_actions.php?action=cancel_walk_in&tenant_id=<?php echo $customer['id']; ?>" style="display: inline;">
+                                                    <button type="submit" class="btn btn-danger">
+                                                        <i class="bi bi-x-circle"></i> Yes, Cancel Registration
                                                     </button>
                                                 </form>
                                             </div>
@@ -1288,11 +1322,13 @@ try {
             <h6 class="text-primary border-bottom pb-2"><strong>Stay Details</strong></h6>
             
             <div class="mb-3">
-              <label for="booking_room" class="form-label">Select Booked Room</label>
-              <select class="form-control" id="booking_room" name="booking_room" onchange="loadBookingDetails()">
-                <option value="">-- Select a booked room --</option>
-              </select>
-              <small class="text-muted">Shows rooms with confirmed bookings</small>
+              <label for="booking_room_search" class="form-label">Search Booked Room</label>
+              <div class="position-relative">
+                <input type="text" class="form-control" id="booking_room_search" placeholder="Search by room number, customer name, or phone..." autocomplete="off">
+                <div id="bookingRoomResults" class="list-group position-absolute" style="display: none; width: 100%; max-height: 200px; overflow-y: auto; top: 100%; z-index: 1000;"></div>
+              </div>
+              <small class="text-muted">Search and select from available booked rooms</small>
+              <input type="hidden" id="booking_room" name="booking_room" value="">
             </div>
 
             <!-- Booking Details Card -->
@@ -1347,13 +1383,13 @@ try {
             <div class="mb-3">
               <label class="form-label">Payment Type <span class="text-danger">*</span></label>
               <div class="form-check">
-                <input class="form-check-input" type="radio" name="payment_type" id="payment_full" value="full" checked onchange="updatePaymentCalculation()">
+                <input class="form-check-input" type="radio" name="payment_type" id="payment_full" value="full" checked onchange="updatePaymentCalculation(true)">
                 <label class="form-check-label" for="payment_full">
                   Full Payment
                 </label>
               </div>
               <div class="form-check">
-                <input class="form-check-input" type="radio" name="payment_type" id="payment_downpayment" value="downpayment" onchange="updatePaymentCalculation()">
+                <input class="form-check-input" type="radio" name="payment_type" id="payment_downpayment" value="downpayment" onchange="updatePaymentCalculation(true)">
                 <label class="form-check-label" for="payment_downpayment">
                   Downpayment (50%)
                 </label>
@@ -1376,14 +1412,22 @@ try {
                             </div>
             </div>
 
+            <!-- Payment Summary Alert -->
+            <div class="alert alert-info" id="paymentSummary" style="display: none;">
+              <strong>Payment Summary:</strong><br>
+              <span id="paymentSummaryText"></span>
+            </div>
+
             <div class="mb-3">
               <label for="amount_paid_new" class="form-label">Amount Paid (₱) <span class="text-danger">*</span></label>
               <input type="number" step="0.01" class="form-control" id="amount_paid_new" name="amount_paid" placeholder="0.00" oninput="updatePaymentCalculation()" required>
+              <small class="text-muted" id="amountPaidHelp"></small>
             </div>
 
             <div class="mb-3">
               <label for="remaining_balance_new" class="form-label">Remaining Balance (₱)</label>
               <input type="number" step="0.01" class="form-control" id="remaining_balance_new" name="remaining_balance" placeholder="0.00" readonly style="background-color: #f8f9fa;">
+              <small class="text-muted" id="remainingHelp"></small>
             </div>
           </div>
 
@@ -1456,6 +1500,16 @@ document.addEventListener('DOMContentLoaded', function() {
     const addNewBillModal = document.getElementById('addNewBillModal');
     if (addNewBillModal) {
         addNewBillModal.addEventListener('show.bs.modal', function() {
+            // Reset form fields
+            document.getElementById('booking_room_search').value = '';
+            document.getElementById('booking_room').value = '';
+            document.getElementById('amount_paid_new').value = '';
+            document.getElementById('remaining_balance_new').value = '';
+            document.getElementById('bookingDetailsCard').style.display = 'none';
+            document.getElementById('bookingRoomResults').style.display = 'none';
+            // Reset payment type to full
+            document.getElementById('payment_full').checked = true;
+            // Load booked rooms for this session
             loadBookedRooms();
         });
     }
@@ -1463,6 +1517,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const paymentTypeRadios = document.querySelectorAll('input[name="payment_type"]');
     paymentTypeRadios.forEach(r => r.addEventListener('change', function(){
         // autoFill amounts based on selected booking and type
+        console.log('🔘 Payment type changed to:', this.value);
         updatePaymentCalculation(true);
     }));
 
@@ -1470,95 +1525,135 @@ document.addEventListener('DOMContentLoaded', function() {
     if (amountPaidEl) {
         amountPaidEl.addEventListener('input', function(){ updatePaymentCalculation(false); });
     }
+
+    // Add search functionality for booking room search
+    const bookingRoomSearch = document.getElementById('booking_room_search');
+    if (bookingRoomSearch) {
+        bookingRoomSearch.addEventListener('input', function() {
+            console.log('Search input:', this.value);
+            filterBookedRooms(this.value);
+        });
+        // Close results when clicking outside
+        document.addEventListener('click', function(e) {
+            const resultsDiv = document.getElementById('bookingRoomResults');
+            if (e.target !== bookingRoomSearch && !resultsDiv.contains(e.target)) {
+                resultsDiv.style.display = 'none';
+            }
+        });
+    }
 });
 
-// Load booked rooms for the "Add New Bill" modal
+// Global variable to store all bookings
+let allBookings = [];
+
+// Load booked rooms for the "Add New Bill" modal and set up search
 function loadBookedRooms() {
-    const bookingRoomSelect = document.getElementById('booking_room');
-    
-    // Make AJAX call to fetch booked rooms
+    // Fetch booked rooms data
     fetch('api_get_booked_rooms.php')
         .then(response => response.json())
         .then(data => {
-            bookingRoomSelect.innerHTML = '<option value="">-- Select a booked room --</option>';
-            
             if (data.success && data.bookings.length > 0) {
-                data.bookings.forEach(booking => {
-                    const option = document.createElement('option');
-                    option.value = booking.booking_id;
-                    option.setAttribute('data-room-number', booking.room_number);
-                    option.setAttribute('data-customer-name', booking.tenant_name);
-                    option.setAttribute('data-tenant-phone', booking.tenant_phone || '');
-                    option.setAttribute('data-tenant-email', booking.tenant_email || '');
-                    // use raw ISO dates for calculations
-                    option.setAttribute('data-checkin-date', booking.raw_checkin || '');
-                    option.setAttribute('data-checkout-date', booking.raw_checkout || '');
-                    option.setAttribute('data-room-rate', booking.room_rate);
-                    option.setAttribute('data-room-id', booking.room_id);
-                    option.setAttribute('data-tenant-id', booking.tenant_id);
-                    // human readable label
-                    const displayCheckIn = booking.checkin_date ? booking.checkin_date : '';
-                    option.textContent = `${booking.room_number} - ${booking.tenant_name} ${displayCheckIn ? '(' + displayCheckIn + ')' : ''}`;
-                    bookingRoomSelect.appendChild(option);
-                });
+                allBookings = data.bookings;
+                console.log('Loaded bookings:', allBookings);
             } else {
-                const option = document.createElement('option');
-                option.textContent = '-- No booked rooms available --';
-                option.disabled = true;
-                bookingRoomSelect.appendChild(option);
+                allBookings = [];
+                console.warn('No booked rooms available');
+                const resultsDiv = document.getElementById('bookingRoomResults');
+                resultsDiv.innerHTML = '<div class="p-2 text-muted">No booked rooms available</div>';
+                resultsDiv.style.display = 'block';
             }
         })
         .catch(error => {
             console.error('Error loading booked rooms:', error);
-            bookingRoomSelect.innerHTML = '<option value="">-- Error loading rooms --</option>';
+            allBookings = [];
         });
 }
 
-// Load booking details when a room is selected
-function loadBookingDetails() {
-    const bookingRoomSelect = document.getElementById('booking_room');
-    const selectedOption = bookingRoomSelect.options[bookingRoomSelect.selectedIndex];
-    const bookingDetailsCard = document.getElementById('bookingDetailsCard');
-
-    if (!bookingRoomSelect.value) {
-        bookingDetailsCard.style.display = 'none';
-        document.getElementById('amount_paid_new').value = '';
-        document.getElementById('remaining_balance_new').value = '';
+// Handle search and filter bookings
+function filterBookedRooms(searchText) {
+    const resultsDiv = document.getElementById('bookingRoomResults');
+    
+    if (!searchText.trim()) {
+        resultsDiv.style.display = 'none';
         return;
     }
+    
+    const query = searchText.toLowerCase();
+    const filtered = allBookings.filter(booking => {
+        return (
+            booking.room_number.toLowerCase().includes(query) ||
+            booking.tenant_name.toLowerCase().includes(query) ||
+            (booking.tenant_phone && booking.tenant_phone.includes(query))
+        );
+    });
+    
+    if (filtered.length === 0) {
+        resultsDiv.innerHTML = '<div class="p-2 text-muted">No matching rooms found</div>';
+    } else {
+        resultsDiv.innerHTML = filtered.map(booking => `
+            <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectBooking(${booking.booking_id})">
+                <strong>${booking.room_number}</strong> - ${booking.tenant_name}
+                <br><small class="text-muted">${booking.checkin_date} to ${booking.checkout_date}</small>
+            </button>
+        `).join('');
+    }
+    
+    resultsDiv.style.display = 'block';
+}
 
-    // Get data from selected option (raw ISO dates expected)
-    const roomNumber = selectedOption.getAttribute('data-room-number') || '-';
-    const customerName = selectedOption.getAttribute('data-customer-name') || '-';
-    const checkinDate = selectedOption.getAttribute('data-checkin-date') || '';
-    const checkoutDate = selectedOption.getAttribute('data-checkout-date') || '';
-    const roomRate = parseFloat(selectedOption.getAttribute('data-room-rate')) || 0;
+// Select a booking from search results
+function selectBooking(bookingId) {
+    const booking = allBookings.find(b => b.booking_id === bookingId);
+    if (!booking) {
+        console.error('Booking not found for ID:', bookingId);
+        return;
+    }
+    
+    console.log('Selected booking:', booking);
+    
+    // Set the hidden input value
+    document.getElementById('booking_room').value = bookingId;
+    
+    // Update search input text
+    const searchInput = document.getElementById('booking_room_search');
+    searchInput.value = `${booking.room_number} - ${booking.tenant_name}`;
+    
+    // Hide results
+    document.getElementById('bookingRoomResults').style.display = 'none';
+    
+    // Load booking details
+    loadBookingDetailsFromBooking(booking);
+}
+
+// Load booking details when a room is selected
+function loadBookingDetailsFromBooking(booking) {
+    const bookingDetailsCard = document.getElementById('bookingDetailsCard');
+    const bookingRoom = document.getElementById('booking_room');
+    const roomRate = parseFloat(booking.room_rate) || 0;
+    const checkinDate = booking.raw_checkin || '';
+    const checkoutDate = booking.raw_checkout || '';
 
     // Format dates for display
-    let formattedCheckIn = checkinDate;
-    let formattedCheckOut = checkoutDate;
-    if (checkinDate) {
-        const d = new Date(checkinDate + 'T00:00:00');
-        formattedCheckIn = d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-    }
-    if (checkoutDate) {
-        const d = new Date(checkoutDate + 'T00:00:00');
-        formattedCheckOut = d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-    }
+    let formattedCheckIn = booking.checkin_date || 'Invalid Date';
+    let formattedCheckOut = booking.checkout_date || 'Invalid Date';
 
     // Update booking details card
-    document.getElementById('bookingRoomNumber').textContent = roomNumber;
-    document.getElementById('bookingCustomerName').textContent = customerName;
+    document.getElementById('bookingRoomNumber').textContent = booking.room_number || '-';
+    document.getElementById('bookingCustomerName').textContent = booking.tenant_name || '-';
     document.getElementById('bookingCheckIn').textContent = formattedCheckIn || '-';
     document.getElementById('bookingCheckOut').textContent = formattedCheckOut || '-';
     document.getElementById('bookingRoomRate').textContent = '₱' + roomRate.toFixed(2);
-    document.getElementById('bookingCustomerPhone').textContent = selectedOption.getAttribute('data-tenant-phone') || '-';
-    document.getElementById('bookingCustomerEmail').textContent = selectedOption.getAttribute('data-tenant-email') || '-';
+    document.getElementById('bookingCustomerPhone').textContent = booking.tenant_phone || '-';
+    document.getElementById('bookingCustomerEmail').textContent = booking.tenant_email || '-';
 
     // Compute nights and total
     const nights = computeNights(checkinDate, checkoutDate);
     const totalAmount = parseFloat((roomRate * nights).toFixed(2));
-    bookingRoomSelect.setAttribute('data-total-amount', totalAmount);
+    console.log(`Room Rate: ₱${roomRate}, Nights: ${nights}, Total: ₱${totalAmount}`);
+    
+    bookingRoom.setAttribute('data-total-amount', totalAmount);
+    bookingRoom.setAttribute('data-room-id', booking.room_id);
+    bookingRoom.setAttribute('data-tenant-id', booking.tenant_id);
 
     bookingDetailsCard.style.display = 'block';
 
@@ -1568,28 +1663,77 @@ function loadBookingDetails() {
 
 // Update payment calculation based on payment type and amount paid
 function updatePaymentCalculation(autoFill) {
-    const bookingRoomSelect = document.getElementById('booking_room');
-    const selectedOption = bookingRoomSelect.options[bookingRoomSelect.selectedIndex] || {};
-    const roomRate = parseFloat(selectedOption.getAttribute && selectedOption.getAttribute('data-room-rate')) || 0;
-
-    const paymentType = (document.querySelector('input[name="payment_type"]:checked') || {}).value || 'full';
+    console.log('---  START updatePaymentCalculation ---');
+    
+    const bookingRoom = document.getElementById('booking_room');
+    if (!bookingRoom) {
+        console.error('❌ ERROR: booking_room element not found!');
+        return;
+    }
+    
     const amountPaidInput = document.getElementById('amount_paid_new');
+    if (!amountPaidInput) {
+        console.error('❌ ERROR: amount_paid_new element not found!');
+        return;
+    }
+    
     const remainingBalanceInput = document.getElementById('remaining_balance_new');
-
-    const totalFromAttr = parseFloat(bookingRoomSelect.getAttribute('data-total-amount')) || 0;
-    const totalBillAmount = totalFromAttr || roomRate;
+    if (!remainingBalanceInput) {
+        console.error('❌ ERROR: remaining_balance_new element not found!');
+        return;
+    }
+    
+    const totalFromAttr = parseFloat(bookingRoom.getAttribute('data-total-amount')) || 0;
+    const paymentType = (document.querySelector('input[name="payment_type"]:checked') || {}).value || 'full';
+    const totalBillAmount = totalFromAttr || 0;
+    
+    console.log('autoFill:', autoFill);
+    console.log('paymentType:', paymentType);
+    console.log('totalBillAmount:', totalBillAmount);
 
     // If autoFill requested (e.g., on booking selection or payment type change), set typical amounts
     if (autoFill) {
         if (paymentType === 'downpayment') {
-            const down = parseFloat((totalBillAmount * 0.5).toFixed(2));
-            amountPaidInput.value = down.toFixed(2);
-            remainingBalanceInput.value = (totalBillAmount - down).toFixed(2);
+            // Calculate precisely: half for downpayment, other half as remaining
+            const downAmount = parseFloat((totalBillAmount / 2).toFixed(2));
+            const remainingAmount = parseFloat((totalBillAmount - downAmount).toFixed(2));
+            
+            console.log(`📊 Downpayment Mode:`);
+            console.log(`   - Down Payment: ₱${downAmount}`);
+            console.log(`   - Remaining: ₱${remainingAmount}`);
+            
+            amountPaidInput.value = downAmount.toFixed(2);
+            remainingBalanceInput.value = remainingAmount.toFixed(2);
+            
+            // Update summary
+            const summaryEl = document.getElementById('paymentSummary');
+            const summaryText = document.getElementById('paymentSummaryText');
+            if (summaryEl && summaryText) {
+                summaryText.innerHTML = `<i class="bi bi-percent"></i> <strong>50% Downpayment:</strong> ₱${downAmount} now, ₱${remainingAmount} on checkout`;
+                summaryEl.style.display = 'block';
+            }
+            
+            console.log(`✅ Values set - amount_paid: ${amountPaidInput.value}, remaining: ${remainingBalanceInput.value}`);
         } else {
-            // full
+            // full payment
+            console.log(`📊 Full Payment Mode:`);
+            console.log(`   - Full Amount: ₱${totalBillAmount}`);
+            console.log(`   - Remaining: ₱0.00`);
+            
             amountPaidInput.value = totalBillAmount.toFixed(2);
             remainingBalanceInput.value = '0.00';
+            
+            // Update summary
+            const summaryEl = document.getElementById('paymentSummary');
+            const summaryText = document.getElementById('paymentSummaryText');
+            if (summaryEl && summaryText) {
+                summaryText.innerHTML = `<i class="bi bi-check-circle"></i> <strong>Full Payment:</strong> ₱${totalBillAmount} paid in full`;
+                summaryEl.style.display = 'block';
+            }
+            
+            console.log(`✅ Values set - amount_paid: ${amountPaidInput.value}, remaining: ${remainingBalanceInput.value}`);
         }
+        console.log('--- END updatePaymentCalculation (autoFill=true) ---\n');
         return;
     }
 
@@ -1598,13 +1742,19 @@ function updatePaymentCalculation(autoFill) {
     const amountPaid = amountPaidRaw === '' ? 0 : parseFloat(amountPaidRaw) || 0;
     const remaining = Math.max(0, totalBillAmount - amountPaid);
     remainingBalanceInput.value = remaining.toFixed(2);
+    console.log(`📝 Manual edit recalc - amount_paid: ${amountPaid}, remaining: ${remaining.toFixed(2)}`);
+    console.log('--- END updatePaymentCalculation (autoFill=false) ---\n');
 }
 
 // compute nights between two ISO dates (checkout - checkin)
 function computeNights(checkin, checkout) {
     if (!checkin || !checkout) return 1;
-    const c = new Date(checkin + 'T00:00:00');
-    const o = new Date(checkout + 'T00:00:00');
+    // Extract only the date part (YYYY-MM-DD) if it contains datetime
+    const checkinDateOnly = checkin.split(' ')[0] || checkin;
+    const checkoutDateOnly = checkout.split(' ')[0] || checkout;
+    const c = new Date(checkinDateOnly + 'T00:00:00');
+    const o = new Date(checkoutDateOnly + 'T00:00:00');
+    if (isNaN(c.getTime()) || isNaN(o.getTime())) return 1;
     const diff = Math.ceil((o - c) / (1000 * 60 * 60 * 24));
     return diff > 0 ? diff : 1;
 }

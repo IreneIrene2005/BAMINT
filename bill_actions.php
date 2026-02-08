@@ -280,20 +280,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'recorded_by' => $_SESSION['admin_id']
                 ]);
 
-                // After successful payment, activate tenant and mark room occupied
-                $updateTenant = $conn->prepare("UPDATE tenants SET status = 'active', start_date = :start_date, room_id = :room_id WHERE id = :tenant_id");
-                $updateTenant->execute([
-                    'start_date' => $booking['checkin_date'] ?: date('Y-m-d'),
-                    'room_id' => $room_id,
-                    'tenant_id' => $tenant_id
-                ]);
-
-                $updateRoom = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id");
-                $updateRoom->execute(['room_id' => $room_id]);
-
-                // Update the room_request to approved
+                // After successful payment: only reserve the room and mark booking approved.
+                // Do NOT activate tenant or mark room occupied — admin must approve check-in in admin_checkin_checkout.php
                 $updateReq = $conn->prepare("UPDATE room_requests SET status = 'approved' WHERE id = :booking_id");
                 $updateReq->execute(['booking_id' => $booking_room]);
+                
+                // Reserve room as 'booked' (not yet occupied)
+                $updateRoom = $conn->prepare("UPDATE rooms SET status = 'booked' WHERE id = :room_id");
+                $updateRoom->execute(['room_id' => $room_id]);
+                
+                // Assign room to tenant but keep status 'inactive' until admin approves check-in
+                $updateTenant = $conn->prepare("UPDATE tenants SET room_id = :room_id, start_date = :start_date WHERE id = :tenant_id");
+                $updateTenant->execute([
+                    'room_id' => $room_id,
+                    'start_date' => $booking['checkin_date'] ?: date('Y-m-d'),
+                    'tenant_id' => $tenant_id
+                ]);
             }
             
             $conn->commit();
@@ -385,6 +387,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 
                 // Notify all admins about the new payment
                 notifyAdminsNewPayment($conn, $id, $bill['tenant_id'], $new_payment);
+            }
+            
+            // If bill is now fully paid, mark the room as occupied (was booked)
+            if ($status === 'paid') {
+                $bill_detail_sql = "SELECT room_id FROM bills WHERE id = :id";
+                $bill_detail_stmt = $conn->prepare($bill_detail_sql);
+                $bill_detail_stmt->execute(['id' => $id]);
+                $bill_detail = $bill_detail_stmt->fetch(PDO::FETCH_ASSOC);
+                if ($bill_detail && $bill_detail['room_id']) {
+                    $room_update = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id AND status = 'booked'");
+                    $room_update->execute(['room_id' => $bill_detail['room_id']]);
+                }
             }
             
             $conn->commit();
@@ -597,6 +611,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } catch (Exception $e) {
             $conn->rollBack();
             $_SESSION['error'] = "Error processing checkout: " . $e->getMessage();
+        }
+        
+        header("location: bills.php");
+        exit;
+    } elseif ($action === 'cancel_walk_in') {
+        // Cancel walk-in customer registration
+        $tenant_id = intval($_POST['tenant_id'] ?? $_GET['tenant_id'] ?? 0);
+        
+        if (!$tenant_id) {
+            $_SESSION['error'] = 'Invalid customer ID.';
+            header("location: bills.php");
+            exit;
+        }
+        
+        try {
+            $conn->beginTransaction();
+            
+            // Get tenant info
+            $tenant_stmt = $conn->prepare("SELECT id, name, room_id FROM tenants WHERE id = :id");
+            $tenant_stmt->execute(['id' => $tenant_id]);
+            $tenant = $tenant_stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$tenant) {
+                throw new Exception('Customer not found');
+            }
+            
+            // Delete any bills associated with this tenant
+            $delete_bills = $conn->prepare("DELETE FROM bills WHERE tenant_id = :tenant_id");
+            $delete_bills->execute(['tenant_id' => $tenant_id]);
+            
+            // Delete any payment transactions associated with this tenant's bills
+            $delete_payments = $conn->prepare("
+                DELETE pt FROM payment_transactions pt
+                INNER JOIN bills b ON pt.bill_id = b.id
+                WHERE b.tenant_id = :tenant_id
+            ");
+            $delete_payments->execute(['tenant_id' => $tenant_id]);
+            
+            // Delete any room requests
+            $delete_requests = $conn->prepare("DELETE FROM room_requests WHERE tenant_id = :tenant_id");
+            $delete_requests->execute(['tenant_id' => $tenant_id]);
+            
+            // Delete the tenant
+            $delete_tenant = $conn->prepare("DELETE FROM tenants WHERE id = :id");
+            $delete_tenant->execute(['id' => $tenant_id]);
+            
+            $conn->commit();
+            $_SESSION['message'] = "Walk-in customer registration cancelled successfully.";
+        } catch (Exception $e) {
+            $conn->rollBack();
+            $_SESSION['error'] = "Error cancelling walk-in customer: " . $e->getMessage();
         }
         
         header("location: bills.php");

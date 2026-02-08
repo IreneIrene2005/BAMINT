@@ -337,10 +337,6 @@ ALTER TABLE `tenants` ADD COLUMN `created_at` timestamp DEFAULT CURRENT_TIMESTAM
 ALTER TABLE `tenants` ADD COLUMN `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
 ALTER TABLE `tenants` ADD COLUMN `checkin_time` DATETIME NULL DEFAULT NULL;
 ALTER TABLE `tenants` ADD COLUMN `checkout_time` DATETIME NULL DEFAULT NULL;
-ALTER TABLE `tenants` ADD COLUMN `checkin_approved` TINYINT DEFAULT 0;
-ALTER TABLE `tenants` ADD COLUMN `checkin_rejected` TINYINT DEFAULT 0;
-ALTER TABLE `tenants` ADD COLUMN `checkout_approved` TINYINT DEFAULT 0;
-ALTER TABLE `tenants` ADD COLUMN `checkout_rejected` TINYINT DEFAULT 0;
 
 -- Create co_tenants table for roommates
 CREATE TABLE IF NOT EXISTS `co_tenants` (
@@ -473,3 +469,36 @@ CREATE TABLE IF NOT EXISTS `booking_cancellations` (
   INDEX `idx_cancelled_at` (`cancelled_at`),
   INDEX `idx_refund_approved` (`refund_approved`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Archive table for booking cancellations
+CREATE TABLE IF NOT EXISTS booking_cancellations_archive (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    original_cancellation_id INT,
+    tenant_id INT NOT NULL,
+    room_id INT NOT NULL,
+    booking_id INT,
+    checkin_date DATE,
+    checkout_date DATE,
+    payment_amount DECIMAL(10, 2),
+    reason TEXT,
+    refund_approved TINYINT(1) DEFAULT 0,
+    refund_amount DECIMAL(10, 2),
+    refund_notes TEXT,
+    refund_date DATETIME,
+    admin_notes TEXT,
+    archived_by INT,
+    archived_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    archived_reason VARCHAR(255),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+    FOREIGN KEY (room_id) REFERENCES rooms(id),
+    FOREIGN KEY (archived_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add indexes for better query performance
+CREATE INDEX IF NOT EXISTS idx_archived_tenant ON booking_cancellations_archive(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_archived_at_booking ON booking_cancellations_archive(archived_at);
+CREATE INDEX IF NOT EXISTS idx_original_cancellation ON booking_cancellations_archive(original_cancellation_id);
+
+-- Add role column to admins table for user management
+ALTER TABLE `admins` ADD COLUMN IF NOT EXISTS `role` VARCHAR(50) DEFAULT 'admin';
+ALTER TABLE `admins` ADD COLUMN IF NOT EXISTS `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP;

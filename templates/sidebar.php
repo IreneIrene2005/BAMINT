@@ -85,6 +85,12 @@
                     Tenant Management
                 </a>
             </li>
+            <li class="nav-item">
+                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_user_management.php') ? 'active' : ''; ?>" href="admin_user_management.php">
+                    <i class="bi bi-shield-lock"></i>
+                    User Management
+                </a>
+            </li>
             <!-- Removed: Overdue Reminders, Payment verification, Record Cash Payment, secondary Reports & Analytics, and Check-in/Check-out per admin UI update -->
             <li class="nav-item border-top mt-3 pt-3">
                 <a class="nav-link text-danger" href="logout.php">

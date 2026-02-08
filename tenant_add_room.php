@@ -231,11 +231,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $conn->beginTransaction();
                     try {
                         // Insert room request with occupancy info
-                        $checkin_date = isset($_POST['checkin_date']) ? $_POST['checkin_date'] : null;
-                        $checkout_date = isset($_POST['checkout_date']) ? $_POST['checkout_date'] : null;
+                        $checkin_datetime = isset($_POST['checkin_date']) ? $_POST['checkin_date'] : null;
+                        $checkout_datetime = isset($_POST['checkout_date']) ? $_POST['checkout_date'] : null;
+                        
+                        // Parse the datetime strings to separate date and time
+                        // Format from flatpickr: "Y-m-d h:i K" (e.g., "2026-02-09 02:30 PM")
+                        $checkin_date = null;
+                        $checkin_time = null;
+                        if ($checkin_datetime) {
+                            $parts = explode(' ', trim($checkin_datetime));
+                            $checkin_date = $parts[0]; // Y-m-d
+                            if (count($parts) >= 3) {
+                                // Combine time and AM/PM, then convert to 24-hour format
+                                $time_str = $parts[1] . ' ' . $parts[2]; // "02:30 PM"
+                                $checkin_time = date('H:i', strtotime($time_str)); // "14:30"
+                            }
+                        }
+                        
+                        $checkout_date = null;
+                        $checkout_time = null;
+                        if ($checkout_datetime) {
+                            $parts = explode(' ', trim($checkout_datetime));
+                            $checkout_date = $parts[0]; // Y-m-d
+                            if (count($parts) >= 3) {
+                                // Combine time and AM/PM, then convert to 24-hour format
+                                $time_str = $parts[1] . ' ' . $parts[2]; // "11:00 AM"
+                                $checkout_time = date('H:i', strtotime($time_str)); // "11:00"
+                            }
+                        }
+                        
                         $stmt = $conn->prepare("
-                            INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status, checkin_date, checkout_date)
-                            VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending_payment', :checkin_date, :checkout_date)
+                            INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status, checkin_date, checkout_date, checkin_time, checkout_time)
+                            VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending_payment', :checkin_date, :checkout_date, :checkin_time, :checkout_time)
                         ");
                         $stmt->execute([
                             'tenant_id' => $tenant_id,
@@ -247,9 +274,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                             'tenant_info_address' => $tenant_info_address,
                             'notes' => $notes,
                             'checkin_date' => $checkin_date,
-                            'checkout_date' => $checkout_date
+                            'checkout_date' => $checkout_date,
+                            'checkin_time' => $checkin_time,
+                            'checkout_time' => $checkout_time
                         ]);
                         $roomRequestId = $conn->lastInsertId();
+
+                        // Notify all admins about the new room booking
+                        try {
+                            $room_info = $conn->prepare("SELECT room_number, room_type FROM rooms WHERE id = :room_id");
+                            $room_info->execute(['room_id' => $room_id]);
+                            $room_data = $room_info->fetch(PDO::FETCH_ASSOC);
+                            $room_number = $room_data['room_number'] ?? 'N/A';
+                            
+                            $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
+                            foreach ($admins as $admin) {
+                                createNotification(
+                                    $conn,
+                                    'admin',
+                                    $admin['id'],
+                                    'room_booked',
+                                    'New Room Booking',
+                                    'Customer ' . htmlspecialchars($tenant_info_name) . ' booked Room ' . $room_number . ' from ' . ($checkin_date ?? 'TBD') . ' to ' . ($checkout_date ?? 'TBD') . '.',
+                                    $roomRequestId,
+                                    'room_request',
+                                    'admin_bookings.php'
+                                );
+                            }
+                        } catch (Exception $e) {
+                            error_log("Error creating booking notification: " . $e->getMessage());
+                        }
 
                         // Immediately create advance payment bill for this request
                         $rate_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
@@ -281,6 +335,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
                         // Save co-tenants if this is a shared/bedspace room with multiple occupants
                         if ($tenant_count > 1) {
+                            // Ensure room_id is valid to avoid foreign key errors
+                            $valid_room_id = null;
+                            if (!empty($room_id)) {
+                                try {
+                                    $check_room = $conn->prepare("SELECT id FROM rooms WHERE id = :id LIMIT 1");
+                                    $check_room->execute(['id' => $room_id]);
+                                    $found = $check_room->fetch(PDO::FETCH_ASSOC);
+                                    if ($found) $valid_room_id = $room_id;
+                                } catch (Exception $e) {
+                                    // fallback: treat as null
+                                    $valid_room_id = null;
+                                }
+                            }
+
                             for ($i = 1; $i < $tenant_count; $i++) {
                                 $co_name = isset($_POST['co_tenant_name_' . $i]) ? trim($_POST['co_tenant_name_' . $i]) : '';
                                 $co_email = isset($_POST['co_tenant_email_' . $i]) ? trim($_POST['co_tenant_email_' . $i]) : '';
@@ -288,13 +356,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                 $co_address = isset($_POST['co_tenant_address_' . $i]) ? trim($_POST['co_tenant_address_' . $i]) : '';
 
                                 if (!empty($co_name)) {
-                                    $co_stmt = $conn->prepare("
-                                        INSERT INTO co_tenants (primary_tenant_id, room_id, name, email, phone, address) 
-                                        VALUES (:primary_tenant_id, :room_id, :name, :email, :phone, :address)
-                                    ");
+                                    $co_stmt = $conn->prepare(
+                                        "INSERT INTO co_tenants (primary_tenant_id, room_id, name, email, phone, address) \n                                        VALUES (:primary_tenant_id, :room_id, :name, :email, :phone, :address)"
+                                    );
                                     $co_stmt->execute([
                                         'primary_tenant_id' => $tenant_id,
-                                        'room_id' => $room_id,
+                                        'room_id' => $valid_room_id, // will be NULL if invalid
                                         'name' => $co_name,
                                         'email' => $co_email,
                                         'phone' => $co_phone,
@@ -729,7 +796,7 @@ try {
                                         elseif ($room_type === 'double') $max_occupancy = 2;
                                         elseif ($room_type === 'family') $max_occupancy = 4;
                                         ?>
-                                        <?php if ($actual_status === 'available'): ?>
+                                        <?php if ($actual_status === 'available' && intval($total_occupancy) === 0): ?>
                                         <div class="room-card <?php echo htmlspecialchars(strtolower($actual_status)); ?>" data-rate="<?php echo htmlspecialchars($room['rate']); ?>" data-room-type="<?php echo htmlspecialchars($room['room_type']); ?>">
                                             <!-- Room Image -->
                                             <img src="<?php echo !empty($room['image_url']) ? htmlspecialchars($room['image_url']) : 'public/img/room-placeholder.png'; ?>" alt="Room <?php echo htmlspecialchars($room['room_number']); ?>">
@@ -990,38 +1057,12 @@ try {
                                 <label class="form-label">Check-in Date <span class="text-danger">*</span></label>
                                 <input type="text" class="form-control modalCheckinDate checkin-date" id="modalCheckinDate" name="checkin_date" required>
                             </div>
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label">Check-in Time <span class="text-danger">*</span></label>
-                                <div class="input-group">
-                                    <input type="number" class="form-control" id="modalCheckinHour" name="checkin_hour" min="0" max="23" placeholder="HH" step="1" required style="max-width: 70px;">
-                                    <span class="input-group-text">:</span>
-                                    <input type="number" class="form-control" id="modalCheckinMinute" name="checkin_minute" min="0" max="59" placeholder="MM" step="1" required style="max-width: 70px;">
-                                    <select class="form-select" id="modalCheckinAmpm" name="checkin_ampm" required style="max-width: 80px;">
-                                        <option value="AM">AM</option>
-                                        <option value="PM">PM</option>
-                                    </select>
-                                </div>
-                                <small class="text-muted">e.g., 02:30 PM</small>
-                            </div>
                         </div>
                         
                         <div class="row">
                             <div class="col-md-6 mb-3">
                                 <label class="form-label">Check-out Date <span class="text-danger">*</span></label>
                                 <input type="text" class="form-control modalCheckoutDate checkout-date" id="modalCheckoutDate" name="checkout_date" required>
-                            </div>
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label">Check-out Time <span class="text-danger">*</span></label>
-                                <div class="input-group">
-                                    <input type="number" class="form-control" id="modalCheckoutHour" name="checkout_hour" min="0" max="23" placeholder="HH" step="1" required style="max-width: 70px;">
-                                    <span class="input-group-text">:</span>
-                                    <input type="number" class="form-control" id="modalCheckoutMinute" name="checkout_minute" min="0" max="59" placeholder="MM" step="1" required style="max-width: 70px;">
-                                    <select class="form-select" id="modalCheckoutAmpm" name="checkout_ampm" required style="max-width: 80px;">
-                                        <option value="AM">AM</option>
-                                        <option value="PM" selected>PM</option>
-                                    </select>
-                                </div>
-                                <small class="text-muted">e.g., 11:00 AM</small>
                             </div>
                         </div>
                         

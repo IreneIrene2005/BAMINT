@@ -130,6 +130,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 }
 
+// Auto-approve requests when FULL payment is received (both advance payments and walk-in)
+try {
+    // Find all pending_payment requests with FULL payment (amount paid >= amount due)
+    $auto_approve_sql = "
+        SELECT DISTINCT rr.id, rr.tenant_id, rr.room_id
+        FROM room_requests rr
+        JOIN bills b ON rr.tenant_id = b.tenant_id AND rr.room_id = b.room_id
+        JOIN payment_transactions pt ON b.id = pt.bill_id
+        WHERE rr.status = 'pending_payment'
+        GROUP BY rr.id
+        HAVING SUM(pt.payment_amount) >= b.amount_due
+    ";
+    
+    $auto_approve_stmt = $conn->prepare($auto_approve_sql);
+    $auto_approve_stmt->execute();
+    $auto_approve_requests = $auto_approve_stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    foreach ($auto_approve_requests as $req) {
+        try {
+            $conn->beginTransaction();
+            
+            // Update room_requests status to 'approved'
+            $update_request = $conn->prepare("UPDATE room_requests SET status = 'approved' WHERE id = :id");
+            $update_request->execute(['id' => $req['id']]);
+            
+            // Set room status to 'occupied'
+            $update_room = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id");
+            $update_room->execute(['room_id' => $req['room_id']]);
+            
+            $conn->commit();
+            
+            // Send notification
+            notifyTenantRoomRequestStatus($conn, $req['tenant_id'], $req['id'], 'approved');
+        } catch (Exception $e) {
+            if ($conn->inTransaction()) {
+                $conn->rollBack();
+            }
+        }
+    }
+} catch (Exception $e) {
+    // Silently skip auto-approval errors
+}
+
 
 // Fetch all room requests with related data
 try {
@@ -146,6 +189,8 @@ try {
             rr.notes,
             rr.checkin_date,
             rr.checkout_date,
+            rr.checkin_time,
+            rr.checkout_time,
             COALESCE(rr.tenant_count, 1) as tenant_count,
             COALESCE(rr.tenant_info_name, '') as tenant_info_name,
             COALESCE(rr.tenant_info_email, '') as tenant_info_email,
@@ -437,7 +482,11 @@ try {
                             <i class="bi bi-info-circle"></i> No room requests found.
                         </div>
                     <?php else: ?>
-                        <?php foreach ($requests as $request): ?>
+                        <?php
+                        // Initialize payment cache for all requests
+                        $request_payment_cache = [];
+                        foreach ($requests as $request): 
+                        ?>
                             <div class="request-row">
                                 <div class="row align-items-center">
                                     <!-- Request Info -->
@@ -493,8 +542,28 @@ try {
                                                 <strong>Occupants:</strong> <?php echo intval($request['tenant_count']); ?> person(s)
                                             </div>
                                             <div class="mt-1 text-muted small">
-                                                <strong>Check-in:</strong> <?php echo !empty($request['checkin_date']) ? date('M d, Y \a\t h:i A', strtotime($request['checkin_date'])) : '<span class="text-danger">Missing</span>'; ?>
-                                                <strong>Check-out:</strong> <?php echo !empty($request['checkout_date']) ? date('M d, Y \a\t h:i A', strtotime($request['checkout_date'])) : '<span class="text-danger">Missing</span>'; ?>
+                                                <strong>Check-in:</strong> <?php
+                                                    if (!empty($request['checkin_date'])) {
+                                                        $ci = date('M d, Y', strtotime($request['checkin_date']));
+                                                        if (!empty($request['checkin_time']) && $request['checkin_time'] !== '00:00:00') {
+                                                            $ci .= ' at ' . date('g:i A', strtotime($request['checkin_time']));
+                                                        }
+                                                        echo $ci;
+                                                    } else {
+                                                        echo '<span class="text-danger">Missing</span>';
+                                                    }
+                                                ?>
+                                                <strong>Check-out:</strong> <?php
+                                                    if (!empty($request['checkout_date'])) {
+                                                        $co = date('M d, Y', strtotime($request['checkout_date']));
+                                                        if (!empty($request['checkout_time']) && $request['checkout_time'] !== '00:00:00') {
+                                                            $co .= ' at ' . date('g:i A', strtotime($request['checkout_time']));
+                                                        }
+                                                        echo $co;
+                                                    } else {
+                                                        echo '<span class="text-danger">Missing</span>';
+                                                    }
+                                                ?>
                                             </div>
                                             <?php if ($request['notes']): ?>
                                                 <div class="mt-2">
@@ -506,47 +575,52 @@ try {
                                                 Requested: <?php echo date('M d, Y \a\t H:i A', strtotime($request['request_date'])); ?>
                                             </div>
                                             <?php
-                                            // Show payment type (downpayment or full payment)
-                                            $advance_bill = null;
-                                            $advance_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' ORDER BY id DESC LIMIT 1");
-                                            $advance_stmt->execute(['tenant_id' => $request['tenant_id'], 'room_id' => $request['room_id']]);
-                                            $advance_bill = $advance_stmt->fetch(PDO::FETCH_ASSOC);
-                                            $paid_amount = 0;
-                                            $payment_type_label = '';
-                                            if ($advance_bill) {
-                                                $pay_stmt = $conn->prepare("SELECT SUM(payment_amount) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                                                $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
-                                                $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
-                                                $paid_amount = $pay && $pay['paid'] ? floatval($pay['paid']) : 0;
-                                                if ($paid_amount >= floatval($advance_bill['amount_due'])) {
-                                                    $payment_type_label = 'Full Payment';
-                                                } elseif ($paid_amount > 0) {
-                                                    $payment_type_label = 'Downpayment';
+                                            // Calculate payment status once for reuse - works for both advance payments and walk-in
+                                            $cache_key = $request['tenant_id'] . '_' . $request['room_id'];
+                                            
+                                            if (!isset($request_payment_cache[$cache_key])) {
+                                                $advance_bill = null;
+                                                $advance_stmt = $conn->prepare("SELECT id, amount_due FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                                $advance_stmt->execute(['tenant_id' => $request['tenant_id'], 'room_id' => $request['room_id']]);
+                                                $advance_bill = $advance_stmt->fetch(PDO::FETCH_ASSOC);
+                                                
+                                                $paid_amount = 0;
+                                                $amount_due = 0;
+                                                $payment_type = 'no_payment'; // no_payment, downpayment, full_payment
+                                                
+                                                if ($advance_bill) {
+                                                    $amount_due = floatval($advance_bill['amount_due']);
+                                                    $pay_stmt = $conn->prepare("SELECT SUM(payment_amount) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_amount > 0");
+                                                    $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
+                                                    $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
+                                                    $paid_amount = $pay && $pay['paid'] ? floatval($pay['paid']) : 0;
+                                                    
+                                                    // Determine payment type with proper comparison
+                                                    if ($paid_amount >= $amount_due && $amount_due > 0) {
+                                                        $payment_type = 'full_payment';
+                                                    } elseif ($paid_amount > 0) {
+                                                        $payment_type = 'downpayment';
+                                                    }
                                                 }
+                                                
+                                                $request_payment_cache[$cache_key] = [
+                                                    'payment_type' => $payment_type,
+                                                    'paid_amount' => $paid_amount,
+                                                    'amount_due' => $amount_due,
+                                                    'bill_id' => $advance_bill['id'] ?? null
+                                                ];
                                             }
-                                            if ($payment_type_label) {
-                                                echo '<div class="mt-1 text-muted small"><strong>Payment Type:</strong> ' . $payment_type_label . '</div>';
-                                            }
-                                            ?>
-                                            <?php
-                                            // Show payment status for this request (downpayment/full payment paid, etc)
-                                            $advance_bill = null;
-                                            $advance_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' ORDER BY id DESC LIMIT 1");
-                                            $advance_stmt->execute(['tenant_id' => $request['tenant_id'], 'room_id' => $request['room_id']]);
-                                            $advance_bill = $advance_stmt->fetch(PDO::FETCH_ASSOC);
-                                            $paid_amount = 0;
-                                            if ($advance_bill) {
-                                                $pay_stmt = $conn->prepare("SELECT SUM(payment_amount) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                                                $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
-                                                $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
-                                                $paid_amount = $pay && $pay['paid'] ? floatval($pay['paid']) : 0;
-                                                if ($paid_amount >= floatval($advance_bill['amount_due'])) {
-                                                    // No badge after payment, handled by status below
-                                                } elseif ($paid_amount > 0) {
-                                                    // No badge after payment, handled by status below
-                                                } else {
-                                                    echo '<div class="mt-2"><span class="badge bg-warning text-dark">No Payment Yet</span></div>';
-                                                }
+                                            
+                                            $payment_info = $request_payment_cache[$cache_key];
+                                            $payment_type = $payment_info['payment_type'];
+                                            $paid_amount = $payment_info['paid_amount'];
+                                            $amount_due = $payment_info['amount_due'];
+                                            
+                                            // Display payment type badge
+                                            if ($payment_type === 'full_payment') {
+                                                echo '<div class="mt-1 text-muted small"><strong>Payment Type:</strong> <span class="badge bg-success">Full Payment</span></div>';
+                                            } elseif ($payment_type === 'downpayment') {
+                                                echo '<div class="mt-1 text-muted small"><strong>Payment Type:</strong> <span class="badge bg-info">Downpayment</span></div>';
                                             } else {
                                                 echo '<div class="mt-2"><span class="badge bg-warning text-dark">No Payment Yet</span></div>';
                                             }
@@ -567,21 +641,11 @@ try {
                                                             'approved' => 'Approved',
                                                             'rejected' => 'Rejected'
                                                         ];
-                                                        // Only show 'Awaiting Payment' if no payment yet
+                                                        // Show status based on cached payment info
                                                         if ($request['status'] === 'pending_payment') {
-                                                            $advance_bill = null;
-                                                            $advance_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' ORDER BY id DESC LIMIT 1");
-                                                            $advance_stmt->execute(['tenant_id' => $request['tenant_id'], 'room_id' => $request['room_id']]);
-                                                            $advance_bill = $advance_stmt->fetch(PDO::FETCH_ASSOC);
-                                                            $paid_amount = 0;
-                                                            if ($advance_bill) {
-                                                                $pay_stmt = $conn->prepare("SELECT SUM(payment_amount) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                                                                $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
-                                                                $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
-                                                                $paid_amount = $pay && $pay['paid'] ? floatval($pay['paid']) : 0;
-                                                            }
-                                                            if ($paid_amount > 0) {
-                                                                // No status, handled by admin action
+                                                            $cache_key = $request['tenant_id'] . '_' . $request['room_id'];
+                                                            if (isset($request_payment_cache[$cache_key]) && $request_payment_cache[$cache_key]['payment_type'] !== 'no_payment') {
+                                                                // Payment made, no status shown (admin action buttons will show)
                                                                 echo '';
                                                             } else {
                                                                 echo $status_labels[$request['status']];
@@ -601,17 +665,9 @@ try {
                                             // Show approve/reject buttons if payment is made and status is still pending_payment
                                             $show_approve = false;
                                             if ($request['status'] === 'pending_payment') {
-                                                $advance_bill = null;
-                                                $advance_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' ORDER BY id DESC LIMIT 1");
-                                                $advance_stmt->execute(['tenant_id' => $request['tenant_id'], 'room_id' => $request['room_id']]);
-                                                $advance_bill = $advance_stmt->fetch(PDO::FETCH_ASSOC);
-                                                if ($advance_bill) {
-                                                    $pay_stmt = $conn->prepare("SELECT SUM(payment_amount) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                                                    $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
-                                                    $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
-                                                    if ($pay && $pay['paid'] > 0) {
-                                                        $show_approve = true;
-                                                    }
+                                                $cache_key = $request['tenant_id'] . '_' . $request['room_id'];
+                                                if (isset($request_payment_cache[$cache_key]) && $request_payment_cache[$cache_key]['payment_type'] !== 'no_payment') {
+                                                    $show_approve = true;
                                                 }
                                             }
                                             if ($show_approve) {
@@ -633,23 +689,44 @@ try {
                                                                 <i class="bi bi-x-circle"></i> Reject
                                                             </button>
                                                         </form>
-                                                           <form method="POST" style="display: inline; margin-left:4px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
-                                                                <input type="hidden" name="action" value="delete_request">
-                                                                <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
-                                                                <button type="submit" class="btn btn-sm btn-outline-danger">
-                                                                    <i class="bi bi-trash"></i> Delete
-                                                                </button>
-                                                            </form>
+                                                        <form method="POST" style="display: inline; margin-left:4px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
+                                                            <input type="hidden" name="action" value="delete_request">
+                                                            <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
+                                                            <button type="submit" class="btn btn-sm btn-outline-danger">
+                                                                <i class="bi bi-trash"></i> Delete
+                                                            </button>
+                                                        </form>
                                                     </div>
                                                     <?php
                                                 }
                                             } elseif ($request['status'] === 'approved') {
                                                 echo '<span class="badge bg-success">Approved</span>';
+                                                if (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') {
+                                                    ?>
+                                                    <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
+                                                        <input type="hidden" name="action" value="delete_request">
+                                                        <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
+                                                        <button type="submit" class="btn btn-sm btn-outline-danger">
+                                                            <i class="bi bi-trash"></i> Delete
+                                                        </button>
+                                                    </form>
+                                                    <?php
+                                                }
                                             } elseif ($request['status'] === 'rejected') {
                                                 echo '<span class="badge bg-danger">Rejected</span>';
+                                                if (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') {
+                                                    ?>
+                                                    <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
+                                                        <input type="hidden" name="action" value="delete_request">
+                                                        <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
+                                                        <button type="submit" class="btn btn-sm btn-outline-danger">
+                                                            <i class="bi bi-trash"></i> Delete
+                                                        </button>
+                                                    </form>
+                                                    <?php
+                                                }
                                             }
-                                            // End PHP block before modal markup
-                                        ?>
+                                            ?>
                                         <!-- Modal for Details -->
                                         <div class="modal fade" id="detailsModal<?php echo $request['id']; ?>" tabindex="-1" aria-labelledby="detailsModalLabel<?php echo $request['id']; ?>" aria-hidden="true">
                                             <div class="modal-dialog modal-lg">
@@ -660,23 +737,20 @@ try {
                                                                                                     </div>
                                                                                                     <div class="modal-body">
                                                                                                         <?php
-                                                                                                        // Payment details for modal
-                                                                                                        $advance_stmt = $conn->prepare("SELECT * FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' ORDER BY id DESC LIMIT 1");
-                                                                                                        $advance_stmt->execute(['tenant_id' => $request['tenant_id'], 'room_id' => $request['room_id']]);
-                                                                                                        $advance_bill = $advance_stmt->fetch(PDO::FETCH_ASSOC);
-                                                                                                        $paid_amount = 0;
-                                                                                                        $amount_due = 0;
-                                                                                                        if ($advance_bill) {
-                                                                                                            $amount_due = floatval($advance_bill['amount_due']);
-                                                                                                            $pay_stmt = $conn->prepare("SELECT SUM(payment_amount) as paid FROM payment_transactions WHERE bill_id = :bill_id");
-                                                                                                            $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
-                                                                                                            $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
-                                                                                                            $paid_amount = $pay && $pay['paid'] ? floatval($pay['paid']) : 0;
-                                                                                                        }
+                                                                                                        // Use cached payment info for modal
+                                                                                                        $cache_key = $request['tenant_id'] . '_' . $request['room_id'];
+                                                                                                        $payment_info = isset($request_payment_cache[$cache_key]) ? $request_payment_cache[$cache_key] : [
+                                                                                                            'payment_type' => 'no_payment',
+                                                                                                            'paid_amount' => 0,
+                                                                                                            'amount_due' => 0,
+                                                                                                            'bill_id' => null
+                                                                                                        ];
+                                                                                                        $paid_amount = $payment_info['paid_amount'];
+                                                                                                        $amount_due = $payment_info['amount_due'];
                                                                                                         $payment_status = 'No Payment Yet';
-                                                                                                        if ($paid_amount >= $amount_due && $amount_due > 0) {
+                                                                                                        if ($payment_info['payment_type'] === 'full_payment') {
                                                                                                             $payment_status = 'Full Payment Paid';
-                                                                                                        } elseif ($paid_amount > 0) {
+                                                                                                        } elseif ($payment_info['payment_type'] === 'downpayment') {
                                                                                                             $payment_status = 'Downpayment Paid';
                                                                                                         }
                                                                                                         $remaining = max(0, $amount_due - $paid_amount);
@@ -699,7 +773,17 @@ try {
                                                                                                             <dt class="col-sm-3">Occupants</dt>
                                                                                                             <dd class="col-sm-9"><?php echo intval($request['tenant_count']); ?> person(s)</dd>
                                                                                                             <dt class="col-sm-3">Check-in</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo !empty($request['checkin_date']) ? date('M d, Y \a\t h:i A', strtotime($request['checkin_date'])) : '<span class="text-danger">Missing</span>'; ?></dd>
+                                                                                                            <dd class="col-sm-9"><?php
+                                                                                                                if (!empty($request['checkin_date'])) {
+                                                                                                                    $ci = date('M d, Y', strtotime($request['checkin_date']));
+                                                                                                                    if (!empty($request['checkin_time']) && $request['checkin_time'] !== '00:00:00') {
+                                                                                                                        $ci .= ' at ' . date('g:i A', strtotime($request['checkin_time']));
+                                                                                                                    }
+                                                                                                                    echo $ci;
+                                                                                                                } else {
+                                                                                                                    echo '<span class="text-danger">Missing</span>';
+                                                                                                                }
+                                                                                                            ?></dd>
                                                                                                             <dt class="col-sm-3">Check-out</dt>
                                                                                                             <dd class="col-sm-9"><?php echo !empty($request['checkout_date']) ? date('M d, Y \a\t h:i A', strtotime($request['checkout_date'])) : '<span class="text-danger">Missing</span>'; ?></dd>
                                                                                                             <dt class="col-sm-3">Notes</dt>
@@ -811,5 +895,11 @@ try {
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// Auto-refresh page every 10 seconds to show real-time payment updates
+setInterval(function() {
+    location.reload();
+}, 10000);
+</script>
 </body>
 </html>

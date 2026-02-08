@@ -26,23 +26,61 @@ $available_bookings = [];
 $checked_in_guests = []; // For checkout
 
 try {
-    // Get all guests with bookings
-    $guest_stmt = $conn->query("SELECT DISTINCT t.id, t.name FROM tenants t LEFT JOIN room_requests rr ON t.id = rr.tenant_id WHERE rr.id IS NOT NULL ORDER BY t.name ASC");
+    // Get all active guests with bookings
+    $guest_stmt = $conn->query("SELECT DISTINCT t.id, t.name FROM tenants t LEFT JOIN room_requests rr ON t.id = rr.tenant_id WHERE rr.id IS NOT NULL AND t.status = 'active' ORDER BY t.name ASC");
     $available_guests = $guest_stmt->fetchAll(PDO::FETCH_ASSOC);
     
     // Get all occupied rooms
     $room_stmt = $conn->query("SELECT DISTINCT r.id, r.room_number FROM rooms r WHERE r.status IN ('available', 'occupied') ORDER BY r.room_number ASC");
     $available_rooms = $room_stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Get all active bookings
-    $booking_stmt = $conn->query("SELECT DISTINCT rr.id, CONCAT('Ref #', rr.id, ' - ', t.name) as booking_desc FROM room_requests rr LEFT JOIN tenants t ON rr.tenant_id = t.id ORDER BY rr.id DESC");
+    // Get all active bookings (only from active customers)
+    $booking_stmt = $conn->query("SELECT DISTINCT rr.id, CONCAT('Ref #', rr.id, ' - ', t.name) as booking_desc FROM room_requests rr LEFT JOIN tenants t ON rr.tenant_id = t.id WHERE t.status = 'active' ORDER BY rr.id DESC");
     $available_bookings = $booking_stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Get currently checked-in guests
-    $checked_in_stmt = $conn->query("SELECT DISTINCT t.id, t.name FROM tenants t WHERE t.checkin_time IS NOT NULL AND t.checkin_time != '0000-00-00 00:00:00' AND (t.checkout_time IS NULL OR t.checkout_time = '0000-00-00 00:00:00') ORDER BY t.name ASC");
+    // Get currently checked-in active guests
+    $checked_in_stmt = $conn->query("SELECT DISTINCT t.id, t.name FROM tenants t WHERE t.status = 'active' AND t.checkin_time IS NOT NULL AND t.checkin_time != '0000-00-00 00:00:00' AND (t.checkout_time IS NULL OR t.checkout_time = '0000-00-00 00:00:00') ORDER BY t.name ASC");
     $checked_in_guests = $checked_in_stmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     // Silently fail on dropdown population
+}
+
+// Fetch lists for check-in/check-out UI
+$ready_list = [];
+$checkedin_list = [];
+try {
+    // Guests ready to check-in: ONLY active (non-inactive) tenants with room assigned, payment verified, not yet checked in
+    $ready_stmt = $conn->prepare("SELECT t.id, t.name, t.room_id, r.room_number, rr.checkin_date, rr.checkin_time
+                                  FROM tenants t
+                                  INNER JOIN rooms r ON r.id = t.room_id
+                                  LEFT JOIN room_requests rr ON rr.tenant_id = t.id
+                                  WHERE t.status != 'inactive'
+                                  AND (t.checkin_time IS NULL OR t.checkin_time = '0000-00-00 00:00:00')
+                                  AND EXISTS (
+                                    SELECT 1 FROM bills b 
+                                    INNER JOIN payment_transactions pt ON b.id = pt.bill_id 
+                                    WHERE b.tenant_id = t.id 
+                                    AND b.room_id = t.room_id 
+                                    AND pt.payment_status IN ('verified', 'approved')
+                                  )
+                                  ORDER BY rr.checkin_date ASC");
+    $ready_stmt->execute();
+    $ready_list = $ready_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // Currently checked-in guests for checkout - ONLY active accounts
+    $checkedin_stmt = $conn->prepare("SELECT t.id, t.name, t.room_id, r.room_number, t.checkin_time
+                                      FROM tenants t
+                                      INNER JOIN rooms r ON r.id = t.room_id
+                                      WHERE t.status != 'inactive'
+                                      AND t.checkin_time IS NOT NULL
+                                      AND t.checkin_time != '0000-00-00 00:00:00'
+                                      AND (t.checkout_time IS NULL OR t.checkout_time = '0000-00-00 00:00:00')
+                                      ORDER BY t.checkin_time DESC");
+    $checkedin_stmt->execute();
+    $checkedin_list = $checkedin_stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $ready_list = [];
+    $checkedin_list = [];
 }
 
 // Handle guest search
@@ -56,15 +94,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['search_guest'])) {
     } else {
         try {
             // First get basic booking info
-            $sql = "SELECT t.id, t.name, t.email, t.phone, t.room_id, t.checkin_time, t.checkout_time,
-                           r.room_number, r.status as room_status,
-                           rr.id as booking_id, rr.checkin_date, rr.checkout_date,
-                           b.id as bill_id, b.amount_paid, b.amount_due, b.status as bill_status
+                 $sql = "SELECT t.id, t.name, t.email, t.phone, t.room_id, t.checkin_time, t.checkout_time,
+                          r.room_number, r.status as room_status,
+                          rr.id as booking_id, rr.checkin_date, rr.checkout_date, rr.checkin_time AS rr_checkin_time, rr.checkout_time AS rr_checkout_time,
+                          b.id as bill_id, b.amount_paid, b.amount_due, b.status as bill_status
                     FROM tenants t
                     LEFT JOIN rooms r ON t.room_id = r.id
                     LEFT JOIN room_requests rr ON t.id = rr.tenant_id
                     LEFT JOIN bills b ON t.id = b.tenant_id
-                    WHERE ";
+                    WHERE t.status = 'active' AND (";
             
             if ($search_type === 'name') {
                 $sql .= "t.id = :query";
@@ -77,7 +115,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['search_guest'])) {
                 $query_param = intval($search_query);
             }
             
-            $sql .= " ORDER BY rr.checkin_date DESC, b.id DESC LIMIT 1";
+            $sql .= ") ORDER BY rr.checkin_date DESC, b.id DESC LIMIT 1";
             
             $stmt = $conn->prepare($sql);
             $stmt->execute(['query' => $query_param]);
@@ -95,17 +133,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['search_guest'])) {
             
             if ($result) {
                 $guest_info = $result;
-                
-                // Gather booking details and verification issues
+
+                // Format scheduled check-in/check-out using room_request date + time when available
+                $formatScheduled = function($date, $time) {
+                    if (empty($date)) return 'N/A';
+                    $fmt = date('M d, Y', strtotime($date));
+                    if (!empty($time) && $time !== '00:00:00') {
+                        $fmt .= ' ' . date('g:i A', strtotime($time));
+                    }
+                    return $fmt;
+                };
+
                 $booking_details = [
                     'guest_name' => $result['name'],
                     'email' => $result['email'],
                     'phone' => $result['phone'],
                     'room_number' => $result['room_number'] ?? 'Not Assigned',
                     'room_status' => $result['room_status'] ?? 'N/A',
-                    'checkin_scheduled' => $result['checkin_date'] ? date('M d, Y H:i', strtotime($result['checkin_date'])) : 'N/A',
-                    'checkout_scheduled' => $result['checkout_date'] ? date('M d, Y H:i', strtotime($result['checkout_date'])) : 'N/A',
-                    'checkin_actual' => $result['checkin_time'] && $result['checkin_time'] !== '0000-00-00 00:00:00' ? date('M d, Y H:i', strtotime($result['checkin_time'])) : null,
+                    'checkin_scheduled' => $formatScheduled($result['checkin_date'] ?? null, $result['rr_checkin_time'] ?? $result['checkin_time'] ?? null),
+                    'checkout_scheduled' => $formatScheduled($result['checkout_date'] ?? null, $result['rr_checkout_time'] ?? $result['checkout_time'] ?? null),
+                    'checkin_actual' => ($result['checkin_time'] && $result['checkin_time'] !== '0000-00-00 00:00:00') ? date('M d, Y g:i A', strtotime($result['checkin_time'])) : null,
                     'payment_status' => $result['payment_status'] ?? 'No payment found',
                     'amount_paid' => $result['amount_paid'] ?? 0,
                     'amount_due' => $result['amount_due'] ?? 0
@@ -140,7 +187,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['search_guest'])) {
                 
                 // Check if already checked in
                 if ($result['checkin_time'] && $result['checkin_time'] !== '0000-00-00 00:00:00') {
-                    $verification_issues[] = ['type' => 'warning', 'msg' => 'Guest already checked in at ' . date('M d, Y H:i', strtotime($result['checkin_time']))];
+                    $verification_issues[] = ['type' => 'warning', 'msg' => 'Guest already checked in at ' . date('M d, Y g:i A', strtotime($result['checkin_time']))];
                 }
             } else {
                 $message = 'Guest not found. Please verify the selection.';
@@ -158,13 +205,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['approve_checkin'])) {
     $tenant_id = intval($_POST['tenant_id'] ?? 0);
     if ($tenant_id > 0) {
         try {
+            $conn->beginTransaction();
+
+            // Set actual check-in time
             $stmt = $conn->prepare("UPDATE tenants SET checkin_time = NOW() WHERE id = :id");
             $stmt->execute(['id' => $tenant_id]);
+
+            // Activate tenant and set start_date if not set
+            $activate = $conn->prepare("UPDATE tenants SET status = 'active', start_date = COALESCE(start_date, DATE(NOW())) WHERE id = :id");
+            $activate->execute(['id' => $tenant_id]);
+
+            // If tenant has a room assigned, mark that room as occupied
+            $rstmt = $conn->prepare("SELECT room_id FROM tenants WHERE id = :id");
+            $rstmt->execute(['id' => $tenant_id]);
+            $rrow = $rstmt->fetch(PDO::FETCH_ASSOC);
+            if ($rrow && $rrow['room_id']) {
+                $occ = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :id");
+                $occ->execute(['id' => $rrow['room_id']]);
+            }
+
+            $conn->commit();
+
             $message = '✓ Guest checked in successfully!';
             $message_type = 'success';
             $guest_info = null;
             $booking_details = null;
         } catch (Exception $e) {
+            if ($conn->inTransaction()) $conn->rollBack();
             $message = 'Error: ' . $e->getMessage();
             $message_type = 'danger';
         }
@@ -181,10 +248,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['search_checkout'])) {
         $message_type = 'warning';
     } else {
         try {
-            $sql = "SELECT t.id, t.name, t.email, t.phone, t.room_id, t.checkin_time, t.checkout_time,
-                           r.room_number, r.status as room_status,
-                           rr.id as booking_id, rr.checkin_date, rr.checkout_date,
-                           b.id as bill_id, b.amount_paid, b.amount_due, b.status as bill_status
+                 $sql = "SELECT t.id, t.name, t.email, t.phone, t.room_id, t.checkin_time, t.checkout_time,
+                          r.room_number, r.status as room_status,
+                          rr.id as booking_id, rr.checkin_date, rr.checkout_date, rr.checkin_time AS rr_checkin_time, rr.checkout_time AS rr_checkout_time,
+                          b.id as bill_id, b.amount_paid, b.amount_due, b.status as bill_status
                     FROM tenants t
                     LEFT JOIN rooms r ON t.room_id = r.id
                     LEFT JOIN room_requests rr ON t.id = rr.tenant_id
@@ -209,15 +276,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['search_checkout'])) {
             if ($result) {
                 $checkout_info = $result;
                 
+                // helper to format scheduled date+time
+                $formatScheduled = function($date, $time) {
+                    if (empty($date)) return 'N/A';
+                    $fmt = date('M d, Y', strtotime($date));
+                    if (!empty($time) && $time !== '00:00:00') {
+                        $fmt .= ' ' . date('g:i A', strtotime($time));
+                    }
+                    return $fmt;
+                };
+
                 $checkout_details = [
                     'guest_name' => $result['name'],
                     'email' => $result['email'],
                     'phone' => $result['phone'],
                     'room_number' => $result['room_number'] ?? 'N/A',
                     'room_status' => $result['room_status'] ?? 'N/A',
-                    'checkin_date' => $result['checkin_date'] ? date('M d, Y H:i', strtotime($result['checkin_date'])) : 'N/A',
-                    'checkout_date' => $result['checkout_date'] ? date('M d, Y H:i', strtotime($result['checkout_date'])) : 'N/A',
-                    'checkin_actual' => $result['checkin_time'] && $result['checkin_time'] !== '0000-00-00 00:00:00' ? date('M d, Y H:i', strtotime($result['checkin_time'])) : 'N/A',
+                    'checkin_date' => $formatScheduled($result['checkin_date'] ?? null, $result['rr_checkin_time'] ?? $result['checkin_time'] ?? null),
+                    'checkout_date' => $formatScheduled($result['checkout_date'] ?? null, $result['rr_checkout_time'] ?? $result['checkout_time'] ?? null),
+                    'checkin_actual' => ($result['checkin_time'] && $result['checkin_time'] !== '0000-00-00 00:00:00') ? date('M d, Y g:i A', strtotime($result['checkin_time'])) : 'N/A',
                     'amount_due' => $result['amount_due'] ?? 0,
                     'amount_paid' => $result['amount_paid'] ?? 0
                 ];
@@ -261,21 +338,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['approve_checkout'])) 
 try {
     $ready = $conn->query("SELECT COUNT(DISTINCT t.id) FROM tenants t 
                            JOIN payment_transactions pt ON t.id = pt.tenant_id 
-                           WHERE pt.payment_status IN ('verified','approved', 'partially_paid') 
+                           WHERE t.status = 'active'
+                           AND pt.payment_status IN ('verified','approved', 'partially_paid') 
                            AND (t.checkin_time IS NULL OR t.checkin_time = '0000-00-00 00:00:00')")->fetchColumn();
     
     $checkedin = $conn->query("SELECT COUNT(DISTINCT t.id) FROM tenants t 
-                              WHERE t.checkin_time IS NOT NULL 
+                              WHERE t.status = 'active'
+                              AND t.checkin_time IS NOT NULL 
                               AND t.checkin_time != '0000-00-00 00:00:00'
                               AND (t.checkout_time IS NULL OR t.checkout_time = '0000-00-00 00:00:00')")->fetchColumn();
     
     $checkedout = $conn->query("SELECT COUNT(DISTINCT t.id) FROM tenants t 
-                               WHERE t.checkout_time IS NOT NULL 
+                               WHERE t.status = 'active'
+                               AND t.checkout_time IS NOT NULL 
                                AND t.checkout_time != '0000-00-00 00:00:00'")->fetchColumn();
 } catch (Exception $e) {
     $ready = 0;
     $checkedin = 0;
     $checkedout = 0;
+}
+
+// Fetch lists for check-in/check-out UI
+$ready_list = [];
+$checkedin_list = [];
+try {
+    // Guests ready to check-in: have room assigned, payment verified, but not yet checked in
+    $ready_stmt = $conn->prepare("SELECT DISTINCT t.id, t.name, t.room_id, r.room_number, rr.checkin_date
+                                  FROM tenants t
+                                  LEFT JOIN rooms r ON r.id = t.room_id
+                                  LEFT JOIN room_requests rr ON rr.tenant_id = t.id
+                                  WHERE t.room_id IS NOT NULL
+                                  AND (t.checkin_time IS NULL OR t.checkin_time = '0000-00-00 00:00:00')
+                                  AND EXISTS (SELECT 1 FROM payment_transactions pt JOIN bills b ON pt.bill_id = b.id WHERE b.tenant_id = t.id AND pt.payment_status IN ('verified', 'approved'))
+                                  ORDER BY rr.checkin_date ASC");
+    $ready_stmt->execute();
+    $ready_list = $ready_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // Currently checked-in guests for checkout
+    $checkedin_stmt = $conn->prepare("SELECT t.id, t.name, t.room_id, r.room_number, t.checkin_time
+                                      FROM tenants t
+                                      LEFT JOIN rooms r ON r.id = t.room_id
+                                      WHERE t.status = 'active'
+                                      AND t.checkin_time IS NOT NULL
+                                      AND t.checkin_time != '0000-00-00 00:00:00'
+                                      AND (t.checkout_time IS NULL OR t.checkout_time = '0000-00-00 00:00:00')
+                                      ORDER BY t.checkin_time DESC");
+    $checkedin_stmt->execute();
+    $checkedin_list = $checkedin_stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $ready_list = [];
+    $checkedin_list = [];
 }
 ?>
 <!DOCTYPE html>
@@ -476,6 +588,67 @@ try {
             });
             </script>
 
+            <!-- READY TO CHECK-IN LIST -->
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-success text-white">
+                    <span class="fw-semibold"><i class="bi bi-list-check"></i> Guests Ready to Check-in (<?php echo count($ready_list ?? []); ?>)</span>
+                </div>
+                <div class="card-body">
+                    <?php if (!empty($ready_list)): ?>
+                        <div class="table-responsive">
+                        <table class="table table-hover table-sm">
+                            <thead>
+                                <tr>
+                                    <th>Guest</th>
+                                    <th>Room</th>
+                                    <th>Scheduled Check-in</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($ready_list as $r): ?>
+                                    <?php
+                                        // Double-check status is active (not inactive)
+                                        $verify_stmt = $conn->prepare("SELECT status FROM tenants WHERE id = :id");
+                                        $verify_stmt->execute(['id' => $r['id']]);
+                                        $tenant_status = $verify_stmt->fetchColumn();
+                                        if ($tenant_status === 'inactive') {
+                                            continue; // Skip this row
+                                        }
+                                    ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($r['name']); ?></td>
+                                        <td><?php echo htmlspecialchars($r['room_number'] ?? 'N/A'); ?></td>
+                                        <td>
+                                            <?php
+                                                if ($r['checkin_date']) {
+                                                    $ci_fmt = date('M d, Y', strtotime($r['checkin_date']));
+                                                    if (!empty($r['checkin_time']) && $r['checkin_time'] !== '00:00:00') {
+                                                        $ci_fmt .= ' ' . date('g:i A', strtotime($r['checkin_time']));
+                                                    }
+                                                    echo $ci_fmt;
+                                                } else {
+                                                    echo 'N/A';
+                                                }
+                                            ?>
+                                        </td>
+                                        <td class="text-end">
+                                            <form method="POST" class="d-inline">
+                                                <input type="hidden" name="tenant_id" value="<?php echo intval($r['id']); ?>">
+                                                <button type="submit" name="approve_checkin" class="btn btn-sm btn-primary">Approve & Check In</button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                        </div>
+                    <?php else: ?>
+                        <div class="text-muted">No guests ready for check-in.</div>
+                    <?php endif; ?>
+                </div>
+            </div>
+
             <?php if ($guest_info && $booking_details): ?>
             <!-- STEP 2: BOOKING VERIFICATION -->
             <div class="card shadow-sm border-0 mb-4">
@@ -532,83 +705,7 @@ try {
                         </div>
                     </div>
 
-                    <!-- Verification Checklist -->
-                    <hr>
-                    <h6 class="fw-semibold mb-3">Verification Checklist</h6>
-                    
-                    <div class="verification-checks">
-                        <!-- Room Assignment Check -->
-                        <div class="alert <?php echo $guest_info['room_id'] ? 'alert-success' : 'alert-danger'; ?> mb-2">
-                            <div class="d-flex gap-2">
-                                <i class="bi <?php echo $guest_info['room_id'] ? 'bi-check-circle-fill' : 'bi-x-circle-fill'; ?>" style="font-size: 1.2rem;"></i>
-                                <div>
-                                    <strong>Room Assigned:</strong> <?php echo $guest_info['room_id'] ? htmlspecialchars($booking_details['room_number']) . ' (' . htmlspecialchars($booking_details['room_status']) . ')' : 'NO'; ?>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Check-in Date Check -->
-                        <div class="alert <?php 
-                            $checkin_today = false;
-                            if ($guest_info['checkin_date']) {
-                                $checkin_obj = new DateTime($guest_info['checkin_date']);
-                                $today_obj = new DateTime();
-                                $checkin_today = ($checkin_obj->format('Y-m-d') === $today_obj->format('Y-m-d'));
-                            }
-                            echo $checkin_today ? 'alert-success' : 'alert-warning'; 
-                        ?> mb-2">
-                            <div class="d-flex gap-2">
-                                <i class="bi <?php echo $checkin_today ? 'bi-check-circle-fill' : 'bi-exclamation-circle-fill'; ?>" style="font-size: 1.2rem;"></i>
-                                <div>
-                                    <strong>Check-in Date:</strong> <?php echo $checkin_today ? 'Today ✓' : 'Not today'; ?>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Payment Status Check -->
-                        <div class="alert <?php 
-                            $payment_ok = in_array($guest_info['payment_status'], ['verified', 'approved', 'partially_paid']);
-                            echo $payment_ok ? 'alert-success' : 'alert-danger'; 
-                        ?> mb-2">
-                            <div class="d-flex gap-2">
-                                <i class="bi <?php echo $payment_ok ? 'bi-check-circle-fill' : 'bi-x-circle-fill'; ?>" style="font-size: 1.2rem;"></i>
-                                <div>
-                                    <strong>Payment Status:</strong> 
-                                    <?php 
-                                        if ($guest_info['payment_status'] === 'verified' || $guest_info['payment_status'] === 'approved') {
-                                            echo 'Fully Paid ✓ (₱' . number_format($guest_info['amount_paid'], 2) . ')';
-                                        } elseif ($guest_info['payment_status'] === 'partially_paid') {
-                                            echo 'Downpayment: ₱' . number_format($guest_info['amount_paid'], 2) . ' / ₱' . number_format($guest_info['amount_due'], 2);
-                                        } else {
-                                            echo htmlspecialchars($guest_info['payment_status']);
-                                        }
-                                    ?>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Already Checked In Check -->
-                        <?php if ($guest_info['checkin_time'] && $guest_info['checkin_time'] !== '0000-00-00 00:00:00'): ?>
-                        <div class="alert alert-info mb-2">
-                            <div class="d-flex gap-2">
-                                <i class="bi bi-info-circle-fill" style="font-size: 1.2rem;"></i>
-                                <div>
-                                    <strong>Guest Status:</strong> Already checked in on <?php echo date('M d, Y \a\t H:i', strtotime($guest_info['checkin_time'])); ?>
-                                </div>
-                            </div>
-                        </div>
-                        <?php endif; ?>
-
-                        <!-- Additional Issues -->
-                        <?php foreach ($verification_issues as $issue): ?>
-                        <div class="alert alert-<?php echo $issue['type']; ?> mb-2">
-                            <div class="d-flex gap-2">
-                                <i class="bi bi-<?php echo $issue['type'] === 'error' ? 'x-circle-fill' : ($issue['type'] === 'warning' ? 'exclamation-circle-fill' : 'info-circle-fill'); ?>" style="font-size: 1.2rem;"></i>
-                                <div><?php echo htmlspecialchars($issue['msg']); ?></div>
-                            </div>
-                        </div>
-                        <?php endforeach; ?>
-                    </div>
+                    <!-- Verification Checklist removed per request -->
                 </div>
             </div>
 
@@ -639,6 +736,55 @@ try {
 
             <!-- CHECK-OUT TAB -->
             <div id="checkout-content" style="display: <?php echo $active_tab === 'checkout' ? 'block' : 'none'; ?>;">
+
+            <!-- CURRENTLY CHECKED-IN LIST -->
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-warning text-dark">
+                    <span class="fw-semibold"><i class="bi bi-person-fill-door"></i> Currently Checked-in (<?php echo count($checkedin_list ?? []); ?>)</span>
+                </div>
+                <div class="card-body">
+                    <?php if (!empty($checkedin_list)): ?>
+                        <div class="table-responsive">
+                        <table class="table table-hover table-sm">
+                            <thead>
+                                <tr>
+                                    <th>Guest</th>
+                                    <th>Room</th>
+                                    <th>Checked-in At</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($checkedin_list as $c): ?>
+                                    <?php
+                                        // Double-check status is active (not inactive)
+                                        $verify_stmt = $conn->prepare("SELECT status FROM tenants WHERE id = :id");
+                                        $verify_stmt->execute(['id' => $c['id']]);
+                                        $tenant_status = $verify_stmt->fetchColumn();
+                                        if ($tenant_status === 'inactive') {
+                                            continue; // Skip this row
+                                        }
+                                    ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($c['name']); ?></td>
+                                        <td><?php echo htmlspecialchars($c['room_number'] ?? 'N/A'); ?></td>
+                                        <td><?php echo $c['checkin_time'] ? date('M d, Y g:i A', strtotime($c['checkin_time'])) : 'N/A'; ?></td>
+                                        <td class="text-end">
+                                            <form method="POST" class="d-inline">
+                                                <input type="hidden" name="tenant_id" value="<?php echo intval($c['id']); ?>">
+                                                <button type="submit" name="approve_checkout" class="btn btn-sm btn-danger">Approve & Checkout</button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                        </div>
+                    <?php else: ?>
+                        <div class="text-muted">No guests currently checked in.</div>
+                    <?php endif; ?>
+                </div>
+            </div>
 
             <!-- STEP 1: CHECKOUT GUEST SEARCH -->
             <div class="card shadow-sm border-0 mb-4">

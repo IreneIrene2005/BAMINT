@@ -12,6 +12,7 @@ if (isset($_SESSION["loggedin"]) && $_SESSION["loggedin"] === true) {
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $username = $email = $name = $password = $confirm_password = $phone = "";
 $username_err = $email_err = $name_err = $password_err = $confirm_password_err = $phone_err = "";
@@ -194,6 +195,26 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                         $param_password = password_hash($password, PASSWORD_DEFAULT);
                         
                         if ($stmt->execute()) {
+                            // Notify all admins about new customer account
+                            try {
+                                $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
+                                foreach ($admins as $admin) {
+                                    createNotification(
+                                        $conn,
+                                        'admin',
+                                        $admin['id'],
+                                        'new_customer_account',
+                                        'New Customer Account',
+                                        'New customer ' . htmlspecialchars($name) . ' (' . htmlspecialchars($email) . ') has registered and is awaiting payment processing.',
+                                        $tenant_id,
+                                        'tenant',
+                                        'admin_tenants.php'
+                                    );
+                                }
+                            } catch (Exception $e) {
+                                error_log("Error creating notification: " . $e->getMessage());
+                            }
+                            
                             header("location: index.php?role=tenant&success=Customer account created successfully. Please login.");
                             exit();
                         } else {

@@ -32,13 +32,14 @@ $filter_room = isset($_GET['room']) ? $_GET['room'] : '';
 $view = isset($_GET['view']) ? $_GET['view'] : 'active';
 
 // Build the SQL query with search and filter
-// Show all active tenants (with or without payments)
+// Show only active tenants who have made at least one payment
 $sql = "SELECT DISTINCT tenants.*, COALESCE(rooms.room_number, (
             SELECT r2.room_number FROM bills b 
             JOIN rooms r2 ON b.room_id = r2.id 
             WHERE b.tenant_id = tenants.id ORDER BY b.id DESC LIMIT 1
         )) as room_number FROM tenants 
         LEFT JOIN rooms ON tenants.room_id = rooms.id
+        INNER JOIN payment_transactions ON tenants.id = payment_transactions.tenant_id
         WHERE tenants.status != 'inactive'";
 
 if ($search) {
@@ -141,6 +142,7 @@ $available_rooms = $conn->query($sql_available_rooms);
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link rel="stylesheet" href="public/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
 </head>
 <body>
 
@@ -236,8 +238,21 @@ $available_rooms = $conn->query($sql_available_rooms);
                     </thead>
                     <tbody>
                         <?php while($row = $tenants->fetch(PDO::FETCH_ASSOC)) : ?>
+                        <?php
+                            // Count roommates for this tenant
+                            $roommate_stmt = $conn->prepare("SELECT COUNT(*) as roommate_count FROM co_tenants WHERE primary_tenant_id = :tenant_id");
+                            $roommate_stmt->execute(['tenant_id' => $row['id']]);
+                            $roommate_count = intval($roommate_stmt->fetchColumn());
+                        ?>
                         <tr>
-                            <td><?php echo htmlspecialchars($row['name']); ?></td>
+                            <td>
+                                <?php echo htmlspecialchars($row['name']); ?>
+                                <?php if ($roommate_count > 0): ?>
+                                    <span class="badge bg-info ms-2" title="Click View Details to see roommates">
+                                        <i class="bi bi-plus-circle"></i> <?php echo $roommate_count; ?> roommate<?php echo $roommate_count > 1 ? 's' : ''; ?>
+                                    </span>
+                                <?php endif; ?>
+                            </td>
                             <td><?php echo htmlspecialchars($row['email']); ?></td>
                             <td><?php echo htmlspecialchars($row['phone']); ?></td>
                             <td>
@@ -256,14 +271,27 @@ $available_rooms = $conn->query($sql_available_rooms);
                             <td>
                                 <?php
                                 // Show stay duration as check-in to check-out when available
-                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date, checkin_time, checkout_time, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                                 $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
                                 $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
                                 if ($dates && in_array($dates['status'], ['approved', 'occupied'])) {
                                     if (!empty($dates['checkin_date']) && !empty($dates['checkout_date'])) {
-                                        echo htmlspecialchars(date('M d, Y', strtotime($dates['checkin_date'])) . ' - ' . date('M d, Y', strtotime($dates['checkout_date'])));
+                                        $ci_fmt = date('M d, Y', strtotime($dates['checkin_date']));
+                                        $co_fmt = date('M d, Y', strtotime($dates['checkout_date']));
+                                        // Add times if present
+                                        if (!empty($dates['checkin_time']) && $dates['checkin_time'] !== '00:00:00') {
+                                            $ci_fmt .= ' ' . date('g:i A', strtotime($dates['checkin_time']));
+                                        }
+                                        if (!empty($dates['checkout_time']) && $dates['checkout_time'] !== '00:00:00') {
+                                            $co_fmt .= ' ' . date('g:i A', strtotime($dates['checkout_time']));
+                                        }
+                                        echo htmlspecialchars($ci_fmt . ' - ' . $co_fmt);
                                     } elseif (!empty($dates['checkin_date'])) {
-                                        echo htmlspecialchars(date('M d, Y', strtotime($dates['checkin_date'])) . ' - Present');
+                                        $ci_fmt = date('M d, Y', strtotime($dates['checkin_date']));
+                                        if (!empty($dates['checkin_time']) && $dates['checkin_time'] !== '00:00:00') {
+                                            $ci_fmt .= ' ' . date('g:i A', strtotime($dates['checkin_time']));
+                                        }
+                                        echo htmlspecialchars($ci_fmt . ' - Present');
                                     } else {
                                         echo '-';
                                     }
@@ -278,6 +306,7 @@ $available_rooms = $conn->query($sql_available_rooms);
                                 </span>
                             </td>
                             <td>
+                                <button type="button" class="btn btn-sm btn-outline-info" title="View Details" data-bs-toggle="modal" data-bs-target="#viewDetailsModal" onclick="loadCustomerDetails(<?php echo $row['id']; ?>)"><i class="bi bi-eye"></i></button>
                                 <a href="tenant_actions.php?action=edit&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-primary" title="Edit"><i class="bi bi-pencil-square"></i></a>
                                 <?php if ($view === 'archive'): ?>
                                     <a href="tenant_actions.php?action=restore&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Restore" onclick="return confirm('Restore this customer from archive?');"><i class="bi bi-arrow-counterclockwise"></i></a>
@@ -301,6 +330,25 @@ $available_rooms = $conn->query($sql_available_rooms);
             </div>
         </main>
     </div>
+</div>
+
+<!-- View Customer Details Modal -->
+<div class="modal fade" id="viewDetailsModal" tabindex="-1" aria-labelledby="viewDetailsModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="viewDetailsModalLabel">Customer Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="detailsContent">
+        <div class="text-center">
+          <div class="spinner-border" role="status">
+            <span class="visually-hidden">Loading...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Add Tenant Modal -->
@@ -360,6 +408,16 @@ $available_rooms = $conn->query($sql_available_rooms);
                         <label for="checkin_date" class="form-label">Check-in Date</label>
                         <input type="date" class="form-control" id="checkin_date" name="checkin_date">
                     </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="checkin_time" class="form-label">Check-in Time</label>
+                            <input type="text" class="form-control flat-time" id="checkin_time" name="checkin_time" value="<?php echo date('H:i'); ?>" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="checkout_time" class="form-label">Check-out Time</label>
+                            <input type="text" class="form-control flat-time" id="checkout_time" name="checkout_time" value="<?php echo date('H:i', strtotime('+1 hour')); ?>">
+                        </div>
+                    </div>
                     <div class="mb-3">
                         <label for="checkout_date" class="form-label">Check-out Date</label>
                         <input type="date" class="form-control" id="checkout_date" name="checkout_date">
@@ -372,7 +430,145 @@ $available_rooms = $conn->query($sql_available_rooms);
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
 <script>
+document.addEventListener('DOMContentLoaded', function(){
+    const checkinEl = document.getElementById('checkin_time');
+    const checkoutEl = document.getElementById('checkout_time');
+    
+    flatpickr('.flat-time', {
+        enableTime: true,
+        noCalendar: true,
+        dateFormat: 'h:i K',
+        time_24hr: false,
+        minuteIncrement: 1,
+        onChange: function(selectedDates, dateStr, instance) {
+            // If this is the check-in field, auto-update checkout
+            if (instance.element === checkinEl && checkoutEl) {
+                checkoutEl.value = dateStr;
+                // Trigger flatpickr update on checkout field
+                if (checkoutEl._flatpickr) {
+                    checkoutEl._flatpickr.setDate(dateStr, true);
+                }
+            }
+        }
+    });
+});
+</script>
+<script>
+// Load customer details via AJAX
+function loadCustomerDetails(tenantId) {
+    const detailsContent = document.getElementById('detailsContent');
+    detailsContent.innerHTML = '<div class="text-center"><div class="spinner-border" role="status"><span class="visually-hidden">Loading...</span></div></div>';
+    
+    fetch('get_customer_details.php?id=' + encodeURIComponent(tenantId))
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                let html = `
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <strong>Name:</strong><br>
+                            ${escapeHtml(data.customer.name)}
+                        </div>
+                        <div class="col-md-6">
+                            <strong>Email:</strong><br>
+                            ${escapeHtml(data.customer.email)}
+                        </div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <strong>Phone:</strong><br>
+                            ${escapeHtml(data.customer.phone)}
+                        </div>
+                        <div class="col-md-6">
+                            <strong>Status:</strong><br>
+                            <span class="badge ${data.customer.status === 'active' ? 'bg-success' : 'bg-danger'}">${data.customer.status.toUpperCase()}</span>
+                        </div>
+                    </div>
+                `;
+                
+                if (data.room_info) {
+                    html += `
+                        <hr>
+                        <h6>Room Information</h6>
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <strong>Room Number:</strong><br>
+                                ${escapeHtml(data.room_info.room_number)}
+                            </div>
+                            <div class="col-md-6">
+                                <strong>Room Type:</strong><br>
+                                ${escapeHtml(data.room_info.room_type)}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                if (data.stay_info) {
+                    html += `
+                        <hr>
+                        <h6>Check-In/Check-Out Information</h6>
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <strong>Check-in Date:</strong><br>
+                                ${data.stay_info.checkin_date ? new Date(data.stay_info.checkin_date).toLocaleDateString('en-US', {year: 'numeric', month: 'short', day: 'numeric'}) : 'N/A'}
+                            </div>
+                            <div class="col-md-6">
+                                <strong>Check-in Time:</strong><br>
+                                ${data.stay_info.checkin_time ? data.stay_info.checkin_time : 'N/A'}
+                            </div>
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <strong>Check-out Date:</strong><br>
+                                ${data.stay_info.checkout_date ? new Date(data.stay_info.checkout_date).toLocaleDateString('en-US', {year: 'numeric', month: 'short', day: 'numeric'}) : 'N/A'}
+                            </div>
+                            <div class="col-md-6">
+                                <strong>Check-out Time:</strong><br>
+                                ${data.stay_info.checkout_time ? data.stay_info.checkout_time : 'N/A'}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                if (data.co_tenants && data.co_tenants.length > 0) {
+                    html += `
+                        <hr>
+                        <h6><i class="bi bi-people"></i> Roommates (${data.co_tenants.length})</h6>
+                        <div class="list-group">
+                    `;
+                    data.co_tenants.forEach(tenant => {
+                        html += `
+                            <div class="list-group-item">
+                                <strong>${escapeHtml(tenant.name)}</strong><br>
+                                ${tenant.email ? '<small>Email: ' + escapeHtml(tenant.email) + '</small><br>' : ''}
+                                ${tenant.phone ? '<small>Phone: ' + escapeHtml(tenant.phone) + '</small>' : ''}
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                }
+                
+                detailsContent.innerHTML = html;
+            } else {
+                detailsContent.innerHTML = '<div class="alert alert-danger">Error loading customer details: ' + escapeHtml(data.message) + '</div>';
+            }
+        })
+        .catch(error => {
+            detailsContent.innerHTML = '<div class="alert alert-danger">Error loading customer details: ' + escapeHtml(error.message) + '</div>';
+        });
+}
+
+function escapeHtml(unsafe) {
+    return unsafe
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
 // Client-side filtering, roommate fields and validation for Add Walk-in Customer modal
 document.addEventListener('DOMContentLoaded', function(){
     const roomTypeEl = document.getElementById('room_type');

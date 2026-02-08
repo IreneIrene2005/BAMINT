@@ -76,6 +76,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 'status' => $bill_status
             ]);
 
+            // If bill is now fully paid, mark the room as occupied (was booked)
+            if ($bill_status === 'paid') {
+                $room_id = $bill['room_id'] ?? null;
+                if ($room_id) {
+                    $room_update = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id AND status = 'booked'");
+                    $room_update->execute(['room_id' => $room_id]);
+                }
+            }
+
             $message = "✓ Cash payment recorded successfully!";
             $message_type = "success";
 

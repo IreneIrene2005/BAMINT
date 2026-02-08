@@ -7,6 +7,23 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
+
+// Ensure tenants table has checkin_time and checkout_time columns (migration)
+try {
+    $col_check = $conn->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tenants' AND TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'checkin_time'");
+    $col_check->execute();
+    if ($col_check->rowCount() === 0) {
+        $conn->exec("ALTER TABLE `tenants` ADD COLUMN `checkin_time` DATETIME NULL DEFAULT NULL");
+    }
+    $col_check = $conn->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tenants' AND TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'checkout_time'");
+    $col_check->execute();
+    if ($col_check->rowCount() === 0) {
+        $conn->exec("ALTER TABLE `tenants` ADD COLUMN `checkout_time` DATETIME NULL DEFAULT NULL");
+    }
+} catch (Exception $e) {
+    // ignore migration errors silently
+}
 
 $action = $_GET['action'] ?? '';
 
@@ -21,10 +38,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $conn->beginTransaction();
         try {
+            // Prepare check-in/out datetimes (combine date + time when provided)
+            $checkin_datetime = $_POST['checkin_date'] ?? null;
+            $checkout_datetime = $_POST['checkout_date'] ?? null;
+            
+            // Parse datetime strings from flatpickr (format: "Y-m-d h:i K" e.g., "2026-02-09 02:30 PM")
+            $checkin_date = null;
+            $checkin_time = null;
+            $checkout_date = null;
+            $checkout_time = null;
+            
+            if ($checkin_datetime) {
+                $parts = explode(' ', trim($checkin_datetime));
+                $checkin_date = $parts[0]; // Y-m-d
+                if (count($parts) >= 2) {
+                    $checkin_time = $parts[1]; // h:i (time in 12-hour format)
+                    if (count($parts) >= 3) {
+                        $checkin_time .= ' ' . $parts[2]; // Add AM/PM
+                    }
+                }
+            }
+            
+            if ($checkout_datetime) {
+                $parts = explode(' ', trim($checkout_datetime));
+                $checkout_date = $parts[0]; // Y-m-d
+                if (count($parts) >= 2) {
+                    $checkout_time = $parts[1]; // h:i (time in 12-hour format)
+                    if (count($parts) >= 3) {
+                        $checkout_time .= ' ' . $parts[2]; // Add AM/PM
+                    }
+                }
+            }
+
+            $start_date = $checkin_date ?: null;
+            $checkin_dt = null;
+            $checkout_dt = null;
+            if ($checkin_date) {
+                $ct = $checkin_time ? $checkin_time : '00:00';
+                $checkin_dt = date('Y-m-d H:i:s', strtotime($checkin_date . ' ' . $ct));
+            }
+            if ($checkout_date) {
+                $cot = $checkout_time ? $checkout_time : '00:00';
+                $checkout_dt = date('Y-m-d H:i:s', strtotime($checkout_date . ' ' . $cot));
+            }
+
             // Create tenant record WITHOUT room assignment (walk-in customer)
-            $sql = "INSERT INTO tenants (name, email, phone, status) VALUES (:name, :email, :phone, 'inactive')";
+            $sql = "INSERT INTO tenants (name, email, phone, start_date, checkin_time, checkout_time, status) VALUES (:name, :email, :phone, :start_date, :checkin_time, :checkout_time, 'active')";
             $stmt = $conn->prepare($sql);
-            $stmt->execute(['name' => $name, 'email' => $email, 'phone' => $phone]);
+            $stmt->execute([
+                'name' => $name,
+                'email' => $email,
+                'phone' => $phone,
+                'start_date' => $start_date,
+                'checkin_time' => $checkin_dt,
+                'checkout_time' => $checkout_dt
+            ]);
             $newTenantId = $conn->lastInsertId();
 
             // Save co-tenants if occupants > 1
@@ -47,13 +115,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             // If room and dates provided, create a room_request and generate an advance bill
             $room_id = $_POST['room_id'] ?? null;
-            $checkin_date = $_POST['checkin_date'] ?? null;
-            $checkout_date = $_POST['checkout_date'] ?? null;
             $notes = $_POST['notes'] ?? null;
 
             if ($room_id && $checkin_date && $checkout_date) {
                 // Insert room request (pending payment)
-                $rr_stmt = $conn->prepare("INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status, checkin_date, checkout_date) VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending_payment', :checkin_date, :checkout_date)");
+                // Extract time portion in HH:MI format for storage
+                $checkin_time_for_db = null;
+                $checkout_time_for_db = null;
+                if ($checkin_time) {
+                    // Convert "02:30 PM" to "14:30" format
+                    $checkin_time_for_db = date('H:i', strtotime($checkin_time));
+                }
+                if ($checkout_time) {
+                    // Convert "11:00 AM" to "11:00" format
+                    $checkout_time_for_db = date('H:i', strtotime($checkout_time));
+                }
+                
+                $rr_stmt = $conn->prepare("INSERT INTO room_requests (tenant_id, room_id, tenant_count, tenant_info_name, tenant_info_email, tenant_info_phone, tenant_info_address, notes, status, checkin_date, checkout_date, checkin_time, checkout_time) VALUES (:tenant_id, :room_id, :tenant_count, :tenant_info_name, :tenant_info_email, :tenant_info_phone, :tenant_info_address, :notes, 'pending_payment', :checkin_date, :checkout_date, :checkin_time, :checkout_time)");
                 $rr_stmt->execute([
                     'tenant_id' => $newTenantId,
                     'room_id' => $room_id,
@@ -64,8 +142,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'tenant_info_address' => null,
                     'notes' => $notes,
                     'checkin_date' => $checkin_date,
-                    'checkout_date' => $checkout_date
+                    'checkout_date' => $checkout_date,
+                    'checkin_time' => $checkin_time_for_db,
+                    'checkout_time' => $checkout_time_for_db
                 ]);
+                $roomRequestId = $conn->lastInsertId();
+
+                // Notify all admins about the new room booking
+                try {
+                    $room_info = $conn->prepare("SELECT room_number, room_type FROM rooms WHERE id = :room_id");
+                    $room_info->execute(['room_id' => $room_id]);
+                    $room_data = $room_info->fetch(PDO::FETCH_ASSOC);
+                    $room_number = $room_data['room_number'] ?? 'N/A';
+                    
+                    $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
+                    foreach ($admins as $admin) {
+                        createNotification(
+                            $conn,
+                            'admin',
+                            $admin['id'],
+                            'room_booked',
+                            'New Room Booking',
+                            'Customer ' . htmlspecialchars($name) . ' booked Room ' . $room_number . ' from ' . ($checkin_dt ?? $checkin_date ?? 'TBD') . ' to ' . ($checkout_dt ?? $checkout_date ?? 'TBD') . '.',
+                            $roomRequestId,
+                            'room_request',
+                            'admin_bookings.php'
+                        );
+                    }
+                } catch (Exception $e) {
+                    error_log("Error creating booking notification: " . $e->getMessage());
+                }
 
                 // Calculate advance amount (nights * rate)
                 $rate_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
@@ -73,21 +179,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $rate = floatval($rate_stmt->fetchColumn());
                 $nights = 0;
                 try {
-                    $ci = new DateTime($checkin_date);
-                    $co = new DateTime($checkout_date);
+                    $ci = $checkin_dt ? new DateTime($checkin_dt) : new DateTime($checkin_date);
+                    $co = $checkout_dt ? new DateTime($checkout_dt) : new DateTime($checkout_date);
                     $interval = $ci->diff($co);
                     $nights = max(0, (int)$interval->days);
                 } catch (Exception $e) {
                     $nights = 0;
                 }
+
                 $total_cost = $rate * max(1, $nights);
 
                 $bill_notes = "ADVANCE PAYMENT - Move-in fee (" . $nights . " night" . ($nights != 1 ? 's' : '') . ", ₱" . number_format($rate,2) . "/night)";
-                $billing_month = $checkin_date ? (new DateTime($checkin_date))->format('Y-m') : date('Y-m');
-                $due_date = $checkin_date ?: date('Y-m-d');
+                $billing_month = $checkin_dt ? (new DateTime($checkin_dt))->format('Y-m') : ($checkin_date ? (new DateTime($checkin_date))->format('Y-m') : date('Y-m'));
+                $due_date = $checkin_dt ? (new DateTime($checkin_dt))->format('Y-m-d') : ($checkin_date ?: date('Y-m-d'));
 
-                // Mark room as occupied
-                $update_room_booked = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id");
+                // Mark room as booked (will be occupied once payment is recorded)
+                $update_room_booked = $conn->prepare("UPDATE rooms SET status = 'booked' WHERE id = :room_id");
                 $update_room_booked->execute(['room_id' => $room_id]);
             } else {
                 // No bill is created here. Bills will be created when payment is recorded via Add New Bill.
@@ -101,7 +208,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
 
-        header("location: tenants.php");
+        header("location: tenants.php?view=active");
         exit;
     } elseif ($action === 'edit') {
         $id = $_POST['id'];
@@ -238,18 +345,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $conn->beginTransaction();
         try {
+            // Get all room_ids associated with this tenant (from multiple sources)
+            $room_ids = [];
+            
+            // Get room_id from tenants table
             $sql_get_room = "SELECT room_id FROM tenants WHERE id = :id";
             $stmt_get_room = $conn->prepare($sql_get_room);
             $stmt_get_room->execute(['id' => $id]);
-            $room_id = $stmt_get_room->fetchColumn();
+            $tenant_room = $stmt_get_room->fetchColumn();
+            if ($tenant_room) $room_ids[] = $tenant_room;
+            
+            // Get room_ids from room_requests
+            $sql_get_rr_rooms = "SELECT DISTINCT room_id FROM room_requests WHERE tenant_id = :id";
+            $stmt_get_rr_rooms = $conn->prepare($sql_get_rr_rooms);
+            $stmt_get_rr_rooms->execute(['id' => $id]);
+            while ($rr_room = $stmt_get_rr_rooms->fetchColumn()) {
+                if ($rr_room && !in_array($rr_room, $room_ids)) {
+                    $room_ids[] = $rr_room;
+                }
+            }
+            
+            // Get room_ids from bills
+            $sql_get_bill_rooms = "SELECT DISTINCT room_id FROM bills WHERE tenant_id = :id AND room_id IS NOT NULL";
+            $stmt_get_bill_rooms = $conn->prepare($sql_get_bill_rooms);
+            $stmt_get_bill_rooms->execute(['id' => $id]);
+            while ($bill_room = $stmt_get_bill_rooms->fetchColumn()) {
+                if ($bill_room && !in_array($bill_room, $room_ids)) {
+                    $room_ids[] = $bill_room;
+                }
+            }
 
+            // Delete the tenant
             $sql = "DELETE FROM tenants WHERE id = :id";
             $stmt = $conn->prepare($sql);
             $stmt->execute(['id' => $id]);
 
-            $sql_update_room = "UPDATE rooms SET status = 'available' WHERE id = :room_id";
-            $stmt_update_room = $conn->prepare($sql_update_room);
-            $stmt_update_room->execute(['room_id' => $room_id]);
+            // Free up all associated rooms
+            if (!empty($room_ids)) {
+                $placeholders = implode(',', array_fill(0, count($room_ids), '?'));
+                $sql_update_room = "UPDATE rooms SET status = 'available' WHERE id IN ($placeholders)";
+                $stmt_update_room = $conn->prepare($sql_update_room);
+                $stmt_update_room->execute($room_ids);
+            }
 
             $conn->commit();
         } catch (Exception $e) {

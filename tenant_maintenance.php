@@ -33,7 +33,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_request'])) {
     $description = trim($_POST['description'] ?? '');
     $priority = trim($_POST['priority'] ?? 'normal');
 
-    if (!empty($category) && !empty($description)) {
+    if (!empty($category)) {
         try {
             // Get tenant's room_id
             $stmt = $conn->prepare("SELECT room_id FROM tenants WHERE id = :tenant_id");
@@ -260,8 +260,8 @@ try {
                                 </div>
 
                                 <div class="col-12">
-                                    <label for="description" class="form-label">Description</label>
-                                    <textarea class="form-control" id="description" name="description" rows="4" placeholder="Describe the issue in detail..." required></textarea>
+                                    <label for="description" class="form-label">Description <span class="text-muted">(Optional)</span></label>
+                                    <textarea class="form-control" id="description" name="description" rows="4" placeholder="Describe the issue in detail..."></textarea>
                                 </div>
 
                                 <div class="col-12">

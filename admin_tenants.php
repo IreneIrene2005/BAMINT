@@ -42,7 +42,7 @@ try {
         $params['search'] = "%$search_query%";
     }
 
-    $query .= " GROUP BY t.id, t.name, t.phone, t.id_number, t.status, t.start_date, t.end_date, r.room_number, r.room_type, r.rate, ta.email ORDER BY t.start_date DESC";
+    $query .= " GROUP BY t.id, t.name, t.phone, t.id_number, t.status, t.start_date, t.end_date, r.room_number, r.room_type, r.rate, ta.email HAVING COUNT(pt.id) > 0 ORDER BY t.start_date DESC";
 
     $stmt = $conn->prepare($query);
     $stmt->execute($params);
