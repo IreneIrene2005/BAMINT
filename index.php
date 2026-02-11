@@ -99,8 +99,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         }
 
         if (empty($email_err) && empty($password_err)) {
-            $sql = "SELECT ta.id, ta.tenant_id, ta.password, t.name FROM tenant_accounts ta 
-                    JOIN tenants t ON ta.tenant_id = t.id 
+                $sql = "SELECT ta.id, ta.tenant_id, ta.password, COALESCE(ta.name, t.name) AS name FROM tenant_accounts ta 
+                    LEFT JOIN tenants t ON ta.tenant_id = t.id 
                     WHERE ta.email = :email";
 
             if ($stmt = $conn->prepare($sql)) {

@@ -186,17 +186,19 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 if ($stmt->execute()) {
                     $tenant_id = $conn->lastInsertId();
                     
-                    // Now create the account
-                        $sql = "INSERT INTO tenant_accounts (tenant_id, email, password, address) 
-                            VALUES (:tenant_id, :email, :password, :address)";
+                    // Now create the account (store name in account as well)
+                        $sql = "INSERT INTO tenant_accounts (tenant_id, name, email, password, address) 
+                            VALUES (:tenant_id, :name, :email, :password, :address)";
                     
                     if ($stmt = $conn->prepare($sql)) {
                         $stmt->bindParam(":tenant_id", $param_tenant_id, PDO::PARAM_INT);
+                        $stmt->bindParam(":name", $param_name, PDO::PARAM_STR);
                         $stmt->bindParam(":email", $param_email, PDO::PARAM_STR);
                         $stmt->bindParam(":password", $param_password, PDO::PARAM_STR);
                         $stmt->bindParam(":address", $param_address, PDO::PARAM_STR);
                         
                         $param_tenant_id = $tenant_id;
+                        $param_name = $name;
                         $param_email = $email;
                         $param_password = password_hash($password, PASSWORD_DEFAULT);
                         $param_address = $address;
