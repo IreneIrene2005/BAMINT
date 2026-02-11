@@ -204,6 +204,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         $errors[] = "Shared rooms can accommodate maximum 2 people.";
                     } elseif ($room_type === 'bedspace' && $tenant_count > 4) {
                         $errors[] = "Bedspace rooms can accommodate maximum 4 people.";
+                    } elseif ($room_type === 'family' && $tenant_count > 5) {
+                        $errors[] = "Family rooms can accommodate maximum 5 people.";
                     }
                 }
             } catch (Exception $e) {
@@ -280,27 +282,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         ]);
                         $roomRequestId = $conn->lastInsertId();
 
-                        // Notify all admins about the new room booking
+                        // Notify all admins and front desk staff about the new room booking
                         try {
-                            $room_info = $conn->prepare("SELECT room_number, room_type FROM rooms WHERE id = :room_id");
-                            $room_info->execute(['room_id' => $room_id]);
-                            $room_data = $room_info->fetch(PDO::FETCH_ASSOC);
-                            $room_number = $room_data['room_number'] ?? 'N/A';
-                            
-                            $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
-                            foreach ($admins as $admin) {
-                                createNotification(
-                                    $conn,
-                                    'admin',
-                                    $admin['id'],
-                                    'room_booked',
-                                    'New Room Booking',
-                                    'Customer ' . htmlspecialchars($tenant_info_name) . ' booked Room ' . $room_number . ' from ' . ($checkin_date ?? 'TBD') . ' to ' . ($checkout_date ?? 'TBD') . '.',
-                                    $roomRequestId,
-                                    'room_request',
-                                    'admin_bookings.php'
-                                );
-                            }
+                            notifyAdminsNewBooking($conn, $roomRequestId, $tenant_id, $room_id);
                         } catch (Exception $e) {
                             error_log("Error creating booking notification: " . $e->getMessage());
                         }
@@ -318,11 +302,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         }
                         $total_cost = $rate * $nights;
                         $bill_notes = "ADVANCE PAYMENT - Move-in fee (" . $nights . " night" . ($nights > 1 ? "s" : "") . ", ₱" . number_format($rate, 2) . "/night)";
-                        $billing_month = $checkin_date ? (new DateTime($checkin_date))->format('Y-m') : date('Y-m');
+                        $billing_month = $checkin_date ? (new DateTime($checkin_date))->format('Y-m-d') : date('Y-m-d');
                         $due_date = $checkin_date ? (new DateTime($checkin_date))->format('Y-m-d') : date('Y-m-d');
                         $bill_stmt = $conn->prepare("
-                            INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, created_at, updated_at)
-                            VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, NOW(), NOW())
+                            INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, checkin_date, checkout_date, created_at, updated_at)
+                            VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, :checkin_date, :checkout_date, NOW(), NOW())
                         ");
                         $bill_stmt->execute([
                             'tenant_id' => $tenant_id,
@@ -330,8 +314,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                             'billing_month' => $billing_month,
                             'amount_due' => $total_cost,
                             'due_date' => $due_date,
-                            'notes' => $bill_notes
+                            'notes' => $bill_notes,
+                            'checkin_date' => $checkin_date ?: null,
+                            'checkout_date' => $checkout_date ?: null
                         ]);
+
+                        // Mark room as booked (will be occupied once admin approves the request)
+                        $update_room_booked = $conn->prepare("UPDATE rooms SET status = 'booked' WHERE id = :room_id");
+                        $update_room_booked->execute(['room_id' => $room_id]);
 
                         // Save co-tenants if this is a shared/bedspace room with multiple occupants
                         if ($tenant_count > 1) {
@@ -413,6 +403,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 }
 
 // Fetch all rooms with availability status (including co-tenants) and image
+// Match admin_rooms.php: show all rooms with status = 'available'
 try {
     $stmt = $conn->prepare("
         SELECT 
@@ -423,12 +414,10 @@ try {
             r.rate,
             r.status,
             r.image AS image_url,
-            COALESCE(COUNT(DISTINCT t.id), 0) as tenant_count,
-            COALESCE(COUNT(DISTINCT ct.id), 0) as co_tenant_count
+            (SELECT COUNT(*) FROM tenants WHERE room_id = r.id AND status = 'active') as tenant_count,
+            (SELECT COUNT(*) FROM co_tenants ct JOIN tenants t2 ON ct.primary_tenant_id = t2.id WHERE ct.room_id = r.id AND t2.status = 'active') as co_tenant_count
         FROM rooms r
-        LEFT JOIN tenants t ON r.id = t.room_id AND t.status = 'active'
-        LEFT JOIN co_tenants ct ON r.id = ct.room_id
-        GROUP BY r.id
+        WHERE r.status = 'available'
         ORDER BY r.room_number ASC
     ");
     $stmt->execute();
@@ -737,7 +726,6 @@ try {
                                                 <input type="hidden" name="room_request_id" value="<?php echo $request['id']; ?>">
                                                 <button type="submit" class="btn btn-warning w-100">Proceed to Payment</button>
                                             </form>
-                                            <button type="button" class="btn btn-secondary w-100 mt-2" id="cancelRequestBtn" data-request-id="<?php echo $request['id']; ?>">Cancel</button>
                                         <?php endif; ?>
                                     </div>
                             <?php endif; ?>
@@ -794,9 +782,9 @@ try {
                                         $max_occupancy = 4;
                                         if ($room_type === 'single') $max_occupancy = 1;
                                         elseif ($room_type === 'double') $max_occupancy = 2;
-                                        elseif ($room_type === 'family') $max_occupancy = 4;
+                                        elseif ($room_type === 'family') $max_occupancy = 5;
                                         ?>
-                                        <?php if ($actual_status === 'available' && intval($total_occupancy) === 0): ?>
+                                        <?php if (strtolower(trim($room['status'] ?? '')) === 'available'): ?>
                                         <div class="room-card <?php echo htmlspecialchars(strtolower($actual_status)); ?>" data-rate="<?php echo htmlspecialchars($room['rate']); ?>" data-room-type="<?php echo htmlspecialchars($room['room_type']); ?>">
                                             <!-- Room Image -->
                                             <img src="<?php echo !empty($room['image_url']) ? htmlspecialchars($room['image_url']) : 'public/img/room-placeholder.png'; ?>" alt="Room <?php echo htmlspecialchars($room['room_number']); ?>">
@@ -846,35 +834,35 @@ try {
                 <script>
                     // Cancel request handler: sends AJAX POST to cancel the request
                     document.addEventListener('DOMContentLoaded', function() {
-                        var cancelBtn = document.getElementById('cancelRequestBtn');
-                        if (cancelBtn) {
-                            cancelBtn.addEventListener('click', function(e) {
-                                if (!confirm('Are you sure you want to cancel this room request?')) return;
-                                var reqId = this.getAttribute('data-request-id');
-                                var formData = new FormData();
-                                formData.append('action', 'cancel_request');
-                                formData.append('request_id', reqId);
+                        // Delegated click handler for cancel buttons (works for dynamically rendered elements)
+                        document.body.addEventListener('click', function(e) {
+                            var btn = e.target.closest('.cancel-request-btn');
+                            if (!btn) return;
+                            e.preventDefault();
+                            if (!confirm('Are you sure you want to cancel this room request?')) return;
+                            var reqId = btn.getAttribute('data-request-id');
+                            var formData = new FormData();
+                            formData.append('action', 'cancel_request');
+                            formData.append('request_id', reqId);
 
-                                fetch(window.location.href, {
-                                    method: 'POST',
-                                    body: formData,
-                                    credentials: 'same-origin'
-                                }).then(function(resp) {
-                                    return resp.json();
-                                }).then(function(json) {
-                                    if (json && json.success) {
-                                        alert(json.message || 'Request cancelled.');
-                                        // reload to refresh My Requests and room availability
-                                        window.location.reload();
-                                    } else {
-                                        alert('Failed to cancel: ' + (json.message || 'Unknown error'));
-                                    }
-                                }).catch(function(err) {
-                                    console.error(err);
-                                    alert('Failed to cancel request.');
-                                });
+                            fetch(window.location.href, {
+                                method: 'POST',
+                                body: formData,
+                                credentials: 'same-origin'
+                            }).then(function(resp) {
+                                return resp.json();
+                            }).then(function(json) {
+                                if (json && json.success) {
+                                    alert(json.message || 'Request cancelled.');
+                                    window.location.reload();
+                                } else {
+                                    alert('Failed to cancel: ' + (json.message || 'Unknown error'));
+                                }
+                            }).catch(function(err) {
+                                console.error(err);
+                                alert('Failed to cancel request.');
                             });
-                        }
+                        });
                     });
                         // Auto-calculate checkout datetime based on check-in and nights, using Flatpickr format
                         document.querySelectorAll('.room-card').forEach(function(card) {
@@ -1065,14 +1053,26 @@ try {
                                 <input type="text" class="form-control modalCheckoutDate checkout-date" id="modalCheckoutDate" name="checkout_date" required>
                             </div>
                         </div>
+
+                        <div class="mb-3 p-3 bg-light rounded" id="modalCostDisplay" style="display: none;">
+                            <div class="row">
+                                <div class="col-6">
+                                    <small class="text-muted">Total Cost</small>
+                                    <div class="fs-5 fw-bold text-success" id="modalCostValue">-</div>
+                                </div>
+                                <div class="col-6 text-end">
+                                    <small class="text-muted" id="modalNightCount">-</small>
+                                </div>
+                            </div>
+                        </div>
                         
                         <div class="mb-3">
                             <label class="form-label">Number of Guests <span class="text-danger">*</span></label>
-                            <input type="number" class="form-control guest-count-input" id="modalGuestCount" name="tenant_count" min="1" value="1" required>
+                            <input type="number" class="form-control guest-count-input" id="modalGuestCount" name="tenant_count" min="1" value="1" required onchange="renderRoommateFields();" oninput="renderRoommateFields();">
                             <small class="text-muted">Max: <span id="modalMaxOccupancy">1</span> guest(s)</small>
                         </div>
                         
-                        <div class="co-guests-section" id="modalCoGuestsSection" style="display: none;"></div>
+                        <div class="co-guests-section" id="modalCoGuestsSection" style="display: none; border-top: 1px solid #ddd; padding-top: 15px; margin-top: 15px;"></div>
                         
                         <div class="mb-3">
                             <label class="form-label">Notes (Optional)</label>
@@ -1089,44 +1089,34 @@ try {
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Combine date and time fields before form submission
+        // Validate form before submission
         document.getElementById('requestRoomForm').addEventListener('submit', function(e) {
-            const checkinDateInput = document.getElementById('modalCheckinDate');
-            const checkinHour = parseInt(document.getElementById('modalCheckinHour').value);
-            const checkinMinute = parseInt(document.getElementById('modalCheckinMinute').value);
-            const checkinAmpm = document.getElementById('modalCheckinAmpm').value;
-            
-            const checkoutDateInput = document.getElementById('modalCheckoutDate');
-            const checkoutHour = parseInt(document.getElementById('modalCheckoutHour').value);
-            const checkoutMinute = parseInt(document.getElementById('modalCheckoutMinute').value);
-            const checkoutAmpm = document.getElementById('modalCheckoutAmpm').value;
-            
-            // Convert 12-hour to 24-hour format
-            let checkinHour24 = checkinHour;
-            if (checkinAmpm === 'PM' && checkinHour !== 12) {
-                checkinHour24 = checkinHour + 12;
-            } else if (checkinAmpm === 'AM' && checkinHour === 12) {
-                checkinHour24 = 0;
+            // Ensure co-guest fields are present and filled when tenant_count > 1
+            try {
+                const guestCount = parseInt(document.getElementById('modalGuestCount').value) || 1;
+                if (guestCount > 1) {
+                    // Check if co-guest inputs exist
+                    const firstCoGuest = document.querySelector('[name="co_tenant_name_1"]');
+                    if (!firstCoGuest) {
+                        // Fields missing - generate them
+                        if (window.renderModalCoGuests) window.renderModalCoGuests();
+                        alert('Roommate fields have been displayed. Please fill in the details.');
+                        e.preventDefault();
+                        return;
+                    }
+                    // Validate roommate names are present; email/phone/address are optional
+                    for (let i = 1; i < guestCount; i++) {
+                        const nameField = document.querySelector('[name="co_tenant_name_' + i + '"]');
+                        if (!nameField || !nameField.value.trim()) {
+                            alert('Please enter name for roommate ' + i);
+                            e.preventDefault();
+                            return;
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error('Co-guest validation error', err);
             }
-            
-            let checkoutHour24 = checkoutHour;
-            if (checkoutAmpm === 'PM' && checkoutHour !== 12) {
-                checkoutHour24 = checkoutHour + 12;
-            } else if (checkoutAmpm === 'AM' && checkoutHour === 12) {
-                checkoutHour24 = 0;
-            }
-            
-            // Extract date from the input (format: Y-m-d)
-            const checkinDateOnly = checkinDateInput.value.split(' ')[0];
-            const checkoutDateOnly = checkoutDateInput.value.split(' ')[0];
-            
-            // Combine date and time in proper format
-            const checkinDateTime = checkinDateOnly + ' ' + String(checkinHour24).padStart(2, '0') + ':' + String(checkinMinute).padStart(2, '0') + ':00';
-            const checkoutDateTime = checkoutDateOnly + ' ' + String(checkoutHour24).padStart(2, '0') + ':' + String(checkoutMinute).padStart(2, '0') + ':00';
-            
-            // Set the combined values
-            checkinDateInput.value = checkinDateTime;
-            checkoutDateInput.value = checkoutDateTime;
         });
         
         // Set default times when modal opens
@@ -1258,6 +1248,40 @@ try {
             }
         });
 
+        // Function to update cost display in modal based on date inputs
+        function updateModalCost() {
+            const checkinInput = document.getElementById('modalCheckinDate');
+            const checkoutInput = document.getElementById('modalCheckoutDate');
+            const roomRateText = document.getElementById('modalRoomRate');
+            const costDisplay = document.getElementById('modalCostDisplay');
+            const costValue = document.getElementById('modalCostValue');
+            const nightCount = document.getElementById('modalNightCount');
+            
+            if (!checkinInput.value || !checkoutInput.value || !roomRateText) {
+                costDisplay.style.display = 'none';
+                return;
+            }
+            
+            const rate = parseFloat(roomRateText.textContent.replace(/[₱,]/g, '')) || 0;
+            const checkin = new Date(checkinInput.value);
+            const checkout = new Date(checkoutInput.value);
+            
+            if (checkout <= checkin) {
+                costDisplay.style.display = 'block';
+                costValue.innerHTML = '<span class="text-danger">Check-out must be after check-in.</span>';
+                nightCount.innerHTML = '';
+                return;
+            }
+            
+            const diffTime = Math.abs(checkout - checkin);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            const totalCost = diffDays * rate;
+            
+            costValue.innerHTML = `₱${totalCost.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`;
+            nightCount.innerHTML = `${diffDays} night${diffDays > 1 ? 's' : ''}`;
+            costDisplay.style.display = 'block';
+        }
+
         // Populate modal with room details when Request button is clicked
         function populateModalWithRoom(button) {
             const roomId = button.getAttribute('data-room-id');
@@ -1277,23 +1301,32 @@ try {
             
             // Clear form fields
             document.getElementById('requestRoomForm').reset();
-            document.getElementById('modalGuestCount').max = maxOccupancy;
+            
+            // Set max occupancy on guest count field
+            const guestCountEl = document.getElementById('modalGuestCount');
+            if (guestCountEl) {
+                guestCountEl.max = maxOccupancy;
+                guestCountEl.value = 1;
+            }
             
             // Reset co-guests section
             const coGuestsSection = document.getElementById('modalCoGuestsSection');
-            coGuestsSection.innerHTML = '';
-            coGuestsSection.style.display = 'none';
+            if (coGuestsSection) {
+                coGuestsSection.innerHTML = '';
+                coGuestsSection.style.display = 'none';
+            }
             
             // Clear Flatpickr instances if they exist
             const checkinInput = document.getElementById('modalCheckinDate');
             const checkoutInput = document.getElementById('modalCheckoutDate');
             
-            if (checkinInput._flatpickr) {
+            if (checkinInput && checkinInput._flatpickr) {
                 checkinInput._flatpickr.clear();
             }
-            if (checkoutInput._flatpickr) {
+            if (checkoutInput && checkoutInput._flatpickr) {
                 checkoutInput._flatpickr.clear();
             }
+            
             // Pre-fill guest info with logged-in customer's details
             try {
                 document.getElementById('modalTenantName').value = <?php echo json_encode($tenant_name); ?> || '';
@@ -1302,55 +1335,73 @@ try {
             } catch (e) {
                 // ignore
             }
+
+            // Add event listeners for cost calculation
+            const modalCheckinInput = document.getElementById('modalCheckinDate');
+            const modalCheckoutInput = document.getElementById('modalCheckoutDate');
+            if (modalCheckinInput) {
+                modalCheckinInput.removeEventListener('change', updateModalCost);
+                modalCheckinInput.addEventListener('change', updateModalCost);
+            }
+            if (modalCheckoutInput) {
+                modalCheckoutInput.removeEventListener('change', updateModalCost);
+                modalCheckoutInput.addEventListener('change', updateModalCost);
+            }
         }
 
-        // Handle modal guest count changes for co-guests
-        document.getElementById('modalGuestCount').addEventListener('change', function() {
-            const count = parseInt(this.value);
-            const maxOccupancy = parseInt(this.max);
+        // Simple, direct roommate field rendering
+        function renderRoommateFields() {
+            var guestCount = document.getElementById('modalGuestCount');
+            var section = document.getElementById('modalCoGuestsSection');
             
-            if (count > maxOccupancy) {
-                this.value = maxOccupancy;
+            if (!guestCount || !section) return;
+            
+            var count = parseInt(guestCount.value) || 1;
+            
+            if (count <= 1) {
+                section.style.display = 'none';
+                section.innerHTML = '';
                 return;
             }
             
-            const coGuestsSection = document.getElementById('modalCoGuestsSection');
-            const fieldsContainer = document.getElementById('modalCoGuestsFields');
+            section.style.display = 'block';
+            var html = '';
             
-            if (count > 1) {
-                coGuestsSection.style.display = 'block';
-                let html = '';
-                for (let i = 1; i < count; i++) {
-                    html += `
-                        <div class="card mb-3 border-secondary">
-                            <div class="card-header bg-secondary bg-opacity-10">
-                                <h6 class="mb-0"><i class="bi bi-person-badge"></i> Co-Guest ${i}</h6>
-                            </div>
-                            <div class="card-body">
-                                <div class="mb-2">
-                                    <label class="form-label small">Name <span class="text-danger">*</span></label>
-                                    <input type="text" class="form-control form-control-sm" name="co_tenant_name_${i}" required>
-                                </div>
-                                <div class="mb-2">
-                                    <label class="form-label small">Email <span class="text-danger">*</span></label>
-                                    <input type="email" class="form-control form-control-sm" name="co_tenant_email_${i}" required>
-                                </div>
-                                <div class="mb-2">
-                                    <label class="form-label small">Phone <span class="text-danger">*</span></label>
-                                    <input type="tel" class="form-control form-control-sm" name="co_tenant_phone_${i}" required>
-                                </div>
-                                <div class="mb-2">
-                                    <label class="form-label small">Address <span class="text-danger">*</span></label>
-                                    <textarea class="form-control form-control-sm" name="co_tenant_address_${i}" rows="2" required></textarea>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }
-                coGuestsSection.innerHTML = html;
-            } else {
-                coGuestsSection.style.display = 'none';
-                coGuestsSection.innerHTML = '';
+            for (var i = 1; i < count; i++) {
+                html += '<div class="card mb-3 border-secondary">' +
+                    '<div class="card-header bg-secondary bg-opacity-10">' +
+                    '<h6 class="mb-0"><i class="bi bi-person-badge"></i> Roommate ' + i + '</h6>' +
+                    '</div>' +
+                    '<div class="card-body">' +
+                    '<div class="mb-2">' +
+                    '<label class="form-label small">Name <span class="text-danger">*</span></label>' +
+                    '<input type="text" class="form-control form-control-sm" name="co_tenant_name_' + i + '" required>' +
+                    '</div>' +
+                    '<div class="mb-2">' +
+                    '<label class="form-label small">Email</label>' +
+                    '<input type="email" class="form-control form-control-sm" name="co_tenant_email_' + i + '">' +
+                    '</div>' +
+                    '<div class="mb-2">' +
+                    '<label class="form-label small">Phone</label>' +
+                    '<input type="tel" class="form-control form-control-sm" name="co_tenant_phone_' + i + '">' +
+                    '</div>' +
+                    '<div class="mb-2">' +
+                    '<label class="form-label small">Address</label>' +
+                    '<textarea class="form-control form-control-sm" name="co_tenant_address_' + i + '" rows="2"></textarea>' +
+                    '</div>' +
+                    '</div>' +
+                    '</div>';
+            }
+            
+            section.innerHTML = html;
+        }
+        
+        // Attach listener when DOM is ready
+        document.addEventListener('DOMContentLoaded', function() {
+            var guestCountEl = document.getElementById('modalGuestCount');
+            if (guestCountEl) {
+                guestCountEl.addEventListener('change', renderRoommateFields);
+                guestCountEl.addEventListener('input', renderRoommateFields);
             }
         });
 
@@ -1365,6 +1416,83 @@ try {
                     if (modalCheckinInput) modalCheckinInput.value = '';
                     if (modalCheckoutInput) modalCheckoutInput.value = '';
                 });
+            }
+        });
+
+        // Real-time room availability refresh using API
+        function refreshRoomAvailability() {
+            const roomsContainer = document.getElementById('roomsContainer');
+            const filterSelect = document.getElementById('filterType');
+            
+            if (!roomsContainer) return;
+            
+            // Fetch room data from API
+            fetch('api_get_available_rooms.php', {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(response => {
+                if (!response.ok) throw new Error('API Error: ' + response.status);
+                return response.json();
+            })
+            .then(data => {
+                if (data.success && data.rooms) {
+                    // Rebuild room grid with updated data
+                    let html = '';
+                    
+                    if (data.rooms.length === 0) {
+                        html = '<div class="alert alert-info w-100">No rooms available at the moment.</div>';
+                    } else {
+                        data.rooms.forEach(room => {
+                            if (room.available) {
+                                const roomType = room.room_type.toLowerCase();
+                                let maxOccupancy = 4;
+                                if (roomType === 'single') maxOccupancy = 1;
+                                else if (roomType === 'double') maxOccupancy = 2;
+                                else if (roomType === 'family') maxOccupancy = 5;
+                                
+                                const imageUrl = room.image_url || 'public/img/room-placeholder.png';
+                                const matchesFilter = !filterSelect || !filterSelect.value || room.room_type === filterSelect.value;
+                                const displayStyle = matchesFilter ? '' : 'style="display: none;" data-hidden="true"';
+                                
+                                html += `
+                                    <div class="room-card available" data-rate="${room.rate}" data-room-type="${room.room_type}" ${displayStyle}>
+                                        <img src="${imageUrl}" alt="Room ${room.room_number}">
+                                        <div class="room-card-content">
+                                            <h6>${room.room_number}</h6>
+                                            <p><strong>${room.room_type}</strong></p>
+                                            <p><strong>₱${room.rate.toLocaleString('en-PH', {maximumFractionDigits: 0})}/night</strong></p>
+                                            <p class="text-success" style="margin-bottom: 0.5rem;">● Available</p>
+                                            <button class="btn btn-sm btn-primary w-100" onclick="showRequestModal(${room.id}, '${room.room_number}', '${room.room_type}', ${room.rate})">
+                                                Request This Room
+                                            </button>
+                                        </div>
+                                    </div>
+                                `;
+                            }
+                        });
+                    }
+                    
+                    roomsContainer.innerHTML = html;
+                }
+            })
+            .catch(error => {
+                console.log('Room availability check error (non-critical):', error.message);
+            });
+        }
+        
+        // Start real-time refresh - check every 10 seconds
+        document.addEventListener('DOMContentLoaded', function() {
+            // Only start refresh if on the room selection page
+            const roomsContainer = document.getElementById('roomsContainer');
+            if (roomsContainer) {
+                // Initial check after 2 seconds
+                setTimeout(refreshRoomAvailability, 2000);
+                
+                // Then refresh every 10 seconds
+                setInterval(refreshRoomAvailability, 10000);
             }
         });
     </script>

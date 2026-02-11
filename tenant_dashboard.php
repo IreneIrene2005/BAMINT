@@ -246,6 +246,19 @@ try {
     $stmt->execute(['customer_id' => $customer_id]);
     $cancellation_approved = $stmt->fetch(PDO::FETCH_ASSOC);
 
+    // Check for pending cancellation (awaiting admin approval)
+    $cancellation_pending = null;
+    $stmt = $conn->prepare("
+        SELECT bc.*, r.room_number
+        FROM booking_cancellations bc
+        LEFT JOIN rooms r ON bc.room_id = r.id
+        WHERE bc.tenant_id = :customer_id AND bc.refund_approved = 0
+        ORDER BY bc.cancelled_at DESC
+        LIMIT 1
+    ");
+    $stmt->execute(['customer_id' => $customer_id]);
+    $cancellation_pending = $stmt->fetch(PDO::FETCH_ASSOC);
+
 } catch (Exception $e) {
     $error = "Error loading customer data: " . $e->getMessage();
 }
@@ -418,16 +431,20 @@ try {
                     </div>
                 <!-- Advance Payment Approval Notification -->
                 <?php elseif ($advance_payment && $customer['start_date']): ?>
-                    <div class="alert alert-success fade show mb-4" role="alert" style="border-left: 5px solid #28a745;">
+                    <div class="alert <?php echo $cancellation_pending ? 'alert-warning' : ($cancellation_approved ? 'alert-info' : 'alert-success'); ?> fade show mb-4" role="alert" style="border-left: 5px solid <?php echo $cancellation_pending ? '#ffc107' : ($cancellation_approved ? '#17a2b8' : '#28a745'); ?>; ">
                         <div class="d-flex align-items-start gap-3">
                             <div class="flex-shrink-0">
-                                <i class="bi bi-check-circle-fill" style="font-size: 1.5rem; color: #28a745;"></i>
+                                <i class="<?php echo $cancellation_pending ? 'bi bi-clock-history' : ($cancellation_approved ? 'bi bi-info-circle-fill' : 'bi bi-check-circle-fill'); ?>" style="font-size: 1.5rem; color: <?php echo $cancellation_pending ? '#ffc107' : ($cancellation_approved ? '#17a2b8' : '#28a745'); ?>;"></i>
                             </div>
                             <div class="flex-grow-1">
                                 <h5 class="alert-heading mb-3">
-                                    <i class="bi bi-check2-square"></i> 
+                                    <i class="<?php echo $cancellation_pending ? 'bi bi-clock' : ($cancellation_approved ? 'bi bi-info-circle' : 'bi bi-check2-square'); ?>"></i> 
                                     <?php 
-                                        if ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): 
+                                        if ($cancellation_pending):
+                                            echo "Cancellation Submitted - Awaiting Admin Approval";
+                                        elseif ($cancellation_approved):
+                                            echo "Cancellation Approved";
+                                        elseif ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): 
                                             echo "Check-in Successful! You are now in the hotel";
                                         else: 
                                             echo "Payment Approved! Your Room is Reserved";
@@ -435,7 +452,11 @@ try {
                                     ?>
                                 </h5>
                                 <p class="mb-3">
-                                    <?php if ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): ?>
+                                    <?php if ($cancellation_pending): ?>
+                                        Your cancellation request has been submitted and is waiting for admin/front desk approval. You will be notified once it has been reviewed.
+                                    <?php elseif ($cancellation_approved): ?>
+                                        Your cancellation has been approved. Refund information: <strong><?php echo htmlspecialchars($cancellation_approved['refund_amount'] ?? 'Pending'); ?></strong>
+                                    <?php elseif ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): ?>
                                         Your check-in was approved at <strong><?php echo date('M d, Y \a\t h:i A', strtotime($customer['checkin_time'])); ?></strong>. Welcome to our hotel!
                                     <?php else: ?>
                                         Your payment of <strong>₱<?php echo number_format($advance_payment['payment_amount'] ?? $advance_payment['amount_due'], 2); ?></strong> has been verified and approved.
@@ -682,9 +703,11 @@ try {
                                 </div>
 
                                 <div class="d-flex gap-2 mt-3">
+                                    <?php if (!$cancellation_pending && !$cancellation_approved): ?>
                                     <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#cancelBookingModal">
                                         <i class="bi bi-x-circle"></i> Cancel Booking
                                     </button>
+                                    <?php endif; ?>
                                 </div>
                                 <?php endif; ?>
                             </div>
@@ -831,40 +854,30 @@ try {
                                             $sum_stmt->execute(['bill_id' => $bill['id']]);
                                             $live_paid = floatval($sum_stmt->fetchColumn());
 
-                                            // Fetch stay duration from room_requests
-                                            // First, try to extract Request ID from notes (e.g., "Request #123")
-                                            $request_id = null;
-                                            if (!empty($bill['notes']) && preg_match('/Request #(\d+)/', $bill['notes'], $m)) {
-                                                $request_id = intval($m[1]);
-                                            }
+                                            // Use checkin_date and checkout_date directly from bills table (should be populated)
+                                            $checkin = $bill['checkin_date'] && $bill['checkin_date'] !== '0000-00-00' ? $bill['checkin_date'] : null;
+                                            $checkout = $bill['checkout_date'] && $bill['checkout_date'] !== '0000-00-00' ? $bill['checkout_date'] : null;
                                             
-                                            $dates = null;
-                                            if ($request_id) {
-                                                // Use the specific request ID
-                                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE id = :request_id LIMIT 1");
-                                                $room_req_stmt->execute(['request_id' => $request_id]);
-                                                $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                            }
-                                            
-                                            if (!$dates) {
-                                                // Fall back to fetching by tenant_id and room_id (most recent)
-                                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                            // If still no dates, try to get from room_requests
+                                            if (!$checkin || !$checkout) {
+                                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY created_at DESC LIMIT 1");
                                                 $room_req_stmt->execute(['tenant_id' => $bill['tenant_id'], 'room_id' => $bill['room_id']]);
                                                 $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                                if ($dates) {
+                                                    $checkin = $dates['checkin_date'] && $dates['checkin_date'] !== '0000-00-00' ? $dates['checkin_date'] : $checkin;
+                                                    $checkout = $dates['checkout_date'] && $dates['checkout_date'] !== '0000-00-00' ? $dates['checkout_date'] : $checkout;
+                                                }
                                             }
-                                            
-                                            $checkin = $dates ? $dates['checkin_date'] : null;
-                                            $checkout = $dates ? $dates['checkout_date'] : null;
 
                                             // Use actual check-in/check-out times from tenants table if available, otherwise use scheduled dates
                                             $actual_checkin = $customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00' ? $customer['checkin_time'] : null;
                                             $actual_checkout = $customer['checkout_time'] && $customer['checkout_time'] !== '0000-00-00 00:00:00' ? $customer['checkout_time'] : null;
                                             
-                                            // Display month - prioritize actual times, then requested dates
+                                            // Display month - prioritize actual times, then requested dates from bill
                                             if ($actual_checkin && $actual_checkout) {
-                                                $month_display = date('M d, Y \a\t h:i A', strtotime($actual_checkin)) . ' - ' . date('M d, Y \a\t h:i A', strtotime($actual_checkout));
+                                                $month_display = date('M d, Y', strtotime($actual_checkin)) . ' - ' . date('M d, Y', strtotime($actual_checkout));
                                             } elseif ($checkin && $checkout && strtotime($checkin) > 0 && strtotime($checkout) > 0) {
-                                                $month_display = date('M d, Y \a\t h:i A', strtotime($checkin)) . ' - ' . date('M d, Y \a\t h:i A', strtotime($checkout));
+                                                $month_display = date('M d, Y', strtotime($checkin)) . ' - ' . date('M d, Y', strtotime($checkout));
                                             } elseif (!empty($bill['billing_month']) && strtotime($bill['billing_month']) > 0) {
                                                 $month_display = date('F Y', strtotime($bill['billing_month']));
                                             } else {
@@ -962,10 +975,10 @@ try {
                     </div>
                 </div>
 
-                <!-- Maintenance Section -->
+                <!-- Amenity Request Section (formerly Maintenance) -->
                 <div class="card">
                     <div class="card-header bg-warning bg-opacity-10">
-                        <h6 class="mb-0"><i class="bi bi-tools"></i> Maintenance Requests</h6>
+                        <h6 class="mb-0"><i class="bi bi-gift-fill"></i> Amenity Request</h6>
                     </div>
                     <div class="card-body">
                         <?php if (!empty($maintenance)): ?>
@@ -1006,7 +1019,7 @@ try {
                             </div>
                             <a href="tenant_maintenance.php" class="btn btn-sm btn-warning mt-2">View All Requests</a>
                         <?php else: ?>
-                            <p class="text-muted">No maintenance requests yet.</p>
+                            <p class="text-muted">No Amenity requests yet.</p>
                         <?php endif; ?>
                     </div>
                 </div>

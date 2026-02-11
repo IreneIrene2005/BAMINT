@@ -41,17 +41,19 @@ if ($checkin && $checkout) {
 }
 $total_cost = $rate * $nights;
 $notes = "ADVANCE PAYMENT - Move-in fee ($nights night" . ($nights > 1 ? "s" : "") . ", ₱" . number_format($rate, 2) . "/night)";
-$billing_month = (new DateTime($checkin))->format('Y-m');
-$due_date = (new DateTime($checkin))->format('Y-m-d');
+$billing_month = $checkin ? (new DateTime($checkin))->format('Y-m-d') : date('Y-m-d');
+$due_date = $checkin ? (new DateTime($checkin))->format('Y-m-d') : date('Y-m-d');
 
 // Insert the bill
-$stmt = $pdo->prepare("INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, created_at, updated_at) VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, NOW(), NOW())");
+$stmt = $pdo->prepare("INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, checkin_date, checkout_date, created_at, updated_at) VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, :checkin_date, :checkout_date, NOW(), NOW())");
 $stmt->execute([
     'tenant_id' => $rr['tenant_id'],
     'room_id' => $rr['room_id'],
     'billing_month' => $billing_month,
     'amount_due' => $total_cost,
     'due_date' => $due_date,
-    'notes' => $notes
+    'notes' => $notes,
+    'checkin_date' => $checkin ?: null,
+    'checkout_date' => $checkout ?: null
 ]);
 echo "Advance payment bill created for room_request_id=$room_request_id.\n";

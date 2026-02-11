@@ -1,8 +1,8 @@
 <?php
 session_start();
 
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "admin") {
-    header("location: index.php?role=admin");
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array($_SESSION["role"], ['admin', 'front_desk'])) {
+    header("location: index.php");
     exit;
 }
 
@@ -49,21 +49,46 @@ try {
 $ready_list = [];
 $checkedin_list = [];
 try {
-    // Guests ready to check-in: ONLY active (non-inactive) tenants with room assigned, payment verified, not yet checked in
-    $ready_stmt = $conn->prepare("SELECT t.id, t.name, t.room_id, r.room_number, rr.checkin_date, rr.checkin_time
-                                  FROM tenants t
-                                  INNER JOIN rooms r ON r.id = t.room_id
-                                  LEFT JOIN room_requests rr ON rr.tenant_id = t.id
-                                  WHERE t.status != 'inactive'
-                                  AND (t.checkin_time IS NULL OR t.checkin_time = '0000-00-00 00:00:00')
-                                  AND EXISTS (
-                                    SELECT 1 FROM bills b 
-                                    INNER JOIN payment_transactions pt ON b.id = pt.bill_id 
-                                    WHERE b.tenant_id = t.id 
-                                    AND b.room_id = t.room_id 
-                                    AND pt.payment_status IN ('verified', 'approved')
-                                  )
-                                  ORDER BY rr.checkin_date ASC");
+    // Guests ready to check-in: ONLY active (non-inactive) tenants, payment verified, not yet checked in
+    // Excludes guests whose room_requests were cancelled or bills were cancelled
+    // Works for both regular customers and walk-in customers
+    // Get room from: tenants.room_id (regular) or room_requests.room_id (walk-in)
+    $ready_stmt = $conn->prepare("
+        SELECT DISTINCT 
+            t.id, 
+            t.name, 
+            t.room_id,
+            COALESCE(r.room_number, r2.room_number) as room_number,
+            COALESCE(rr.checkin_date, rr2.checkin_date, b.checkin_date) as checkin_date,
+            COALESCE(rr.checkin_time, rr2.checkin_time, b.checkin_time) as checkin_time
+        FROM tenants t
+        LEFT JOIN rooms r ON r.id = t.room_id
+        LEFT JOIN room_requests rr ON rr.tenant_id = t.id AND rr.status IN ('approved', 'occupied') AND rr.room_id IS NOT NULL
+        LEFT JOIN room_requests rr2 ON rr2.tenant_id = t.id AND rr2.status = 'pending_payment' AND rr2.room_id IS NOT NULL
+        LEFT JOIN rooms r2 ON r2.id = COALESCE(rr.room_id, rr2.room_id)
+        LEFT JOIN bills b ON b.tenant_id = t.id AND b.room_id = COALESCE(rr.room_id, rr2.room_id, t.room_id) AND b.status IN ('pending', 'partial', 'paid')
+        WHERE t.status = 'active'
+        AND (t.checkin_time IS NULL OR t.checkin_time = '0000-00-00 00:00:00')
+        AND (COALESCE(r.id, r2.id) IS NOT NULL)
+        AND NOT EXISTS (
+            SELECT 1 FROM room_requests rr_cancelled 
+            WHERE rr_cancelled.tenant_id = t.id 
+            AND rr_cancelled.status = 'cancelled'
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM bills b_cancelled
+            WHERE b_cancelled.tenant_id = t.id
+            AND b_cancelled.status = 'cancelled'
+        )
+        AND EXISTS (
+            SELECT 1 FROM bills b2
+            INNER JOIN payment_transactions pt ON b2.id = pt.bill_id 
+            WHERE b2.tenant_id = t.id 
+            AND b2.status IN ('pending', 'partial', 'paid')
+            AND pt.payment_status IN ('verified', 'approved')
+        )
+        ORDER BY COALESCE(rr.checkin_date, rr2.checkin_date, b.checkin_date) ASC
+    ");
     $ready_stmt->execute();
     $ready_list = $ready_stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -201,6 +226,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['search_guest'])) {
 }
 
 // Handle check-in approval
+// Handle delete guest from check-in list
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_checkin_guest'])) {
+    $tenant_id = intval($_POST['tenant_id'] ?? 0);
+    if ($tenant_id > 0) {
+        try {
+            $conn->beginTransaction();
+
+            // Get tenant's room and bill info
+            $get_info = $conn->prepare("SELECT room_id FROM tenants WHERE id = :id");
+            $get_info->execute(['id' => $tenant_id]);
+            $tenant_info = $get_info->fetch(PDO::FETCH_ASSOC);
+            $room_id = $tenant_info['room_id'] ?? null;
+
+            // Update room_request status to cancelled
+            $update_rr = $conn->prepare("UPDATE room_requests SET status = 'cancelled' WHERE tenant_id = :tenant_id AND status IN ('pending_payment', 'approved') LIMIT 1");
+            $update_rr->execute(['tenant_id' => $tenant_id]);
+
+            // Update bill status to cancelled
+            $update_bill = $conn->prepare("UPDATE bills SET status = 'cancelled' WHERE tenant_id = :tenant_id AND status IN ('pending', 'partial', 'paid') LIMIT 1");
+            $update_bill->execute(['tenant_id' => $tenant_id]);
+
+            // Free the room if assigned
+            if ($room_id) {
+                $free_room = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+                $free_room->execute(['room_id' => $room_id]);
+            }
+
+            // Clear tenant's room assignment
+            $clear_tenant = $conn->prepare("UPDATE tenants SET room_id = NULL WHERE id = :tenant_id");
+            $clear_tenant->execute(['tenant_id' => $tenant_id]);
+
+            $conn->commit();
+
+            $message = '✓ Guest removed from check-in and booking cancelled!';
+            $message_type = 'success';
+        } catch (Exception $e) {
+            if ($conn->inTransaction()) $conn->rollBack();
+            $message = 'Error: ' . $e->getMessage();
+            $message_type = 'danger';
+        }
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['approve_checkin'])) {
     $tenant_id = intval($_POST['tenant_id'] ?? 0);
     if ($tenant_id > 0) {
@@ -321,12 +389,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['approve_checkout'])) 
     $tenant_id = intval($_POST['tenant_id'] ?? 0);
     if ($tenant_id > 0) {
         try {
-            $stmt = $conn->prepare("UPDATE tenants SET checkout_time = NOW() WHERE id = :id");
-            $stmt->execute(['id' => $tenant_id]);
-            $message = '✓ Guest checked out successfully!';
-            $message_type = 'success';
-            $checkout_info = null;
-            $checkout_details = null;
+            // Get the tenant's current billing status
+            $bill_stmt = $conn->prepare("SELECT 
+                                           COALESCE(SUM(amount_due), 0) - COALESCE(SUM(amount_paid), 0) as outstanding_balance
+                                        FROM bills 
+                                        WHERE tenant_id = :tenant_id");
+            $bill_stmt->execute(['tenant_id' => $tenant_id]);
+            $bill_row = $bill_stmt->fetch(PDO::FETCH_ASSOC);
+            $outstanding_balance = floatval($bill_row['outstanding_balance'] ?? 0);
+            
+            // Check if there's any outstanding balance
+            if ($outstanding_balance > 0.01) {
+                $message = 'Error: Guest cannot check out. Remaining balance: ₱' . number_format($outstanding_balance, 2) . '. Please collect payment before allowing checkout.';
+                $message_type = 'danger';
+            } else {
+                // Balance is settled, proceed with checkout
+                $stmt = $conn->prepare("UPDATE tenants SET checkout_time = NOW() WHERE id = :id");
+                $stmt->execute(['id' => $tenant_id]);
+                $message = '✓ Guest checked out successfully!';
+                $message_type = 'success';
+                $checkout_info = null;
+                $checkout_details = null;
+            }
         } catch (Exception $e) {
             $message = 'Error: ' . $e->getMessage();
             $message_type = 'danger';
@@ -363,14 +447,21 @@ $ready_list = [];
 $checkedin_list = [];
 try {
     // Guests ready to check-in: have room assigned, payment verified, but not yet checked in
-    $ready_stmt = $conn->prepare("SELECT DISTINCT t.id, t.name, t.room_id, r.room_number, rr.checkin_date
+    // Works for both regular customers (room from tenants.room_id) and walk-in customers (room from room_requests)
+    $ready_stmt = $conn->prepare("SELECT DISTINCT t.id, t.name, t.room_id, 
+                                         COALESCE(r.room_number, r2.room_number) as room_number, 
+                                         COALESCE(rr.checkin_date, rr2.checkin_date, b.checkin_date) as checkin_date
                                   FROM tenants t
                                   LEFT JOIN rooms r ON r.id = t.room_id
-                                  LEFT JOIN room_requests rr ON rr.tenant_id = t.id
-                                  WHERE t.room_id IS NOT NULL
+                                  LEFT JOIN room_requests rr ON rr.tenant_id = t.id AND rr.status IN ('approved', 'occupied') AND rr.room_id IS NOT NULL
+                                  LEFT JOIN room_requests rr2 ON rr2.tenant_id = t.id AND rr2.status = 'pending_payment' AND rr2.room_id IS NOT NULL
+                                  LEFT JOIN rooms r2 ON r2.id = COALESCE(rr.room_id, rr2.room_id)
+                                  LEFT JOIN bills b ON b.tenant_id = t.id AND b.room_id = COALESCE(rr.room_id, rr2.room_id, t.room_id) AND b.status IN ('pending', 'partial', 'paid')
+                                  WHERE t.status = 'active'
                                   AND (t.checkin_time IS NULL OR t.checkin_time = '0000-00-00 00:00:00')
-                                  AND EXISTS (SELECT 1 FROM payment_transactions pt JOIN bills b ON pt.bill_id = b.id WHERE b.tenant_id = t.id AND pt.payment_status IN ('verified', 'approved'))
-                                  ORDER BY rr.checkin_date ASC");
+                                  AND (COALESCE(r.id, r2.id) IS NOT NULL)
+                                  AND EXISTS (SELECT 1 FROM payment_transactions pt JOIN bills b2 ON pt.bill_id = b2.id WHERE b2.tenant_id = t.id AND pt.payment_status IN ('verified', 'approved'))
+                                  ORDER BY COALESCE(rr.checkin_date, rr2.checkin_date, b.checkin_date) ASC");
     $ready_stmt->execute();
     $ready_list = $ready_stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -637,6 +728,10 @@ try {
                                                 <input type="hidden" name="tenant_id" value="<?php echo intval($r['id']); ?>">
                                                 <button type="submit" name="approve_checkin" class="btn btn-sm btn-primary">Approve & Check In</button>
                                             </form>
+                                            <form method="POST" class="d-inline" onsubmit="return confirm('Are you sure you want to delete this guest from check-in? This will cancel their booking.');">
+                                                <input type="hidden" name="tenant_id" value="<?php echo intval($r['id']); ?>">
+                                                <button type="submit" name="delete_checkin_guest" class="btn btn-sm btn-danger">Delete</button>
+                                            </form>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -709,27 +804,7 @@ try {
                 </div>
             </div>
 
-            <!-- STEP 3: CHECK-IN APPROVAL -->
-            <?php if (!($guest_info['checkin_time'] && $guest_info['checkin_time'] !== '0000-00-00 00:00:00')): ?>
-            <div class="card shadow-sm border-0 mb-4">
-                <div class="card-header bg-success text-white">
-                    <span class="fw-semibold"><i class="bi bi-3-circle-fill"></i> Check-in Approval</span>
-                </div>
-                <div class="card-body">
-                    <form method="POST">
-                        <input type="hidden" name="tenant_id" value="<?php echo $guest_info['id']; ?>">
-                        <input type="hidden" name="active_tab" value="checkin">
-                        <div class="alert alert-info mb-3">
-                            <strong>Ready to check in guest?</strong> 
-                            Click the button below to record the check-in time and complete the process.
-                        </div>
-                        <button type="submit" name="approve_checkin" class="btn btn-success btn-lg">
-                            <i class="bi bi-check2-square"></i> Approve & Check In Guest
-                        </button>
-                    </form>
-                </div>
-            </div>
-            <?php endif; ?>
+            <!-- Check-in Approval section removed per request -->
 
             <?php endif; ?>
             </div><!-- END CHECK-IN TAB -->
@@ -764,15 +839,31 @@ try {
                                         if ($tenant_status === 'inactive') {
                                             continue; // Skip this row
                                         }
+                                        
+                                        // Check if guest has outstanding balance
+                                        $balance_stmt = $conn->prepare("SELECT 
+                                                                          COALESCE(SUM(amount_due), 0) - COALESCE(SUM(amount_paid), 0) as outstanding_balance
+                                                                       FROM bills 
+                                                                       WHERE tenant_id = :tenant_id");
+                                        $balance_stmt->execute(['tenant_id' => $c['id']]);
+                                        $balance_row = $balance_stmt->fetch(PDO::FETCH_ASSOC);
+                                        $outstanding_balance = floatval($balance_row['outstanding_balance'] ?? 0);
+                                        $has_balance = $outstanding_balance > 0.01;
                                     ?>
-                                    <tr>
+                                    <tr <?php echo $has_balance ? 'class="table-danger"' : ''; ?>>
                                         <td><?php echo htmlspecialchars($c['name']); ?></td>
                                         <td><?php echo htmlspecialchars($c['room_number'] ?? 'N/A'); ?></td>
                                         <td><?php echo $c['checkin_time'] ? date('M d, Y g:i A', strtotime($c['checkin_time'])) : 'N/A'; ?></td>
                                         <td class="text-end">
                                             <form method="POST" class="d-inline">
                                                 <input type="hidden" name="tenant_id" value="<?php echo intval($c['id']); ?>">
-                                                <button type="submit" name="approve_checkout" class="btn btn-sm btn-danger">Approve & Checkout</button>
+                                                <?php if ($has_balance): ?>
+                                                    <button type="submit" name="approve_checkout" class="btn btn-sm btn-secondary" disabled title="Balance due: ₱<?php echo number_format($outstanding_balance, 2); ?>">
+                                                        <i class="bi bi-lock-fill"></i> Balance Due
+                                                    </button>
+                                                <?php else: ?>
+                                                    <button type="submit" name="approve_checkout" class="btn btn-sm btn-danger">Approve & Checkout</button>
+                                                <?php endif; ?>
                                             </form>
                                         </td>
                                     </tr>
@@ -928,13 +1019,26 @@ try {
                     <form method="POST">
                         <input type="hidden" name="tenant_id" value="<?php echo $checkout_info['id']; ?>">
                         <input type="hidden" name="active_tab" value="checkout">
-                        <div class="alert alert-info mb-3">
-                            <strong>Ready to checkout guest?</strong> 
-                            Click the button below to record the checkout time and complete the process.
-                        </div>
-                        <button type="submit" name="approve_checkout" class="btn btn-success btn-lg">
-                            <i class="bi bi-check2-square"></i> Approve & Process Checkout
-                        </button>
+                        
+                        <?php if ($balance > 0.01): ?>
+                            <div class="alert alert-danger mb-3">
+                                <i class="bi bi-exclamation-octagon-fill"></i>
+                                <strong>Checkout Blocked!</strong> 
+                                The guest has an outstanding balance of <strong>₱<?php echo number_format($balance, 2); ?></strong>. 
+                                Payment must be settled before checkout can be completed.
+                            </div>
+                            <button type="submit" name="approve_checkout" class="btn btn-success btn-lg" disabled>
+                                <i class="bi bi-lock-fill"></i> Checkout Blocked - Balance Due
+                            </button>
+                        <?php else: ?>
+                            <div class="alert alert-info mb-3">
+                                <strong>Ready to checkout guest?</strong> 
+                                Click the button below to record the checkout time and complete the process.
+                            </div>
+                            <button type="submit" name="approve_checkout" class="btn btn-success btn-lg">
+                                <i class="bi bi-check2-square"></i> Approve & Process Checkout
+                            </button>
+                        <?php endif; ?>
                     </form>
                 </div>
             </div>
@@ -944,15 +1048,7 @@ try {
 
             <!-- METRICS -->
             <div class="row mb-4 mt-5">
-                <div class="col-md-3 mb-3">
-                    <div class="card metric-card bg-warning text-dark h-100">
-                        <div class="card-body text-center">
-                            <div class="metric-icon mb-2"><i class="bi bi-hourglass-split" style="font-size: 2rem;"></i></div>
-                            <div class="metric-label small">Ready for Check-in</div>
-                            <div class="metric-value" style="font-size: 1.5rem; font-weight: 700;"><?php echo $ready; ?></div>
-                        </div>
-                    </div>
-                </div>
+                <!-- 'Ready for Check-in' metric removed per request -->
                 <div class="col-md-3 mb-3">
                     <div class="card metric-card bg-info text-white h-100">
                         <div class="card-body text-center">

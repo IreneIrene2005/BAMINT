@@ -1,9 +1,9 @@
 <?php
 session_start();
 
-if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true) {
-  header('Location: index.php');
-  exit;
+if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true || !in_array($_SESSION['role'], ['admin', 'front_desk'])) {
+    header('Location: index.php');
+    exit;
 }
 
 require_once 'db_connect.php';
@@ -46,7 +46,6 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
         <h1 class="h2"><i class="bi bi-building"></i> Room Management</h1>
         <div>
           <button class="btn btn-outline-secondary btn-sm" onclick="location.reload();"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
-          <button class="btn btn-primary btn-sm ms-2" onclick="openAddModal()"><i class="bi bi-plus-circle"></i> Add Room</button>
         </div>
       </div>
 
@@ -108,7 +107,9 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
             </div>
             <div>
               <button class="btn btn-primary btn-sm me-2" id="applyRoomFilter">Apply</button>
+              <?php if ($_SESSION['role'] === 'admin'): ?>
               <button class="btn btn-primary" onclick="openAddModal()"><i class="bi bi-plus-circle"></i> Add Room</button>
+              <?php endif; ?>
             </div>
           </div>
         <div class="card-body p-0">
@@ -148,8 +149,12 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
                   <td><?= htmlspecialchars($r['description']) ?></td>
                   <td><?= $r['image'] ? "<img src='".htmlspecialchars($r['image'])."' width='60' class='rounded border'>" : '<span class="text-muted">No image</span>' ?></td>
                   <td>
+                    <?php if ($_SESSION['role'] === 'admin'): ?>
                     <button class="btn btn-sm btn-warning me-1" onclick='openEditModal(<?= json_encode($r, JSON_HEX_APOS|JSON_HEX_QUOT) ?>)'><i class="bi bi-pencil"></i> Edit</button>
                     <button class="btn btn-sm btn-danger" onclick="confirmDelete(<?= (int)$r['id'] ?>)"><i class="bi bi-trash"></i> Delete</button>
+                    <?php else: ?>
+                    <span class="text-muted small">View only</span>
+                    <?php endif; ?>
                   </td>
                 </tr>
                 <?php endwhile; ?>
@@ -352,6 +357,51 @@ window.addEventListener('load', function() {
   // Start realtime metrics refresh
   refreshMetrics();
   setInterval(refreshMetrics, 10000); // every 10s
+  
+  // Real-time room updates for front desk users
+  const isFrontDesk = '<?php echo $_SESSION['role']; ?>' === 'front_desk';
+  if (isFrontDesk) {
+    let lastRoomsChecksum = null;
+    
+    // Calculate checksum for rooms to detect changes
+    function calculateChecksum(data) {
+      let str = JSON.stringify(data);
+      let hash = 0;
+      for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32bit integer
+      }
+      return hash.toString();
+    }
+    
+    // Fetch rooms from API and check for changes
+    async function checkRoomsUpdates() {
+      try {
+        const response = await fetch('api_get_rooms.php');
+        const result = await response.json();
+        
+        if (result.success) {
+          const currentChecksum = calculateChecksum(result.data);
+          
+          // If rooms changed, reload the page
+          if (lastRoomsChecksum !== null && lastRoomsChecksum !== currentChecksum) {
+            console.log('Rooms updated by admin, refreshing page...');
+            location.reload();
+          }
+          
+          lastRoomsChecksum = currentChecksum;
+        }
+      } catch (error) {
+        console.error('Error checking rooms updates:', error);
+      }
+    }
+    
+    // Initial check and then poll every 5 seconds
+    checkRoomsUpdates();
+    setInterval(checkRoomsUpdates, 5000);
+    console.log('Real-time room updates enabled for front desk (5 second interval)');
+  }
 });
 
 function refreshMetrics() {

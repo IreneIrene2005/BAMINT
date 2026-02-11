@@ -14,7 +14,7 @@ if (isset($_SESSION["loggedin"]) && $_SESSION["loggedin"] === true) {
 require_once "db/database.php";
 require_once "db/notifications.php";
 
-$username = $email = $name = $password = $confirm_password = $phone = "";
+$username = $email = $name = $password = $confirm_password = $phone = $address = "";
 $username_err = $email_err = $name_err = $password_err = $confirm_password_err = $phone_err = "";
 $role = isset($_GET['role']) ? $_GET['role'] : 'tenant';
 
@@ -104,6 +104,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             $name = trim($_POST["name"]);
         }
 
+        // Optional address
+        $address = isset($_POST['address']) ? trim($_POST['address']) : null;
+
         // Validate phone
         if (empty(trim($_POST["phone"]))) {
             $phone_err = "Please enter your phone number.";
@@ -166,51 +169,42 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         if (empty($name_err) && empty($email_err) && empty($password_err) && empty($confirm_password_err) && empty($phone_err)) {
             
             // First create a tenant record
-                $sql = "INSERT INTO tenants (name, email, phone, id_number, room_id, start_date, status) 
-                    VALUES (:name, :email, :phone, 'PENDING', NULL, CURDATE(), 'active')";
+                $sql = "INSERT INTO tenants (name, email, phone, address, id_number, room_id, start_date, status) 
+                    VALUES (:name, :email, :phone, :address, 'PENDING', NULL, CURDATE(), 'active')";
             
             if ($stmt = $conn->prepare($sql)) {
                 $stmt->bindParam(":name", $param_name, PDO::PARAM_STR);
                 $stmt->bindParam(":email", $param_email, PDO::PARAM_STR);
                 $stmt->bindParam(":phone", $param_phone, PDO::PARAM_STR);
+                $stmt->bindParam(":address", $param_address, PDO::PARAM_STR);
                 
                 $param_name = $name;
                 $param_email = $email;
                 $param_phone = $phone;
+                $param_address = $address;
                 
                 if ($stmt->execute()) {
                     $tenant_id = $conn->lastInsertId();
                     
                     // Now create the account
-                    $sql = "INSERT INTO tenant_accounts (tenant_id, email, password) 
-                            VALUES (:tenant_id, :email, :password)";
+                        $sql = "INSERT INTO tenant_accounts (tenant_id, email, password, address) 
+                            VALUES (:tenant_id, :email, :password, :address)";
                     
                     if ($stmt = $conn->prepare($sql)) {
                         $stmt->bindParam(":tenant_id", $param_tenant_id, PDO::PARAM_INT);
                         $stmt->bindParam(":email", $param_email, PDO::PARAM_STR);
                         $stmt->bindParam(":password", $param_password, PDO::PARAM_STR);
+                        $stmt->bindParam(":address", $param_address, PDO::PARAM_STR);
                         
                         $param_tenant_id = $tenant_id;
                         $param_email = $email;
                         $param_password = password_hash($password, PASSWORD_DEFAULT);
+                        $param_address = $address;
                         
                         if ($stmt->execute()) {
-                            // Notify all admins about new customer account
+                            // Notify all admins and front desk staff about new customer account
                             try {
-                                $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
-                                foreach ($admins as $admin) {
-                                    createNotification(
-                                        $conn,
-                                        'admin',
-                                        $admin['id'],
-                                        'new_customer_account',
-                                        'New Customer Account',
-                                        'New customer ' . htmlspecialchars($name) . ' (' . htmlspecialchars($email) . ') has registered and is awaiting payment processing.',
-                                        $tenant_id,
-                                        'tenant',
-                                        'admin_tenants.php'
-                                    );
-                                }
+                                notifyAdminsNewAccount($conn, $tenant_id, $name);
                             } catch (Exception $e) {
                                 error_log("Error creating notification: " . $e->getMessage());
                             }
@@ -398,6 +392,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 <?php if (!empty($phone_err)): ?>
                     <span class="text-danger"><?php echo htmlspecialchars($phone_err); ?></span>
                 <?php endif; ?>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Address</label>
+                <textarea name="address" class="form-control" rows="2" placeholder="Street address, city, region"><?php echo htmlspecialchars($address); ?></textarea>
             </div>
 
             <div class="form-group <?php echo (!empty($password_err)) ? 'has-error' : ''; ?>">

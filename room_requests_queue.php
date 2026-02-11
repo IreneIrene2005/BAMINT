@@ -6,6 +6,12 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
     exit;
 }
 
+// Allow admin and front_desk access
+if (!in_array($_SESSION['role'], ['admin', 'front_desk'])) {
+    header("location: index.php");
+    exit;
+}
+
 require_once "db/database.php";
 require_once "db/notifications.php";
 
@@ -25,6 +31,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             try {
                 $upd = $conn->prepare("UPDATE room_requests SET tenant_info_name = :name, tenant_info_email = :email, tenant_info_phone = :phone, tenant_info_address = :address, updated_at = NOW() WHERE id = :id");
                 $upd->execute(['name'=>$name, 'email'=>$email, 'phone'=>$phone, 'address'=>$address, 'id'=>$request_id]);
+                // Sync provided address into tenants and tenant_accounts
+                try {
+                    $syncTenant = $conn->prepare("UPDATE tenants t JOIN room_requests rr ON rr.tenant_id = t.id SET t.address = :address WHERE rr.id = :id");
+                    $syncTenant->execute(['address' => $address, 'id' => $request_id]);
+
+                    $syncAccount = $conn->prepare("UPDATE tenant_accounts ta JOIN room_requests rr ON ta.tenant_id = rr.tenant_id SET ta.address = :address WHERE rr.id = :id");
+                    $syncAccount->execute(['address' => $address, 'id' => $request_id]);
+                } catch (Exception $e) {
+                    // non-fatal: continue even if sync fails
+                    error_log('Address sync failed: ' . $e->getMessage());
+                }
                 $message = 'Request details updated.';
                 $message_type = 'success';
             } catch (Exception $e) {
@@ -35,6 +52,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
     $request_id = intval($_POST['request_id'] ?? 0);
     $action = $_POST['action'];
+
+    // Archive request handler
+    if ($request_id > 0 && $action === 'archive_request') {
+        try {
+            // Add archived_at timestamp to request
+            $archive = $conn->prepare("UPDATE room_requests SET status = 'archived', updated_at = NOW() WHERE id = :id");
+            $archive->execute(['id' => $request_id]);
+            $message = 'Request archived successfully.';
+            $message_type = 'success';
+        } catch (Exception $e) {
+            $message = 'Failed to archive request: ' . $e->getMessage();
+            $message_type = 'danger';
+        }
+    }
 
     // Delete request handler
     if ($request_id > 0 && $action === 'delete_request') {
@@ -76,13 +107,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $update_request = $conn->prepare("UPDATE room_requests SET status = 'approved' WHERE id = :id");
             $update_request->execute(['id' => $request_id]);
 
+            // If the request had an address, copy it into tenants and tenant_accounts
+            try {
+                $addr_stmt = $conn->prepare("SELECT tenant_info_address, tenant_id FROM room_requests WHERE id = :id");
+                $addr_stmt->execute(['id' => $request_id]);
+                $addr_row = $addr_stmt->fetch(PDO::FETCH_ASSOC);
+                if ($addr_row && !empty(trim($addr_row['tenant_info_address']))) {
+                    $address_val = $addr_row['tenant_info_address'];
+                    $tid = $addr_row['tenant_id'];
+                    $conn->prepare("UPDATE tenants SET address = :address WHERE id = :id")->execute(['address' => $address_val, 'id' => $tid]);
+                    $conn->prepare("UPDATE tenant_accounts SET address = :address WHERE tenant_id = :tenant_id")->execute(['address' => $address_val, 'tenant_id' => $tid]);
+                }
+            } catch (Exception $e) {
+                // non-fatal
+                error_log('Address sync on approve failed: ' . $e->getMessage());
+            }
             // Set room status to 'occupied'
-            $room_stmt = $conn->prepare("SELECT room_id FROM room_requests WHERE id = :id");
+            $room_stmt = $conn->prepare("SELECT room_id, tenant_id FROM room_requests WHERE id = :id");
             $room_stmt->execute(['id' => $request_id]);
             $room_row = $room_stmt->fetch(PDO::FETCH_ASSOC);
             if ($room_row && $room_row['room_id']) {
                 $update_room = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id");
                 $update_room->execute(['room_id' => $room_row['room_id']]);
+                
+                // Also update tenant status to 'active' and set room_id and start_date
+                $update_tenant = $conn->prepare("
+                    UPDATE tenants 
+                    SET status = 'active', room_id = :room_id, start_date = CURDATE()
+                    WHERE id = :tenant_id
+                ");
+                $update_tenant->execute(['room_id' => $room_row['room_id'], 'tenant_id' => $room_row['tenant_id']]);
             }
 
             // Fetch tenant_id for notification
@@ -93,10 +147,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $conn->commit();
 
             if ($tenant_id) {
-                notifyTenantRoomRequestStatus($conn, $tenant_id, $request_id, 'approved');
+                // Send booking receipt notification with approval details
+                notifyTenantBookingApproved($conn, $tenant_id, $request_id);
             }
 
-            $message = "Room request approved successfully. Room is now occupied.";
+            $message = "Room request approved successfully. Room is now occupied. Customer notified with booking receipt.";
             $message_type = "success";
 
             } elseif ($action === 'reject') {
@@ -130,7 +185,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 }
 
-// Auto-approve requests when FULL payment is received (both advance payments and walk-in)
+// DISABLED: Manual approval required - auto-approve logic removed
+// Admin must now click Approve button in room_requests_queue.php
+// to mark room as occupied and notify customer with booking receipt
+/*
 try {
     // Find all pending_payment requests with FULL payment (amount paid >= amount due)
     $auto_approve_sql = "
@@ -172,13 +230,17 @@ try {
 } catch (Exception $e) {
     // Silently skip auto-approval errors
 }
+*/
 
 
 // Fetch all room requests with related data
 try {
     // Show only requests with status 'pending_payment' (awaiting payment) or 'approved' by default
+    // Can filter by status using query param
     $filter_status = isset($_GET['status']) ? $_GET['status'] : '';
-    $allowed_statuses = ['pending', 'pending_payment', 'approved', 'rejected'];
+    $view_archived = isset($_GET['view']) && $_GET['view'] === 'archived';
+    $allowed_statuses = ['pending', 'pending_payment', 'approved', 'rejected', 'cancelled', 'archived'];
+    
     $sql = "
         SELECT 
             rr.id,
@@ -208,12 +270,19 @@ try {
         JOIN rooms r ON rr.room_id = r.id
         WHERE 1=1
     ";
-    // Default: show only pending_payment and approved unless a filter is set
+    
+    // Show archived or active based on view parameter
+    if ($view_archived) {
+        $sql .= " AND rr.status = 'archived'";
+    } else {
+        $sql .= " AND rr.status != 'archived' AND rr.status != 'deleted'";
+    }
+    
+    // Additional filter by specific status if provided
     if ($filter_status && in_array($filter_status, $allowed_statuses)) {
         $sql .= " AND rr.status = :status";
-    } else {
-        $sql .= " AND (rr.status = 'pending_payment' OR rr.status = 'approved')";
     }
+    
     $sql .= " ORDER BY rr.request_date DESC";
     $stmt = $conn->prepare($sql);
     if ($filter_status && in_array($filter_status, $allowed_statuses)) {
@@ -255,7 +324,7 @@ try {
                 WHERE 1=1
             ";
             
-            if ($filter_status && in_array($filter_status, ['pending', 'pending_payment', 'approved', 'rejected'])) {
+            if ($filter_status && in_array($filter_status, ['pending', 'pending_payment', 'approved', 'rejected', 'cancelled'])) {
                 $sql .= " AND rr.status = :status";
             }
 
@@ -298,16 +367,22 @@ try {
     $pending_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'pending'");
     $pending_count = $pending_stmt->fetch(PDO::FETCH_ASSOC)['count'];
 
-    $pending_payment_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'pending_payment'");
-    $pending_payment_count = $pending_payment_stmt->fetch(PDO::FETCH_ASSOC)['count'];
+    // Awaiting Payment stat removed; keep variable for compatibility
+    $pending_payment_count = 0;
 
     $approved_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'approved'");
     $approved_count = $approved_stmt->fetch(PDO::FETCH_ASSOC)['count'];
 
     $rejected_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'rejected'");
     $rejected_count = $rejected_stmt->fetch(PDO::FETCH_ASSOC)['count'];
+
+    $cancelled_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'cancelled'");
+    $cancelled_count = $cancelled_stmt->fetch(PDO::FETCH_ASSOC)['count'];
+
+    $archived_stmt = $conn->query("SELECT COUNT(*) as count FROM room_requests WHERE status = 'archived'");
+    $archived_count = $archived_stmt->fetch(PDO::FETCH_ASSOC)['count'];
 } catch (Exception $e) {
-    $total_count = $pending_count = $pending_payment_count = $approved_count = $rejected_count = 0;
+    $total_count = $pending_count = $pending_payment_count = $approved_count = $rejected_count = $cancelled_count = $archived_count = 0;
 }
 ?>
 <!DOCTYPE html>
@@ -361,10 +436,7 @@ try {
             background-color: #cfe2ff;
             color: #084298;
         }
-        .status-pending_payment {
-            background-color: #fff3cd;
-            color: #664d03;
-        }
+        /* Awaiting Payment status styling removed from UI */
         .status-approved {
             background-color: #d1e7dd;
             color: #0f5132;
@@ -407,11 +479,14 @@ try {
     <div class="row">
         <?php include 'templates/sidebar.php'; ?>
 
-        <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
-            <!-- Header -->
-            <div class="header-banner">
-                <h1><i class="bi bi-door-closed"></i> Room Requests Queue</h1>
-                <p class="mb-0">Manage tenant room change requests</p>
+        <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+            <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                <h1 class="h2">
+                    <i class="bi bi-door-closed"></i> Room Requests Queue
+                </h1>
+                <button class="btn btn-outline-secondary btn-sm" onclick="location.reload();" title="Refresh data">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
             </div>
 
             <?php if ($message): ?>
@@ -435,12 +510,7 @@ try {
                         <div class="stat-label">Pending</div>
                     </div>
                 </div>
-                <div class="col-md-2">
-                    <div class="stat-card bg-white">
-                        <div class="stat-value text-info"><?php echo intval($pending_payment_count); ?></div>
-                        <div class="stat-label">Awaiting Payment</div>
-                    </div>
-                </div>
+                
                 <div class="col-md-2">
                     <div class="stat-card bg-white">
                         <div class="stat-value text-success"><?php echo intval($approved_count); ?></div>
@@ -453,6 +523,22 @@ try {
                         <div class="stat-label">Rejected</div>
                     </div>
                 </div>
+                <div class="col-md-2">
+                    <div class="stat-card bg-white">
+                        <div class="stat-value text-secondary"><?php echo intval($archived_count); ?></div>
+                        <div class="stat-label">Archived</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- View Toggle (Active vs Archive) -->
+            <div class="mb-3 d-flex gap-2">
+                <a href="<?php echo isset($_GET['status']) ? 'room_requests_queue.php?status=' . htmlspecialchars($_GET['status']) : 'room_requests_queue.php'; ?>" class="btn btn-sm btn-primary <?php echo !isset($_GET['view']) || $_GET['view'] !== 'archived' ? 'active' : 'btn-outline-primary'; ?>">
+                    <i class="bi bi-inbox"></i> Active Requests
+                </a>
+                <a href="room_requests_queue.php?view=archived<?php echo isset($_GET['status']) ? '&status=' . htmlspecialchars($_GET['status']) : ''; ?>" class="btn btn-sm btn-outline-primary <?php echo isset($_GET['view']) && $_GET['view'] === 'archived' ? 'active' : ''; ?>">
+                    <i class="bi bi-archive"></i> Archived Requests
+                </a>
             </div>
 
             <!-- Filter Buttons -->
@@ -462,9 +548,6 @@ try {
                 </a>
                 <a href="room_requests_queue.php?status=pending" class="btn btn-sm btn-outline-warning filter-btn <?php echo (isset($_GET['status']) && $_GET['status'] === 'pending') ? 'active' : ''; ?>">
                     <i class="bi bi-clock"></i> Pending
-                </a>
-                <a href="room_requests_queue.php?status=pending_payment" class="btn btn-sm btn-outline-info filter-btn <?php echo (isset($_GET['status']) && $_GET['status'] === 'pending_payment') ? 'active' : ''; ?>">
-                    <i class="bi bi-cash-coin"></i> Awaiting Payment
                 </a>
                 <a href="room_requests_queue.php?status=approved" class="btn btn-sm btn-outline-success filter-btn <?php echo (isset($_GET['status']) && $_GET['status'] === 'approved') ? 'active' : ''; ?>">
                     <i class="bi bi-check-circle"></i> Approved
@@ -534,8 +617,24 @@ try {
                                                     echo number_format($total_cost, 2);
                                                 ?> |
                                                 <strong>Room Status:</strong> 
-                                                <span class="badge bg-<?php echo ($request['status'] === 'approved') ? 'danger' : 'info'; ?>">
-                                                    <?php echo ($request['status'] === 'approved') ? 'Occupied' : 'Booked'; ?>
+                                                <span class="badge bg-<?php 
+                                                    if ($request['status'] === 'approved') { 
+                                                        echo 'danger';
+                                                    } elseif ($request['status'] === 'cancelled') {
+                                                        echo 'dark';
+                                                    } else {
+                                                        echo 'info';
+                                                    }
+                                                ?>">
+                                                    <?php 
+                                                        if ($request['status'] === 'approved') {
+                                                            echo 'Occupied';
+                                                        } elseif ($request['status'] === 'cancelled') {
+                                                            echo 'Cancelled';
+                                                        } else {
+                                                            echo 'Booked';
+                                                        }
+                                                    ?>
                                                 </span>
                                             </div>
                                             <div class="mt-1 text-muted small">
@@ -590,7 +689,7 @@ try {
                                                 
                                                 if ($advance_bill) {
                                                     $amount_due = floatval($advance_bill['amount_due']);
-                                                    $pay_stmt = $conn->prepare("SELECT SUM(payment_amount) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_amount > 0");
+                                                    $pay_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount), 0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_amount > 0 AND payment_status IN ('verified', 'approved')");
                                                     $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
                                                     $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
                                                     $paid_amount = $pay && $pay['paid'] ? floatval($pay['paid']) : 0;
@@ -671,8 +770,8 @@ try {
                                                 }
                                             }
                                             if ($show_approve) {
-                                                // Only show to admin
-                                                if (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') {
+                                                // Show to admin and front_desk
+                                                if (isset($_SESSION['role']) && in_array($_SESSION['role'], ['admin', 'front_desk'])) {
                                                     ?>
                                                     <div class="action-buttons">
                                                         <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to approve this request?');">
@@ -689,6 +788,13 @@ try {
                                                                 <i class="bi bi-x-circle"></i> Reject
                                                             </button>
                                                         </form>
+                                                        <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Archive this request?');">
+                                                            <input type="hidden" name="action" value="archive_request">
+                                                            <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
+                                                            <button type="submit" class="btn btn-sm btn-outline-secondary">
+                                                                <i class="bi bi-archive"></i> Archive
+                                                            </button>
+                                                        </form>
                                                         <form method="POST" style="display: inline; margin-left:4px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
                                                             <input type="hidden" name="action" value="delete_request">
                                                             <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
@@ -703,7 +809,14 @@ try {
                                                 echo '<span class="badge bg-success">Approved</span>';
                                                 if (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') {
                                                     ?>
-                                                    <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
+                                                    <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Archive this request?');">
+                                                        <input type="hidden" name="action" value="archive_request">
+                                                        <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
+                                                        <button type="submit" class="btn btn-sm btn-outline-secondary">
+                                                            <i class="bi bi-archive"></i> Archive
+                                                        </button>
+                                                    </form>
+                                                    <form method="POST" style="display: inline; margin-left:4px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
                                                         <input type="hidden" name="action" value="delete_request">
                                                         <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
                                                         <button type="submit" class="btn btn-sm btn-outline-danger">
@@ -716,7 +829,14 @@ try {
                                                 echo '<span class="badge bg-danger">Rejected</span>';
                                                 if (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') {
                                                     ?>
-                                                    <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
+                                                    <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Archive this request?');">
+                                                        <input type="hidden" name="action" value="archive_request">
+                                                        <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
+                                                        <button type="submit" class="btn btn-sm btn-outline-secondary">
+                                                            <i class="bi bi-archive"></i> Archive
+                                                        </button>
+                                                    </form>
+                                                    <form method="POST" style="display: inline; margin-left:4px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
                                                         <input type="hidden" name="action" value="delete_request">
                                                         <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
                                                         <button type="submit" class="btn btn-sm btn-outline-danger">

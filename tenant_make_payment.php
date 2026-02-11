@@ -27,7 +27,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     // Validate input
     $errors = [];
     if ($bill_id < 0) $errors[] = "Please select a bill";
-    if (!in_array($payment_type, ['online', 'cash'])) $errors[] = "Invalid payment type";
+    if (!in_array($payment_type, ['online'])) $errors[] = "Invalid payment type";
     if ($payment_amount <= 0) $errors[] = "Payment amount must be greater than 0";
     if (empty($payment_method)) $errors[] = "Please select a payment method";
 
@@ -99,12 +99,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     }
                     $total_cost = $rate * $nights;
                     // Insert bill
-                    $bill_insert = $conn->prepare("INSERT INTO bills (tenant_id, room_id, amount_due, notes, status, amount_paid, created_at) VALUES (:tenant_id, :room_id, :amount_due, :notes, 'pending', 0, NOW())");
+                    $billing_month = $checkin ? (new DateTime($checkin))->format('Y-m-d') : date('Y-m-d');
+                    $due_date = $checkin ? (new DateTime($checkin))->format('Y-m-d') : date('Y-m-d');
+                    $bill_insert = $conn->prepare("INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, notes, status, amount_paid, checkin_date, checkout_date, created_at, updated_at) VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, :notes, 'pending', 0, :checkin_date, :checkout_date, NOW(), NOW())");
                     $bill_insert->execute([
                         'tenant_id' => $tenant_id,
                         'room_id' => $room_id,
+                        'billing_month' => $billing_month,
                         'amount_due' => $total_cost,
-                        'notes' => 'ADVANCE PAYMENT for Room Request #' . $room_request_id
+                        'due_date' => $due_date,
+                        'notes' => 'ADVANCE PAYMENT for Room Request #' . $room_request_id,
+                        'checkin_date' => $checkin ?: null,
+                        'checkout_date' => $checkout ?: null
                     ]);
                     $bill_id = $conn->lastInsertId();
                     // Fetch the new bill for later use
@@ -407,14 +413,7 @@ try {
                             <small class="text-muted">Submit proof of payment for verification</small>
                         </div>
 
-                        <div class="payment-method-card" data-method="cash" onclick="selectMethod(this)">
-                            <div class="payment-method-icon">
-                                <i class="bi bi-cash-coin text-success"></i>
-                            </div>
-                            <h6>Walk-in / Cash Payment</h6>
-                            <p class="text-muted mb-0">Pay at our office</p>
-                            <small class="text-muted">Admin will process your payment immediately</small>
-                        </div>
+                        <!-- Walk-in / Cash Payment option removed per request -->
                     </div>
 
                     <!-- Payment Form -->
@@ -521,11 +520,8 @@ try {
                                                         $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
                                                         $sum_stmt->execute(['bill_id' => $bill['id']]);
                                                         $live_paid = floatval($sum_stmt->fetchColumn());
-                                                        if ($live_paid > 0 && $live_paid < $room_total) {
-                                                            $recent_bill_balance = $room_total - $live_paid;
-                                                        } else {
-                                                            $recent_bill_balance = $room_total;
-                                                        }
+                                                        // Remaining room balance (zero if fully paid)
+                                                        $recent_bill_balance = max(0, $room_total - $live_paid);
                                                     }
                                                     $grand_total_due = $recent_bill_balance;
                                                     foreach ($additional_items as $ai) {
@@ -567,11 +563,8 @@ try {
                                                     $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
                                                     $sum_stmt->execute(['bill_id' => $bill['id']]);
                                                     $live_paid = floatval($sum_stmt->fetchColumn());
-                                                    if ($live_paid > 0 && $live_paid < $room_total) {
-                                                        $recent_bill_balance = $room_total - $live_paid;
-                                                    } else {
-                                                        $recent_bill_balance = $room_total;
-                                                    }
+                                                    // Remaining room balance (zero if fully paid)
+                                                    $recent_bill_balance = max(0, $room_total - $live_paid);
                                                 }
                                                 $grand_total_due = $recent_bill_balance;
                                                 foreach ($additional_items as $ai) {
@@ -713,9 +706,32 @@ try {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <?php foreach ($payment_history as $ph): ?>
+                                            <?php
+                                            // Prepare statement to fetch latest room_request checkin for a bill/tenant
+                                            $rr_stmt = $conn->prepare("SELECT checkin_date, checkin_time FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                            foreach ($payment_history as $ph): 
+                                                // Default to payment created_at
+                                                $display_date = date('M d, Y H:i', strtotime($ph['created_at']));
+                                                try {
+                                                    if (!empty($ph['tenant_id']) && !empty($ph['room_id'])) {
+                                                        $rr_stmt->execute(['tenant_id' => $ph['tenant_id'], 'room_id' => $ph['room_id']]);
+                                                        $rr = $rr_stmt->fetch(PDO::FETCH_ASSOC);
+                                                        if ($rr && !empty($rr['checkin_date'])) {
+                                                            $cd = $rr['checkin_date'];
+                                                            $ct = !empty($rr['checkin_time']) && $rr['checkin_time'] !== '00:00:00' ? date('g:i A', strtotime($rr['checkin_time'])) : '';
+                                                            if ($ct) {
+                                                                $display_date = date('M d, Y', strtotime($cd)) . ' ' . $ct;
+                                                            } else {
+                                                                $display_date = date('M d, Y', strtotime($cd));
+                                                            }
+                                                        }
+                                                    }
+                                                } catch (Exception $e) {
+                                                    // fallback to created_at on error
+                                                }
+                                            ?>
                                         <tr>
-                                            <td><?php echo htmlspecialchars(date('M d, Y H:i', strtotime($ph['created_at']))); ?></td>
+                                            <td><?php echo htmlspecialchars($display_date); ?></td>
                                             <td>₱<?php echo number_format($ph['payment_amount'], 2); ?></td>
                                             <td><?php echo htmlspecialchars($ph['payment_method']); ?></td>
                                             <td>
@@ -820,7 +836,7 @@ try {
             const proofFile = document.getElementById('proof_of_payment').files.length;
             if (!paymentType) {
                 e.preventDefault();
-                alert('Please select a payment method (Online or Walk-in/Cash)');
+                alert('Please select a payment method (Online)');
                 return false;
             }
             if (!billId) {

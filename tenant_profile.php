@@ -1,8 +1,8 @@
 <?php
 session_start();
 
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "customer") {
-    header("location: index.php?role=customer");
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "tenant") {
+    header("location: index.php?role=tenant");
     exit;
 }
 
@@ -249,14 +249,14 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
                                     <div class="mb-3">
                                         <label for="name" class="form-label">Full Name</label>
                                         <input type="text" class="form-control" id="name" name="name" 
-                                               value="<?php echo htmlspecialchars($tenant['name'] ?? ''); ?>" required>
+                                               value="<?php echo htmlspecialchars($customer['name'] ?? ''); ?>" required>
                                         <small class="text-muted">Your full legal name</small>
                                     </div>
 
                                     <div class="mb-3">
                                         <label for="phone" class="form-label">Phone Number</label>
                                         <input type="tel" class="form-control" id="phone" name="phone" 
-                                               value="<?php echo htmlspecialchars($tenant['phone'] ?? ''); ?>" required>
+                                               value="<?php echo htmlspecialchars($customer['phone'] ?? ''); ?>" required>
                                         <small class="text-muted">Format: 10+ digits (e.g., +63 912 345 6789)</small>
                                     </div>
 
@@ -282,40 +282,40 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
                                 <h6 class="mb-0"><i class="bi bi-door-open"></i> Room & Lease Information</h6>
                             </div>
                             <div class="card-body">
-                                <?php if ($tenant['room_id']): ?>
+                                <?php if ($customer['room_id']): ?>
                                     <div class="info-section">
                                         <div class="info-label">Room Number</div>
-                                        <div class="info-value"><?php echo htmlspecialchars($tenant['room_number']); ?></div>
+                                        <div class="info-value"><?php echo htmlspecialchars($customer['room_number']); ?></div>
                                     </div>
 
                                     <div class="info-section">
                                         <div class="info-label">Room Type</div>
-                                        <div class="info-value"><?php echo htmlspecialchars($tenant['room_type'] ?? 'N/A'); ?></div>
+                                        <div class="info-value"><?php echo htmlspecialchars($customer['room_type'] ?? 'N/A'); ?></div>
                                     </div>
 
                                     <div class="info-section">
                                         <div class="info-label">Monthly Rent</div>
-                                        <div class="info-value text-success">₱<?php echo number_format($tenant['rate'] ?? 0, 2); ?></div>
+                                        <div class="info-value text-success">₱<?php echo number_format($customer['rate'] ?? 0, 2); ?></div>
                                     </div>
 
                                     <div class="info-section">
                                         <div class="info-label">Move-in Date</div>
-                                        <div class="info-value"><?php echo date('F d, Y', strtotime($tenant['start_date'])); ?></div>
+                                        <div class="info-value"><?php echo date('F d, Y', strtotime($customer['start_date'])); ?></div>
                                     </div>
 
                                     <div class="info-section">
                                         <div class="info-label">Status</div>
                                         <div class="info-value">
-                                            <span class="badge bg-<?php echo $tenant['status'] === 'active' ? 'success' : 'secondary'; ?>">
-                                                <?php echo ucfirst($tenant['status']); ?>
+                                            <span class="badge bg-<?php echo $customer['status'] === 'active' ? 'success' : 'secondary'; ?>">
+                                                <?php echo ucfirst($customer['status']); ?>
                                             </span>
                                         </div>
                                     </div>
 
-                                    <?php if ($tenant['end_date']): ?>
+                                    <?php if ($customer['end_date']): ?>
                                         <div class="info-section">
                                             <div class="info-label">Move-out Date</div>
-                                            <div class="info-value"><?php echo date('F d, Y', strtotime($tenant['end_date'])); ?></div>
+                                            <div class="info-value"><?php echo date('F d, Y', strtotime($customer['end_date'])); ?></div>
                                         </div>
                                     <?php endif; ?>
                                 <?php else: ?>
@@ -339,8 +339,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
                                 <div class="info-section">
                                     <div class="info-label">Account Status</div>
                                     <div class="info-value">
-                                        <span class="badge bg-<?php echo $tenant['status'] === 'active' ? 'success' : 'warning'; ?>">
-                                            <?php echo $tenant['status'] === 'active' ? 'Active' : 'Pending Admin Approval'; ?>
+                                        <span class="badge bg-<?php echo $customer['status'] === 'active' ? 'success' : 'warning'; ?>">
+                                            <?php echo $customer['status'] === 'active' ? 'Active' : 'Pending Admin Approval'; ?>
                                         </span>
                                     </div>
                                 </div>

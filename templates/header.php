@@ -4,14 +4,15 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 require_once __DIR__ . "/../db/notifications.php";
+require_once __DIR__ . "/../db_pdo.php";
 
 // Get current user info for notifications
 $recipientType = isset($_SESSION["role"]) ? $_SESSION["role"] : null;
 $recipientId = ($recipientType === "admin") ? ($_SESSION["admin_id"] ?? null) : (isset($_SESSION["tenant_id"]) ? $_SESSION["tenant_id"] : null);
 $unreadCount = 0;
 
-if ($recipientType && $recipientId) {
-    $unreadCount = getUnreadNotificationsCount($conn, $recipientType, $recipientId);
+if ($recipientType && $recipientId && isset($pdo)) {
+    $unreadCount = getUnreadNotificationsCount($pdo, $recipientType, $recipientId);
 }
 ?>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">

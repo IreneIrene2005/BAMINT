@@ -4,8 +4,8 @@ require_once 'db_connect.php';
 require_once 'db_pdo.php';
 require_once 'db/notifications.php';
 
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "admin") {
-    header("location: index.php?role=admin");
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array($_SESSION["role"], ['admin', 'front_desk'])) {
+    header("location: index.php");
     exit;
 }
 
@@ -81,11 +81,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Fetch tenants for selector (exclude archived tenants: status = 'inactive')
+// Fetch active tenants for selector (only active status tenants with assigned room)
 $tenants = [];
 try {
     // Use room_number for display (join rooms)
-    $tstmt = $pdo->query("SELECT t.id, t.name, t.room_id, r.room_number FROM tenants t LEFT JOIN rooms r ON t.room_id = r.id WHERE t.status != 'inactive' ORDER BY t.name ASC");
+    $tstmt = $pdo->query("SELECT t.id, t.name, t.room_id, r.room_number FROM tenants t LEFT JOIN rooms r ON t.room_id = r.id WHERE t.status = 'active' AND t.room_id IS NOT NULL ORDER BY t.name ASC");
     $tenants = $tstmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     // ignore
@@ -233,18 +233,18 @@ if ($tenant_id > 0) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin - Additional Charges</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="stylesheet" href="public/css/style.css">
 </head>
 <body>
 <?php include 'templates/header.php'; ?>
 <div class="container-fluid">
     <div class="row">
         <?php include 'templates/sidebar.php'; ?>
-        <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
+        <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
             <div class="header-banner mb-4">
                 <h1 class="h2 mb-0"><i class="bi bi-wallet2"></i> Additional Charges</h1>
-                <p class="mb-0">View and manage amenity charges added to tenant bills. Use the actions to bill individual items or bill all unbilled charges for a tenant.</p>
             </div>
 
             <?php if ($message): ?>
@@ -266,9 +266,9 @@ if ($tenant_id > 0) {
 
             <form method="GET" class="row g-3 mb-3">
                 <div class="col-md-6">
-                    <label for="tenant_id" class="form-label">Select Tenant</label>
+                    <label for="tenant_id" class="form-label">Select Customer</label>
                     <select name="tenant_id" id="tenant_id" class="form-select" onchange="this.form.submit()">
-                        <option value="">-- Select tenant --</option>
+                        <option value="">-- Select customer --</option>
                         <?php foreach ($tenants as $t): ?>
                             <?php $roomLabel = !empty($t['room_number']) ? $t['room_number'] : $t['room_id']; ?>
                             <option value="<?php echo intval($t['id']); ?>" <?php echo $tenant_id == $t['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($t['name']); ?> (Room <?php echo htmlspecialchars($roomLabel); ?>)</option>

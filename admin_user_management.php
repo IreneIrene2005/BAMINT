@@ -148,16 +148,94 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $message_type = "danger";
             }
         }
+    } elseif ($_POST['action'] === 'edit_customer') {
+        $customer_id = intval($_POST['customer_id'] ?? 0);
+        $name = trim($_POST['name'] ?? '');
+        $email = trim($_POST['email'] ?? '');
+        $phone = trim($_POST['phone'] ?? '');
+        $status = trim($_POST['status'] ?? 'active');
+
+        if ($customer_id <= 0) {
+            $message = "Invalid customer ID.";
+            $message_type = "danger";
+        } else if (!$name || !$email || !$phone) {
+            $message = "Please fill in all required fields.";
+            $message_type = "danger";
+        } else if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $message = "Please enter a valid email address.";
+            $message_type = "danger";
+        } else {
+            try {
+                // Check if email is already used by another customer
+                $check_stmt = $conn->prepare("SELECT id FROM tenants WHERE email = :email AND id != :id");
+                $check_stmt->execute(['email' => $email, 'id' => $customer_id]);
+                if ($check_stmt->rowCount() > 0) {
+                    $message = "Email already exists in the system.";
+                    $message_type = "warning";
+                } else {
+                    $address = isset($_POST['address']) ? trim($_POST['address']) : '';
+                    $stmt = $conn->prepare("UPDATE tenants SET name = :name, email = :email, phone = :phone, address = :address, status = :status WHERE id = :id");
+                    $stmt->execute([
+                        'name' => $name,
+                        'email' => $email,
+                        'phone' => $phone,
+                        'address' => $address,
+                        'status' => $status,
+                        'id' => $customer_id
+                    ]);
+                    $message = "Customer updated successfully.";
+                    $message_type = "success";
+                }
+            } catch (Exception $e) {
+                $message = "Error updating customer: " . $e->getMessage();
+                $message_type = "danger";
+            }
+        }
+    } elseif ($_POST['action'] === 'archive_customer') {
+        $customer_id = intval($_POST['customer_id'] ?? 0);
+        
+        if ($customer_id > 0) {
+            try {
+                $stmt = $conn->prepare("UPDATE tenants SET status = 'inactive' WHERE id = :id");
+                $stmt->execute(['id' => $customer_id]);
+                $message = "Customer archived successfully.";
+                $message_type = "success";
+            } catch (Exception $e) {
+                $message = "Error archiving customer: " . $e->getMessage();
+                $message_type = "danger";
+            }
+        }
+    } elseif ($_POST['action'] === 'delete_customer') {
+        $customer_id = intval($_POST['customer_id'] ?? 0);
+        
+        if ($customer_id > 0) {
+            try {
+                // First, delete any co-tenants associated with this customer
+                $stmt = $conn->prepare("DELETE FROM co_tenants WHERE primary_tenant_id = :id");
+                $stmt->execute(['id' => $customer_id]);
+                
+                // Then, delete the customer
+                $stmt = $conn->prepare("DELETE FROM tenants WHERE id = :id");
+                $stmt->execute(['id' => $customer_id]);
+                
+                $message = "Customer deleted successfully.";
+                $message_type = "success";
+            } catch (Exception $e) {
+                $message = "Error deleting customer: " . $e->getMessage();
+                $message_type = "danger";
+            }
+        }
     }
 }
 
 // Fetch all users
 try {
     $stmt = $conn->query("SELECT id, username, role, created_at FROM admins ORDER BY created_at DESC");
-    $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $users = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
 } catch (Exception $e) {
     $message = "Error loading users: " . $e->getMessage();
     $message_type = "danger";
+    $users = [];
 }
 
 try {
@@ -170,6 +248,10 @@ try {
             (SELECT rr.tenant_info_phone FROM room_requests rr WHERE rr.tenant_id = t.id ORDER BY rr.id DESC LIMIT 1),
             (SELECT ct.phone FROM co_tenants ct WHERE ct.primary_tenant_id = t.id ORDER BY ct.id DESC LIMIT 1)
         ) AS phone,
+        COALESCE(
+            (SELECT rr.tenant_info_address FROM room_requests rr WHERE rr.tenant_id = t.id AND rr.status IN ('approved', 'occupied') ORDER BY rr.id DESC LIMIT 1),
+            t.address
+        ) AS address,
         t.status
     FROM tenants t
     ORDER BY t.id DESC
@@ -180,6 +262,7 @@ try {
 } catch (Exception $e) {
     $message = "Error loading customers: " . $e->getMessage();
     $message_type = "danger";
+    $customers = [];
 }
 ?>
 
@@ -268,24 +351,27 @@ try {
                             </div>
                         <?php else: ?>
                             <?php foreach ($users as $user): ?>
+                                <?php if (!isset($user['id']) || empty($user['id'])): ?>
+                                    <?php continue; ?>
+                                <?php endif; ?>
                                 <div class="col-md-6 col-lg-4">
                                     <div class="card user-card">
                                         <div class="card-body">
                                             <div class="d-flex justify-content-between align-items-start mb-2">
-                                                <h6 class="card-title"><?php echo htmlspecialchars($user['username']); ?></h6>
-                                                <span class="badge role-badge role-<?php echo $user['role']; ?>">
-                                                    <?php echo ucfirst(str_replace('_', ' ', $user['role'])); ?>
+                                                <h6 class="card-title"><?php echo htmlspecialchars($user['username'] ?? ''); ?></h6>
+                                                <span class="badge role-badge role-<?php echo ($user['role'] ?? 'user'); ?>">
+                                                    <?php echo ucfirst(str_replace('_', ' ', $user['role'] ?? 'user')); ?>
                                                 </span>
                                             </div>
                                             <p class="text-muted small">
-                                                Created: <?php echo $user['created_at'] ? date('M d, Y', strtotime($user['created_at'])) : 'N/A'; ?>
+                                                Created: <?php echo (isset($user['created_at']) && $user['created_at']) ? date('M d, Y', strtotime($user['created_at'])) : 'N/A'; ?>
                                             </p>
                                             
                                             <div class="d-grid gap-2">
-                                                <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#editUserModal" onclick="setEditUser(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars($user['username']); ?>', '<?php echo $user['role']; ?>')">
+                                                <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#editUserModal" onclick="setEditUser(<?php echo isset($user['id']) ? $user['id'] : 0; ?>, '<?php echo htmlspecialchars($user['username'] ?? ''); ?>', '<?php echo ($user['role'] ?? 'user'); ?>')">
                                                     <i class="bi bi-pencil-square"></i> Edit Role
                                                 </button>
-                                                <?php if ($user['id'] != $_SESSION['id']): ?>
+                                                <?php if (isset($user['id']) && isset($_SESSION['id']) && $user['id'] != $_SESSION['id']): ?>
                                                     <button type="button" class="btn btn-sm btn-outline-danger" onclick="if(confirm('Delete this user?')) { document.getElementById('deleteForm<?php echo $user['id']; ?>').submit(); }">
                                                         <i class="bi bi-trash"></i> Delete
                                                     </button>
@@ -321,13 +407,15 @@ try {
                                     <th>Name</th>
                                     <th>Email</th>
                                     <th>Phone</th>
+                                    <th>Address</th>
                                     <th>Status</th>
+                                    <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <?php if (empty($customers)): ?>
                                     <tr>
-                                        <td colspan="5" class="text-center text-muted">No customers found.</td>
+                                        <td colspan="6" class="text-center text-muted">No customers found.</td>
                                     </tr>
                                 <?php else: ?>
                                     <?php foreach ($customers as $customer): ?>
@@ -337,10 +425,35 @@ try {
                                             </td>
                                             <td><?php echo htmlspecialchars($customer['email']); ?></td>
                                             <td><?php echo htmlspecialchars($customer['phone']); ?></td>
+                                            <td><?php echo htmlspecialchars($customer['address'] ?? '-'); ?></td>
                                             <td>
                                                 <span class="badge <?php echo $customer['status'] === 'active' ? 'bg-success' : 'bg-danger'; ?>">
                                                     <?php echo ucfirst($customer['status']); ?>
                                                 </span>
+                                            </td>
+                                            <td>
+                                                <div class="d-flex gap-2">
+                                                    <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#viewCustomerModal" onclick="loadCustomerDetails(<?php echo $customer['id']; ?>)">
+                                                        <i class="bi bi-eye"></i> View
+                                                    </button>
+                                                    <button type="button" class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#editCustomerModal" onclick="setEditCustomer(<?php echo $customer['id']; ?>, '<?php echo htmlspecialchars($customer['name']); ?>', '<?php echo htmlspecialchars($customer['email']); ?>', '<?php echo htmlspecialchars($customer['phone']); ?>', '<?php echo htmlspecialchars($customer['address'] ?? ''); ?>', '<?php echo $customer['status']; ?>')">
+                                                        <i class="bi bi-pencil"></i> Edit
+                                                    </button>
+                                                    <form method="POST" style="display: inline;">
+                                                        <input type="hidden" name="action" value="archive_customer">
+                                                        <input type="hidden" name="customer_id" value="<?php echo $customer['id']; ?>">
+                                                        <button type="submit" class="btn btn-sm btn-outline-secondary" onclick="return confirm('Archive this customer?');">
+                                                            <i class="bi bi-archive"></i> Archive
+                                                        </button>
+                                                    </form>
+                                                    <form method="POST" style="display: inline;">
+                                                        <input type="hidden" name="action" value="delete_customer">
+                                                        <input type="hidden" name="customer_id" value="<?php echo $customer['id']; ?>">
+                                                        <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Delete this customer? This cannot be undone.');">
+                                                            <i class="bi bi-trash"></i> Delete
+                                                        </button>
+                                                    </form>
+                                                </div>
                                             </td>
                                         </tr>
                                     <?php endforeach; ?>
@@ -472,12 +585,207 @@ try {
     </div>
 </div>
 
+<!-- View Customer Modal -->
+<div class="modal fade" id="viewCustomerModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-person-check"></i> Customer Details</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="detailsContent">
+                <div class="text-center">
+                    <div class="spinner-border" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Customer Modal -->
+<div class="modal fade" id="editCustomerModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-warning text-dark">
+                <h5 class="modal-title"><i class="bi bi-pencil-square"></i> Edit Customer</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST">
+                <div class="modal-body">
+                    <input type="hidden" name="action" value="edit_customer">
+                    <input type="hidden" id="editCustomerId" name="customer_id" value="">
+                    
+                    <div class="mb-3">
+                        <label for="editCustomerName" class="form-label">Full Name</label>
+                        <input type="text" class="form-control" id="editCustomerName" name="name" required>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="editCustomerEmail" class="form-label">Email Address</label>
+                        <input type="email" class="form-control" id="editCustomerEmail" name="email" required>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="editCustomerPhone" class="form-label">Phone Number</label>
+                        <input type="tel" class="form-control" id="editCustomerPhone" name="phone" required>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="editCustomerAddress" class="form-label">Address</label>
+                        <input type="text" class="form-control" id="editCustomerAddress" name="address" placeholder="Street address">
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="editCustomerStatus" class="form-label">Status</label>
+                        <select class="form-select" id="editCustomerStatus" name="status" required>
+                            <option value="active">Active</option>
+                            <option value="inactive">Inactive</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-warning">Update Customer</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 function setEditUser(userId, username, role) {
     document.getElementById('editUserId').value = userId;
     document.getElementById('editUsername').textContent = username;
     document.getElementById('editRole').value = role;
+}
+
+function loadCustomerDetails(customerId) {
+    const detailsContent = document.getElementById('detailsContent');
+    detailsContent.innerHTML = '<div class="text-center"><div class="spinner-border" role="status"><span class="visually-hidden">Loading...</span></div></div>';
+    
+    fetch('get_customer_details.php?id=' + encodeURIComponent(customerId))
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                let html = `
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <strong>Name:</strong><br>
+                            ${escapeHtml(data.customer.name)}
+                        </div>
+                        <div class="col-md-6">
+                            <strong>Email:</strong><br>
+                            ${escapeHtml(data.customer.email)}
+                        </div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <strong>Phone:</strong><br>
+                            ${escapeHtml(data.customer.phone)}
+                        </div>
+                        <div class="col-md-6">
+                            <strong>Status:</strong><br>
+                            <span class="badge ${data.customer.status === 'active' ? 'bg-success' : 'bg-danger'}">${data.customer.status.toUpperCase()}</span>
+                        </div>
+                    </div>
+                `;
+                
+                if (data.room_info) {
+                    html += `
+                        <hr>
+                        <h6>Room Information</h6>
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <strong>Room Number:</strong><br>
+                                ${escapeHtml(data.room_info.room_number)}
+                            </div>
+                            <div class="col-md-6">
+                                <strong>Room Type:</strong><br>
+                                ${escapeHtml(data.room_info.room_type)}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                if (data.stay_info) {
+                    html += `
+                        <hr>
+                        <h6><i class="bi bi-calendar-check"></i> Check-In/Check-Out Information</h6>
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <strong>Check-in Date:</strong><br>
+                                ${data.stay_info.checkin_date ? new Date(data.stay_info.checkin_date).toLocaleDateString('en-US', {year: 'numeric', month: 'short', day: 'numeric'}) : 'N/A'}
+                            </div>
+                            <div class="col-md-6">
+                                <strong>Check-in Time:</strong><br>
+                                ${data.stay_info.checkin_time ? data.stay_info.checkin_time : 'N/A'}
+                            </div>
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <strong>Check-out Date:</strong><br>
+                                ${data.stay_info.checkout_date ? new Date(data.stay_info.checkout_date).toLocaleDateString('en-US', {year: 'numeric', month: 'short', day: 'numeric'}) : 'N/A'}
+                            </div>
+                            <div class="col-md-6">
+                                <strong>Check-out Time:</strong><br>
+                                ${data.stay_info.checkout_time ? data.stay_info.checkout_time : 'N/A'}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                if (data.co_tenants && data.co_tenants.length > 0) {
+                    html += `
+                        <hr>
+                        <h6><i class="bi bi-people"></i> Roommates (${data.co_tenants.length})</h6>
+                        <div class="list-group">
+                    `;
+                    data.co_tenants.forEach(tenant => {
+                        html += `
+                            <div class="list-group-item">
+                                <strong>${escapeHtml(tenant.name)}</strong><br>
+                                ${tenant.email ? '<small>Email: ' + escapeHtml(tenant.email) + '</small><br>' : ''}
+                                ${tenant.phone ? '<small>Phone: ' + escapeHtml(tenant.phone) + '</small>' : ''}
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                }
+                
+                detailsContent.innerHTML = html;
+            } else {
+                detailsContent.innerHTML = '<div class="alert alert-danger">Error loading customer details</div>';
+            }
+        })
+        .catch(err => {
+            detailsContent.innerHTML = '<div class="alert alert-danger">Error: ' + err.message + '</div>';
+        });
+}
+
+function setEditCustomer(customerId, name, email, phone, address, status) {
+    document.getElementById('editCustomerId').value = customerId;
+    document.getElementById('editCustomerName').value = name;
+    document.getElementById('editCustomerEmail').value = email;
+    document.getElementById('editCustomerPhone').value = phone;
+    document.getElementById('editCustomerAddress').value = address;
+    document.getElementById('editCustomerStatus').value = status;
+}
+
+function escapeHtml(text) {
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, m => map[m]);
 }
 </script>
 </body>

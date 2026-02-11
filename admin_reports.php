@@ -14,19 +14,25 @@ require_once "db/database.php";
     <meta charset="UTF-8">
     <title>Reports & Analytics - BAMINT Admin</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="stylesheet" href="public/css/style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
 </head>
 <body>
+
 <?php include 'templates/header.php'; ?>
 <div class="container-fluid">
     <div class="row">
         <?php include 'templates/sidebar.php'; ?>
         <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
-            <div class="header-banner mb-4">
-                <h1 class="h2 mb-0"><i class="bi bi-bar-chart"></i> Reports & Analytics</h1>
-                <p class="mb-0">Generate and view detailed reports and analytics for bookings, revenue, occupancy, and payments.</p>
+            <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                <h1 class="h2">
+                    <i class="bi bi-bar-chart"></i> Reports & Analytics
+                </h1>
+                <button class="btn btn-outline-secondary btn-sm" onclick="location.reload();" title="Refresh data">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
             </div>
             <div class="row mb-4">
                 <div class="col-md-12">
@@ -184,5 +190,12 @@ document.addEventListener('DOMContentLoaded', function(){
     });
 });
 </script>
+
+        </main>
+    </div>
+</div>
+
+<?php include 'templates/footer.php'; ?>
+
 </body>
 </html>

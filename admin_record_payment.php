@@ -7,8 +7,9 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
-$admin_id = $_SESSION["id"];
+$admin_id = $_SESSION["admin_id"];
 $message = '';
 $message_type = '';
 $tenant_bills = [];
@@ -87,6 +88,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
             $message = "✓ Cash payment recorded successfully!";
             $message_type = "success";
+
+            // Notify all admins about the payment
+            try {
+                $tenant_stmt = $conn->prepare("SELECT name FROM tenants WHERE id = :tenant_id");
+                $tenant_stmt->execute(['tenant_id' => $bill['tenant_id']]);
+                $tenant_info = $tenant_stmt->fetch(PDO::FETCH_ASSOC);
+                $tenant_name = $tenant_info['name'] ?? 'Unknown';
+
+                $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($admins as $admin) {
+                    createNotification(
+                        $conn,
+                        'admin',
+                        $admin['id'],
+                        'payment_recorded',
+                        'Payment Recorded',
+                        'Cash payment of ₱' . number_format($payment_amount, 2) . ' from ' . htmlspecialchars($tenant_name) . ' has been recorded. Bill status: ' . ucfirst($bill_status) . '.',
+                        $bill_id,
+                        'bill',
+                        'admin_record_payment.php'
+                    );
+                }
+            } catch (Exception $e) {
+                error_log('Admin notification for cash payment failed: ' . $e->getMessage());
+            }
 
             // Reset tenant_bills
             $tenant_bills = [];

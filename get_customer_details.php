@@ -19,13 +19,21 @@ if ($tenant_id <= 0) {
 
 try {
     // Get customer information (include tenant-level checkin/checkout when available)
-    $stmt = $conn->prepare("SELECT id, name, email, phone, status, checkin_time, checkout_time, room_id FROM tenants WHERE id = :id");
+    $stmt = $conn->prepare("SELECT id, name, email, phone, address, status, checkin_time, checkout_time, room_id FROM tenants WHERE id = :id");
     $stmt->execute(['id' => $tenant_id]);
     $customer = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$customer) {
         echo json_encode(['success' => false, 'message' => 'Customer not found']);
         exit;
+    }
+    
+    // Get the most recent address from room_requests, fallback to tenants.address
+    $addr_stmt = $conn->prepare("SELECT tenant_info_address FROM room_requests WHERE tenant_id = :tenant_id ORDER BY id DESC LIMIT 1");
+    $addr_stmt->execute(['tenant_id' => $tenant_id]);
+    $addr_row = $addr_stmt->fetch(PDO::FETCH_ASSOC);
+    if ($addr_row && $addr_row['tenant_info_address']) {
+        $customer['address'] = $addr_row['tenant_info_address'];
     }
 
     $response = [
@@ -82,16 +90,14 @@ try {
         }
     }
 
-    // Get co-tenants. Include those explicitly linked to this tenant (primary_tenant_id)
-    // and also co-tenants associated with the same room_id so existing customers are covered.
+    // Get co-tenants linked to this primary tenant (avoid duplicates with DISTINCT)
     $co_tenants_stmt = $conn->prepare("
-        SELECT id, name, email, phone
+        SELECT DISTINCT id, name, email, phone
         FROM co_tenants
         WHERE primary_tenant_id = :tenant_id
-           OR (room_id = :room_id AND :room_id IS NOT NULL)
         ORDER BY name ASC
     ");
-    $co_tenants_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $customer['room_id'] ?? null]);
+    $co_tenants_stmt->execute(['tenant_id' => $tenant_id]);
     $response['co_tenants'] = $co_tenants_stmt->fetchAll(PDO::FETCH_ASSOC);
 
     header('Content-Type: application/json');

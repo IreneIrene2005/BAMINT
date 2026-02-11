@@ -159,7 +159,7 @@ try {
                     </div>
                     <div class="card-body">
                         <div class="row g-3">
-                            <div class="col-md-6">
+                            <div class="col-md-12">
                                 <div class="card border-primary h-100 payment-method-card" onclick="window.location.href='tenant_make_payment.php'">
                                     <div class="card-body text-center py-4">
                                         <div style="font-size: 2.5rem; color: #667eea; margin-bottom: 1rem;">
@@ -172,23 +172,6 @@ try {
                                             <a href="tenant_make_payment.php" class="btn btn-primary btn-sm">
                                                 <i class="bi bi-arrow-right"></i> Pay Online
                                             </a>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="card border-success h-100 payment-method-card" onclick="alert('Visit our office during business hours to pay with cash or check. Our admin staff will record your payment immediately.')" style="cursor: pointer;">
-                                    <div class="card-body text-center py-4">
-                                        <div style="font-size: 2.5rem; color: #28a745; margin-bottom: 1rem;">
-                                            <i class="bi bi-cash-coin"></i>
-                                        </div>
-                                        <h5 class="card-title">Walk-in / Cash Payment</h5>
-                                        <p class="text-muted mb-3">Pay with cash or check at our office</p>
-                                        <p class="small text-secondary">Admin will process your payment immediately</p>
-                                        <div class="mt-3">
-                                            <button class="btn btn-success btn-sm" onclick="alert('Visit our office during business hours to pay with cash or check. Our admin staff will record your payment immediately.'); return false;">
-                                                <i class="bi bi-info-circle"></i> Learn More
-                                            </button>
                                         </div>
                                     </div>
                                 </div>

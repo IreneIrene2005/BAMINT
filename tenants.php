@@ -1,7 +1,7 @@
 <?php
 session_start();
 
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array($_SESSION["role"], ['admin', 'front_desk'])) {
     header("location: index.php");
     exit;
 }
@@ -32,18 +32,40 @@ $filter_room = isset($_GET['room']) ? $_GET['room'] : '';
 $view = isset($_GET['view']) ? $_GET['view'] : 'active';
 
 // Build the SQL query with search and filter
-// Show only active tenants who have made at least one payment
+// Include tenants with room requests that are either:
+// 1. Pending payment with payment verified (awaiting admin approval)
+// 2. Approved/occupied (fully confirmed bookings)
+// This shows customers who have paid and are waiting for approval, plus those already approved
+// Also include walk-in customers that have checkin_time and checkout_time in tenants table
 $sql = "SELECT DISTINCT tenants.*, COALESCE(rooms.room_number, (
             SELECT r2.room_number FROM bills b 
             JOIN rooms r2 ON b.room_id = r2.id 
             WHERE b.tenant_id = tenants.id ORDER BY b.id DESC LIMIT 1
-        )) as room_number FROM tenants 
+        )) as room_number, COALESCE(
+            (SELECT tenant_info_address FROM room_requests WHERE tenant_id = tenants.id AND status IN ('pending_payment', 'approved', 'occupied') ORDER BY id DESC LIMIT 1),
+            tenants.address
+        ) as address FROM tenants 
         LEFT JOIN rooms ON tenants.room_id = rooms.id
-        INNER JOIN payment_transactions ON tenants.id = payment_transactions.tenant_id
-        WHERE tenants.status != 'inactive'";
+        WHERE tenants.status != 'inactive'
+        AND (
+            EXISTS (
+                SELECT 1 FROM room_requests rr
+                WHERE rr.tenant_id = tenants.id 
+                AND (
+                    (rr.status IN ('approved', 'occupied'))
+                    OR (rr.status = 'pending_payment' AND EXISTS (
+                        SELECT 1 FROM bills b 
+                        WHERE b.tenant_id = tenants.id 
+                        AND b.room_id = rr.room_id 
+                        AND b.status IN ('paid', 'partial')
+                    ))
+                )
+            )
+            OR (tenants.checkin_time IS NOT NULL AND tenants.checkin_time != '0000-00-00 00:00:00')
+        )";
 
 if ($search) {
-    $sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR tenants.phone LIKE :search OR tenants.id_number LIKE :search)";
+    $sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR tenants.phone LIKE :search OR tenants.id_number LIKE :search OR (SELECT tenant_info_address FROM room_requests WHERE tenant_id = tenants.id AND status IN ('pending_payment', 'approved', 'occupied') ORDER BY id DESC LIMIT 1) LIKE :search)";
 }
 
 if ($filter_status) {
@@ -55,8 +77,7 @@ if ($filter_room) {
 }
 
 
-// Exclude archived tenants (status = 'inactive') so archived tenants are immediately hidden from active view
-$sql .= " AND tenants.status != 'inactive'";
+// (status filter already applied above)
 
 $sql .= " ORDER BY tenants.name ASC";
 
@@ -76,17 +97,20 @@ if ($filter_room) {
     $stmt->bindParam(':room_id', $filter_room);
 }
 
-// Prepare archive query - show all archived tenants
+// Prepare archive query - show all archived tenants (unless deleted by admin/front desk)
 $archive_sql = "SELECT DISTINCT tenants.*, COALESCE(rooms.room_number, (
             SELECT r2.room_number FROM bills b 
             JOIN rooms r2 ON b.room_id = r2.id 
             WHERE b.tenant_id = tenants.id ORDER BY b.id DESC LIMIT 1
-        )) as room_number FROM tenants 
+        )) as room_number, COALESCE(
+            (SELECT tenant_info_address FROM room_requests WHERE tenant_id = tenants.id ORDER BY id DESC LIMIT 1),
+            tenants.address
+        ) as address FROM tenants 
         LEFT JOIN rooms ON tenants.room_id = rooms.id
         WHERE tenants.status = 'inactive'";
 
 if ($search) {
-    $archive_sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR tenants.phone LIKE :search OR tenants.id_number LIKE :search)";
+    $archive_sql .= " AND (tenants.name LIKE :search OR tenants.email LIKE :search OR tenants.phone LIKE :search OR tenants.id_number LIKE :search OR (SELECT tenant_info_address FROM room_requests WHERE tenant_id = tenants.id ORDER BY id DESC LIMIT 1) LIKE :search)";
 }
 
 if ($filter_status) {
@@ -179,10 +203,6 @@ $available_rooms = $conn->query($sql_available_rooms);
                         <a href="tenants.php?view=active" class="btn btn-sm <?php echo $view === 'active' ? 'btn-primary' : 'btn-outline-primary'; ?>">Active</a>
                         <a href="tenants.php?view=archive" class="btn btn-sm <?php echo $view === 'archive' ? 'btn-primary' : 'btn-outline-primary'; ?>">Archive</a>
                     </div>
-                    <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#addTenantModal">
-                        <i class="bi bi-plus-circle"></i>
-                        Add Walk-in Customer
-                    </button>
                 </div>
             </div>
 
@@ -192,7 +212,7 @@ $available_rooms = $conn->query($sql_available_rooms);
                     <form method="GET" class="row g-3 align-items-end">
                         <div class="col-md-4">
                             <label for="search" class="form-label">Search</label>
-                            <input type="text" class="form-control" id="search" name="search" placeholder="Name, email, phone, ID..." value="<?php echo htmlspecialchars($search); ?>">
+                            <input type="text" class="form-control" id="search" name="search" placeholder="Name, email, phone, address, ID..." value="<?php echo htmlspecialchars($search); ?>">
                         </div>
                         <div class="col-md-3">
                             <label for="status" class="form-label">Status</label>
@@ -230,9 +250,11 @@ $available_rooms = $conn->query($sql_available_rooms);
                             <th>Name</th>
                             <th>Email</th>
                             <th>Phone</th>
+                            <th>Address</th>
                             <th>Room</th>
                             <th>Stay Duration</th>
                             <th>Status</th>
+                            <th>Booking Status</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -255,13 +277,14 @@ $available_rooms = $conn->query($sql_available_rooms);
                             </td>
                             <td><?php echo htmlspecialchars($row['email']); ?></td>
                             <td><?php echo htmlspecialchars($row['phone']); ?></td>
+                            <td><?php echo htmlspecialchars($row['address'] ?? '-'); ?></td>
                             <td>
                                 <?php
-                                    // Only show room if latest room_request is approved or occupied
+                                    // Show room for pending_payment (paid), approved, or occupied bookings
                                     $room_req_stmt = $conn->prepare("SELECT status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                                     $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
                                     $room_req = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                    if ($room_req && in_array($room_req['status'], ['approved', 'occupied'])) {
+                                    if ($room_req && in_array($room_req['status'], ['pending_payment', 'approved', 'occupied'])) {
                                         echo htmlspecialchars($row['room_number']);
                                     } else {
                                         echo '-';
@@ -270,11 +293,11 @@ $available_rooms = $conn->query($sql_available_rooms);
                             </td>
                             <td>
                                 <?php
-                                // Show stay duration as check-in to check-out when available
+                                // Show stay duration for active/paid bookings
                                 $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date, checkin_time, checkout_time, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                                 $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
                                 $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                if ($dates && in_array($dates['status'], ['approved', 'occupied'])) {
+                                if ($dates && in_array($dates['status'], ['pending_payment', 'approved', 'occupied'])) {
                                     if (!empty($dates['checkin_date']) && !empty($dates['checkout_date'])) {
                                         $ci_fmt = date('M d, Y', strtotime($dates['checkin_date']));
                                         $co_fmt = date('M d, Y', strtotime($dates['checkout_date']));
@@ -296,7 +319,21 @@ $available_rooms = $conn->query($sql_available_rooms);
                                         echo '-';
                                     }
                                 } else {
-                                    echo '-';
+                                    // If no room_request times, check tenants table (for walk-in customers added via form)
+                                    if (!empty($row['checkin_time']) && $row['checkin_time'] !== '0000-00-00 00:00:00' && 
+                                        !empty($row['checkout_time']) && $row['checkout_time'] !== '0000-00-00 00:00:00') {
+                                        try {
+                                            $ci_date_obj = new DateTime($row['checkin_time']);
+                                            $co_date_obj = new DateTime($row['checkout_time']);
+                                            $ci_fmt = $ci_date_obj->format('M d, Y g:i A');
+                                            $co_fmt = $co_date_obj->format('M d, Y g:i A');
+                                            echo htmlspecialchars($ci_fmt . ' - ' . $co_fmt);
+                                        } catch (Exception $e) {
+                                            echo '-';
+                                        }
+                                    } else {
+                                        echo '-';
+                                    }
                                 }
                                 ?>
                             </td>
@@ -304,6 +341,23 @@ $available_rooms = $conn->query($sql_available_rooms);
                                 <span class="badge <?php echo $row['status'] === 'active' ? 'bg-success' : 'bg-danger'; ?>">
                                     <?php echo ucfirst($row['status']); ?>
                                 </span>
+                            </td>
+                            <td>
+                                <?php
+                                    // Show booking status from room_requests
+                                    $booking_stmt = $conn->prepare("SELECT status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                    $booking_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
+                                    $booking = $booking_stmt->fetch(PDO::FETCH_ASSOC);
+                                    if ($booking) {
+                                        if ($booking['status'] === 'approved' || $booking['status'] === 'occupied') {
+                                            echo '<span class="badge bg-success"><i class="bi bi-check-circle"></i> Approved</span>';
+                                        } elseif ($booking['status'] === 'pending_payment') {
+                                            echo '<span class="badge bg-warning"><i class="bi bi-clock"></i> Awaiting Approval</span>';
+                                        } else {
+                                            echo '<span class="badge bg-secondary">' . ucfirst($booking['status']) . '</span>';
+                                        }
+                                    }
+                                ?>
                             </td>
                             <td>
                                 <button type="button" class="btn btn-sm btn-outline-info" title="View Details" data-bs-toggle="modal" data-bs-target="#viewDetailsModal" onclick="loadCustomerDetails(<?php echo $row['id']; ?>)"><i class="bi bi-eye"></i></button>
@@ -373,6 +427,10 @@ $available_rooms = $conn->query($sql_available_rooms);
           <div class="mb-3">
             <label for="phone" class="form-label">Phone</label>
             <input type="text" class="form-control" id="phone" name="phone" required>
+          </div>
+          <div class="mb-3">
+            <label for="address" class="form-label">Address</label>
+            <input type="text" class="form-control" id="address" name="address" placeholder="Street address">
           </div>
 
                                         <div class="mb-3">
@@ -484,6 +542,12 @@ function loadCustomerDetails(tenantId) {
                         <div class="col-md-6">
                             <strong>Status:</strong><br>
                             <span class="badge ${data.customer.status === 'active' ? 'bg-success' : 'bg-danger'}">${data.customer.status.toUpperCase()}</span>
+                        </div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-md-12">
+                            <strong>Address:</strong><br>
+                            ${data.customer.address ? escapeHtml(data.customer.address) : '<span class="text-muted">-</span>'}
                         </div>
                     </div>
                 `;

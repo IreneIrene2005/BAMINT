@@ -249,23 +249,6 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                 </div>
             </div>
 
-            <!-- Reports & Analytics Quick Link -->
-            <div class="row">
-                <div class="col-lg-12 mb-4">
-                    <div class="card">
-                        <div class="card-header bg-primary text-white">
-                            <i class="bi bi-bar-chart"></i> Reports & Analytics
-                        </div>
-                        <div class="card-body text-center">
-                            <p>Generate detailed reports and view analytics for bookings, revenue, occupancy, and payments.</p>
-                            <a href="admin_reports.php" class="btn btn-lg btn-success">
-                                <i class="bi bi-bar-chart"></i> Go to Reports & Analytics
-                            </a>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
             <div class="last-updated">
                 <small>Last updated: <span id="updateTime"><?php echo date('M d, Y H:i:s'); ?></span></small>
             </div>

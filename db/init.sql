@@ -502,3 +502,245 @@ CREATE INDEX IF NOT EXISTS idx_original_cancellation ON booking_cancellations_ar
 -- Add role column to admins table for user management
 ALTER TABLE `admins` ADD COLUMN IF NOT EXISTS `role` VARCHAR(50) DEFAULT 'admin';
 ALTER TABLE `admins` ADD COLUMN IF NOT EXISTS `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+
+-- Create booking_cancellations table if it doesn't exist
+CREATE TABLE IF NOT EXISTS `booking_cancellations` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `bill_id` INT NOT NULL,
+  `tenant_id` INT NOT NULL,
+  `room_id` INT NOT NULL,
+  `payment_amount` DECIMAL(10, 2) NOT NULL,
+  `checkin_date` DATE,
+  `checkout_date` DATE,
+  `cancelled_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `reason` TEXT,
+  `refund_approved` TINYINT(1) DEFAULT 0,
+  `refund_amount` DECIMAL(10, 2) DEFAULT NULL,
+  `refund_notes` TEXT,
+  `refund_date` TIMESTAMP NULL,
+  `admin_notes` TEXT,
+  `reviewed_at` TIMESTAMP NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (`bill_id`) REFERENCES `bills`(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`tenant_id`) REFERENCES `tenants`(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`room_id`) REFERENCES `rooms`(`id`) ON DELETE CASCADE,
+  INDEX `idx_tenant_id` (`tenant_id`),
+  INDEX `idx_cancelled_at` (`cancelled_at`),
+  INDEX `idx_refund_approved` (`refund_approved`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Archive tables for storing old records
+-- These tables store archived payment transactions and maintenance requests
+
+CREATE TABLE IF NOT EXISTS payment_transactions_archive (
+    id INT PRIMARY KEY,
+    bill_id INT,
+    tenant_id INT,
+    payment_amount DECIMAL(10, 2),
+    payment_method VARCHAR(50),
+    payment_type VARCHAR(20),
+    payment_status VARCHAR(50),
+    verified_by INT,
+    verification_date DATETIME,
+    notes TEXT,
+    created_at DATETIME,
+    archived_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+    FOREIGN KEY (bill_id) REFERENCES bills(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS maintenance_requests_archive (
+    id INT PRIMARY KEY,
+    tenant_id INT,
+    room_id INT,
+    category VARCHAR(100),
+    description TEXT,
+    priority VARCHAR(20),
+    status VARCHAR(50),
+    assigned_to INT,
+    completion_date DATETIME,
+    notes TEXT,
+    created_at DATETIME,
+    archived_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+    FOREIGN KEY (room_id) REFERENCES rooms(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add index for better query performance
+CREATE INDEX idx_archived_at_payment ON payment_transactions_archive(archived_at);
+CREATE INDEX idx_archived_at_maintenance ON maintenance_requests_archive(archived_at);
+CREATE INDEX idx_tenant_payment_archive ON payment_transactions_archive(tenant_id);
+CREATE INDEX idx_tenant_maintenance_archive ON maintenance_requests_archive(tenant_id);
+
+-- Walk-in Customer Management System SQL Schema
+-- This schema creates tables for the walk-in customer flow
+
+USE bamint;
+
+-- Update tenants table to allow NULL room_id and start_date for walk-in customers
+ALTER TABLE `tenants` MODIFY `room_id` int(11) DEFAULT NULL;
+ALTER TABLE `tenants` MODIFY `start_date` date DEFAULT NULL;
+ALTER TABLE `tenants` ADD COLUMN `created_at` timestamp DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE `tenants` ADD COLUMN `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+
+-- Create co_tenants table for roommates
+CREATE TABLE IF NOT EXISTS `co_tenants` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `primary_tenant_id` int(11) NOT NULL,
+  `room_id` int(11) DEFAULT NULL,
+  `name` varchar(255) NOT NULL,
+  `email` varchar(255),
+  `phone` varchar(20),
+  `address` text,
+  `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `primary_tenant_id` (`primary_tenant_id`),
+  KEY `room_id` (`room_id`),
+  CONSTRAINT `co_tenants_ibfk_1` FOREIGN KEY (`primary_tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `co_tenants_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Update bills table to use tenant_id instead of customer_id and allow NULL room_id
+ALTER TABLE `bills` CHANGE COLUMN `customer_id` `tenant_id` int(11) NOT NULL;
+ALTER TABLE `bills` MODIFY `room_id` int(11) DEFAULT NULL;
+ALTER TABLE `bills` ADD COLUMN IF NOT EXISTS `checkin_date` date DEFAULT NULL;
+ALTER TABLE `bills` ADD COLUMN IF NOT EXISTS `checkout_date` date DEFAULT NULL;
+
+-- Update bills foreign key constraint
+ALTER TABLE `bills` DROP FOREIGN KEY `bills_ibfk_1`;
+ALTER TABLE `bills` ADD CONSTRAINT `bills_ibfk_1` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE;
+
+-- Update payment_transactions table to use tenant_id instead of customer_id
+ALTER TABLE `payment_transactions` CHANGE COLUMN `customer_id` `tenant_id` int(11) NOT NULL;
+ALTER TABLE `payment_transactions` RENAME INDEX `customer_id` TO `tenant_id`;
+
+-- Update payment_transactions foreign key constraint
+ALTER TABLE `payment_transactions` DROP FOREIGN KEY `payment_transactions_ibfk_2`;
+ALTER TABLE `payment_transactions` ADD CONSTRAINT `payment_transactions_ibfk_2` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE;
+
+-- Update room_requests table to support check-in/checkout dates
+ALTER TABLE `room_requests` CHANGE COLUMN `customer_id` `tenant_id` int(11) NOT NULL;
+ALTER TABLE `room_requests` CHANGE COLUMN `customer_count` `tenant_count` int(11) DEFAULT 1;
+ALTER TABLE `room_requests` CHANGE COLUMN `customer_info_name` `tenant_info_name` varchar(255) DEFAULT NULL;
+ALTER TABLE `room_requests` CHANGE COLUMN `customer_info_email` `tenant_info_email` varchar(255) DEFAULT NULL;
+ALTER TABLE `room_requests` CHANGE COLUMN `customer_info_phone` `tenant_info_phone` varchar(20) DEFAULT NULL;
+ALTER TABLE `room_requests` CHANGE COLUMN `customer_info_address` `tenant_info_address` text;
+ALTER TABLE `room_requests` ADD COLUMN IF NOT EXISTS `checkin_date` date DEFAULT NULL;
+ALTER TABLE `room_requests` ADD COLUMN IF NOT EXISTS `checkout_date` date DEFAULT NULL;
+
+-- Update room_requests foreign key constraint
+ALTER TABLE `room_requests` DROP FOREIGN KEY `room_requests_ibfk_1`;
+ALTER TABLE `room_requests` ADD CONSTRAINT `room_requests_ibfk_1` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE;
+
+-- Update maintenance_requests table to use tenant_id instead of customer_id
+ALTER TABLE `maintenance_requests` CHANGE COLUMN `customer_id` `tenant_id` int(11) NOT NULL;
+
+-- Update maintenance_requests foreign key constraint
+ALTER TABLE `maintenance_requests` DROP FOREIGN KEY `maintenance_requests_ibfk_1`;
+ALTER TABLE `maintenance_requests` ADD CONSTRAINT `maintenance_requests_ibfk_1` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE;
+
+-- Create walk_in_sessions table to track walk-in customer progress
+CREATE TABLE IF NOT EXISTS `walk_in_sessions` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `tenant_id` int(11) NOT NULL,
+  `room_id` int(11) DEFAULT NULL,
+  `checkin_date` date DEFAULT NULL,
+  `checkout_date` date DEFAULT NULL,
+  `payment_option` varchar(50) COMMENT 'full_payment or downpayment',
+  `status` varchar(50) NOT NULL DEFAULT 'pending_payment' COMMENT 'pending_payment, payment_verified, room_assigned, completed',
+  `bill_id` int(11) DEFAULT NULL,
+  `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `tenant_id` (`tenant_id`),
+  KEY `room_id` (`room_id`),
+  KEY `bill_id` (`bill_id`),
+  KEY `status` (`status`),
+  CONSTRAINT `walk_in_sessions_ibfk_1` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `walk_in_sessions_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `walk_in_sessions_ibfk_3` FOREIGN KEY (`bill_id`) REFERENCES `bills` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Add address column to existing tenant_accounts table
+ALTER TABLE `tenant_accounts` ADD COLUMN IF NOT EXISTS `address` text DEFAULT NULL;
+
+-- Add room_type column to room_requests to store the chosen room type
+ALTER TABLE `room_requests` ADD COLUMN IF NOT EXISTS `room_type` varchar(100) DEFAULT NULL;
+
+-- Verification query: Check tables after updates
+SELECT TABLE_NAME, COLUMN_NAME, IS_NULLABLE, COLUMN_TYPE 
+FROM INFORMATION_SCHEMA.COLUMNS 
+WHERE TABLE_SCHEMA = 'bamint' 
+AND TABLE_NAME IN ('tenants', 'bills', 'payment_transactions', 'room_requests', 'co_tenants', 'walk_in_sessions', 'tenant_accounts')
+ORDER BY TABLE_NAME, ORDINAL_POSITION;
+
+-- View to fetch the most accurate tenant address (priority: tenant_accounts.address, tenants.address, latest room_requests.tenant_info_address)
+DROP VIEW IF EXISTS tenant_preferred_addresses;
+CREATE VIEW tenant_preferred_addresses AS
+SELECT
+  t.id AS tenant_id,
+  COALESCE(ta.address, t.address, rr.tenant_info_address) AS preferred_address
+FROM tenants t
+LEFT JOIN tenant_accounts ta ON ta.tenant_id = t.id
+LEFT JOIN (
+  SELECT rr1.tenant_id, rr1.tenant_info_address
+  FROM room_requests rr1
+  JOIN (
+    SELECT tenant_id, MAX(request_date) AS max_date FROM room_requests WHERE tenant_info_address IS NOT NULL AND tenant_info_address <> '' GROUP BY tenant_id
+  ) rr2 ON rr1.tenant_id = rr2.tenant_id AND rr1.request_date = rr2.max_date
+) rr ON rr.tenant_id = t.id;
+
+-- Trigger: keep tenant_accounts.address in sync when tenants.address changes
+DELIMITER $$
+CREATE TRIGGER trg_tenants_after_update
+AFTER UPDATE ON tenants
+FOR EACH ROW
+BEGIN
+  IF COALESCE(NEW.address,'') <> COALESCE(OLD.address,'') THEN
+    UPDATE tenant_accounts SET address = NEW.address WHERE tenant_id = NEW.id;
+  END IF;
+END$$
+DELIMITER ;
+
+-- Trigger: when a room request with an address is inserted/updated, copy address into tenants and tenant_accounts
+DELIMITER $$
+-- Ensure any existing triggers are removed, then create BEFORE triggers that set room_type
+DROP TRIGGER IF EXISTS trg_room_requests_after_insert;
+DROP TRIGGER IF EXISTS trg_room_requests_after_update;
+
+DELIMITER $$
+CREATE TRIGGER trg_room_requests_after_insert
+BEFORE INSERT ON room_requests
+FOR EACH ROW
+BEGIN
+  -- populate room_type from rooms table when a room_id is provided
+  IF NEW.room_id IS NOT NULL THEN
+    SET NEW.room_type = (SELECT room_type FROM rooms WHERE id = NEW.room_id LIMIT 1);
+  END IF;
+
+  -- copy tenant_info_address into tenants and tenant_accounts
+  IF NEW.tenant_info_address IS NOT NULL AND TRIM(NEW.tenant_info_address) <> '' THEN
+    UPDATE tenants SET address = NEW.tenant_info_address WHERE id = NEW.tenant_id;
+    UPDATE tenant_accounts SET address = NEW.tenant_info_address WHERE tenant_id = NEW.tenant_id;
+  END IF;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE TRIGGER trg_room_requests_after_update
+BEFORE UPDATE ON room_requests
+FOR EACH ROW
+BEGIN
+  -- if room_id changed or room_type empty, refresh room_type from rooms
+  IF (NEW.room_id IS NOT NULL AND COALESCE(NEW.room_id,0) <> COALESCE(OLD.room_id,0)) OR (NEW.room_type IS NULL OR TRIM(NEW.room_type) = '') THEN
+    SET NEW.room_type = (SELECT room_type FROM rooms WHERE id = NEW.room_id LIMIT 1);
+  END IF;
+
+  -- if tenant_info_address changed, copy into tenants and tenant_accounts
+  IF COALESCE(NEW.tenant_info_address,'') <> COALESCE(OLD.tenant_info_address,'') AND NEW.tenant_info_address IS NOT NULL AND TRIM(NEW.tenant_info_address) <> '' THEN
+    UPDATE tenants SET address = NEW.tenant_info_address WHERE id = NEW.tenant_id;
+    UPDATE tenant_accounts SET address = NEW.tenant_info_address WHERE tenant_id = NEW.tenant_id;
+  END IF;
+END$$
+DELIMITER ;

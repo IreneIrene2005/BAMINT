@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 }
 
 require_once "db/database.php";
+require_once "db_pdo.php";
 require_once "db/notifications.php";
 
 // Convert this page into a Notification Center
@@ -17,9 +18,9 @@ $limit = 50;
 $offset = 0;
 $notifications = [];
 $unreadCount = 0;
-if ($recipientType && $recipientId) {
-    $notifications = getNotifications($conn, $recipientType, $recipientId, $limit, $offset);
-    $unreadCount = getUnreadNotificationsCount($conn, $recipientType, $recipientId);
+if ($recipientType && $recipientId && isset($pdo)) {
+    $notifications = getNotifications($pdo, $recipientType, $recipientId, $limit, $offset);
+    $unreadCount = getUnreadNotificationsCount($pdo, $recipientType, $recipientId);
 }
 ?>
 

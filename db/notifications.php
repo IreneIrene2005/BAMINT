@@ -339,8 +339,8 @@ function notifyAdminsNewPayment($conn, $billId, $tenantId, $amount) {
         $tenant = $stmt->fetch(PDO::FETCH_ASSOC);
         $tenantName = $tenant ? $tenant['name'] : 'Unknown Tenant';
         
-        // Get all admins
-        $sql = "SELECT id FROM admins";
+        // Get all admins and front desk staff
+        $sql = "SELECT id, role FROM admins WHERE role IN ('admin', 'front_desk')";
         $stmt = $conn->prepare($sql);
         $stmt->execute();
         $admins = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -348,11 +348,11 @@ function notifyAdminsNewPayment($conn, $billId, $tenantId, $amount) {
         foreach ($admins as $admin) {
             createNotification(
                 $conn,
-                'admin',
+                $admin['role'],
                 $admin['id'],
                 'payment_made',
                 'New Payment Received',
-                'Payment of $' . number_format($amount, 2) . ' from ' . $tenantName . ' awaits verification.',
+                'Payment of ₱' . number_format($amount, 2) . ' from ' . $tenantName . ' awaits verification.',
                 $billId,
                 'bill',
                 'admin_payment_verification.php'
@@ -411,8 +411,8 @@ function notifyAdminsNewMaintenance($conn, $maintenanceId, $tenantId, $category)
         $tenant = $stmt->fetch(PDO::FETCH_ASSOC);
         $tenantName = $tenant ? $tenant['name'] : 'Unknown Tenant';
         
-        // Get all admins
-        $sql = "SELECT id FROM admins";
+        // Get all admins and front desk staff
+        $sql = "SELECT id, role FROM admins WHERE role IN ('admin', 'front_desk')";
         $stmt = $conn->prepare($sql);
         $stmt->execute();
         $admins = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -420,7 +420,7 @@ function notifyAdminsNewMaintenance($conn, $maintenanceId, $tenantId, $category)
         foreach ($admins as $admin) {
             createNotification(
                 $conn,
-                'admin',
+                $admin['role'],
                 $admin['id'],
                 'maintenance_request',
                 'New Maintenance Request',
@@ -466,6 +466,73 @@ function notifyTenantRoomRequestStatus($conn, $tenantId, $roomRequestId, $status
         return true;
     } catch (Exception $e) {
         error_log("Error notifying tenant about room request: " . $e->getMessage());
+        return false;
+    }
+}
+
+/**
+ * Notify tenant about booking approval with receipt details
+ * @param PDO $conn Database connection
+ * @param int $tenantId Tenant ID
+ * @param int $roomRequestId Room request ID
+ * @return bool Success status
+ */
+function notifyTenantBookingApproved($conn, $tenantId, $roomRequestId) {
+    try {
+        // Fetch booking details: room number, dates, and payment info
+        $stmt = $conn->prepare("
+            SELECT 
+                rr.id,
+                rr.checkin_date,
+                rr.checkout_date,
+                r.room_number,
+                r.room_type,
+                r.rate,
+                b.amount_due,
+                COALESCE(SUM(pt.payment_amount), 0) as total_paid
+            FROM room_requests rr
+            JOIN rooms r ON rr.room_id = r.id
+            LEFT JOIN bills b ON rr.tenant_id = b.tenant_id AND rr.room_id = b.room_id
+            LEFT JOIN payment_transactions pt ON b.id = pt.bill_id AND pt.payment_status IN ('verified', 'approved')
+            WHERE rr.id = :id AND rr.tenant_id = :tenant_id
+            GROUP BY rr.id
+        ");
+        $stmt->execute(['id' => $roomRequestId, 'tenant_id' => $tenantId]);
+        $details = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$details) {
+            error_log("Booking details not found for room request: $roomRequestId");
+            return false;
+        }
+        
+        // Format dates
+        $checkin = !empty($details['checkin_date']) ? date('M d, Y', strtotime($details['checkin_date'])) : 'Not set';
+        $checkout = !empty($details['checkout_date']) ? date('M d, Y', strtotime($details['checkout_date'])) : 'Not set';
+        
+        // Create booking receipt message
+        $message = sprintf(
+            'Your booking for Room %s has been approved! Check-in: %s, Check-out: %s. Total: ₱%.2f (Paid: ₱%.2f)',
+            $details['room_number'],
+            $checkin,
+            $checkout,
+            $details['amount_due'] ?? 0,
+            $details['total_paid'] ?? 0
+        );
+        
+        createNotification(
+            $conn,
+            'tenant',
+            $tenantId,
+            'booking_approved',
+            'Booking Approved - Room ' . $details['room_number'],
+            $message,
+            $roomRequestId,
+            'room_request',
+            'tenant_dashboard.php'
+        );
+        return true;
+    } catch (Exception $e) {
+        error_log("Error notifying tenant about booking approval: " . $e->getMessage());
         return false;
     }
 }
@@ -644,11 +711,18 @@ function addMaintenanceCostToBill($conn, $tenantId, $cost, $requestId = null, $r
             $roomRate = $room['rate'] ?? 0;
             // For a standalone bill created only because no active bill existed, only charge the additional amenity (do not duplicate room rate)
             $totalAmount = $cost;
+            
+            // Get check-in date for this tenant from room_requests
+            $checkinStmt = $conn->prepare("SELECT MAX(checkin_date) as checkin_date, MAX(checkout_date) as checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id");
+            $checkinStmt->execute(['tenant_id' => $tenantId, 'room_id' => $roomId]);
+            $dateInfo = $checkinStmt->fetch(PDO::FETCH_ASSOC);
+            $checkinDate = $dateInfo['checkin_date'] ?: null;
+            $checkoutDate = $dateInfo['checkout_date'] ?: null;
 
             $insertSql = "
                 INSERT INTO bills 
-                (tenant_id, room_id, billing_month, amount_due, amount_paid, status, notes, created_at, updated_at)
-                VALUES (:tenant_id, :room_id, :billing_month, :amount_due, 0, 'pending', :notes, NOW(), NOW())
+                (tenant_id, room_id, billing_month, amount_due, amount_paid, status, notes, checkin_date, checkout_date, created_at, updated_at)
+                VALUES (:tenant_id, :room_id, :billing_month, :amount_due, 0, 'pending', :notes, :checkin_date, :checkout_date, NOW(), NOW())
             ";
             $insertStmt = $conn->prepare($insertSql);
             $insertStmt->execute([
@@ -656,7 +730,9 @@ function addMaintenanceCostToBill($conn, $tenantId, $cost, $requestId = null, $r
                 'room_id' => $roomId,
                 'billing_month' => $targetMonth,
                 'amount_due' => $totalAmount,
-                'notes' => $noteText
+                'notes' => $noteText,
+                'checkin_date' => $checkinDate,
+                'checkout_date' => $checkoutDate
             ]);
 
             $newBillId = $conn->lastInsertId();
@@ -779,6 +855,89 @@ function notifyPartialPayment($conn, $tenantId, $billId, $amountDue, $amountPaid
         return true;
     } catch (Exception $e) {
         error_log("Error notifying partial payment: " . $e->getMessage());
+        return false;
+    }
+}
+
+/**
+ * Notify all admins and front desk staff about new room booking
+ * @param PDO $conn Database connection
+ * @param int $roomRequestId Room request ID
+ * @param int $tenantId Tenant ID
+ * @param int $roomId Room ID
+ * @return bool Success status
+ */
+function notifyAdminsNewBooking($conn, $roomRequestId, $tenantId, $roomId) {
+    try {
+        // Get tenant name
+        $stmt = $conn->prepare("SELECT name FROM tenants WHERE id = :id");
+        $stmt->execute([':id' => $tenantId]);
+        $tenant = $stmt->fetch(PDO::FETCH_ASSOC);
+        $tenantName = $tenant ? $tenant['name'] : 'Unknown Tenant';
+        
+        // Get room number
+        $stmt = $conn->prepare("SELECT room_number FROM rooms WHERE id = :id");
+        $stmt->execute([':id' => $roomId]);
+        $room = $stmt->fetch(PDO::FETCH_ASSOC);
+        $roomNumber = $room ? $room['room_number'] : 'Unknown Room';
+        
+        // Get all admins and front desk staff
+        $sql = "SELECT id, role FROM admins WHERE role IN ('admin', 'front_desk')";
+        $stmt = $conn->prepare($sql);
+        $stmt->execute();
+        $staff = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        foreach ($staff as $person) {
+            createNotification(
+                $conn,
+                $person['role'],
+                $person['id'],
+                'new_booking',
+                'New Room Booking',
+                $tenantName . ' has booked Room ' . $roomNumber . '.',
+                $roomRequestId,
+                'room_request',
+                'admin_bookings.php'
+            );
+        }
+        return true;
+    } catch (Exception $e) {
+        error_log("Error notifying admins about new booking: " . $e->getMessage());
+        return false;
+    }
+}
+
+/**
+ * Notify all admins and front desk staff about new tenant account
+ * @param PDO $conn Database connection
+ * @param int $tenantId Tenant ID
+ * @param string $tenantName Tenant name
+ * @return bool Success status
+ */
+function notifyAdminsNewAccount($conn, $tenantId, $tenantName) {
+    try {
+        // Get all admins and front desk staff
+        $sql = "SELECT id, role FROM admins WHERE role IN ('admin', 'front_desk')";
+        $stmt = $conn->prepare($sql);
+        $stmt->execute();
+        $staff = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        foreach ($staff as $person) {
+            createNotification(
+                $conn,
+                $person['role'],
+                $person['id'],
+                'new_account',
+                'New Customer Account',
+                $tenantName . ' has created a new account.',
+                $tenantId,
+                'tenant',
+                'admin_user_management.php'
+            );
+        }
+        return true;
+    } catch (Exception $e) {
+        error_log("Error notifying admins about new account: " . $e->getMessage());
         return false;
     }
 }

@@ -33,67 +33,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = $_POST['name'];
         $email = $_POST['email'];
         $phone = $_POST['phone'];
+        $address = isset($_POST['address']) ? trim($_POST['address']) : '';
         $tenant_count = isset($_POST['tenant_count']) ? intval($_POST['tenant_count']) : 1;
         $source = $_POST['source'] ?? 'walk-in';
 
         $conn->beginTransaction();
         try {
-            // Prepare check-in/out datetimes (combine date + time when provided)
-            $checkin_datetime = $_POST['checkin_date'] ?? null;
-            $checkout_datetime = $_POST['checkout_date'] ?? null;
+            // Get separate date and time fields from the form
+            $checkin_date = $_POST['checkin_date'] ?? null;        // Y-m-d format
+            $checkin_time = $_POST['checkin_time'] ?? null;        // h:i K format from flatpickr
+            $checkout_date = $_POST['checkout_date'] ?? null;      // Y-m-d format
+            $checkout_time = $_POST['checkout_time'] ?? null;      // h:i K format from flatpickr
             
-            // Parse datetime strings from flatpickr (format: "Y-m-d h:i K" e.g., "2026-02-09 02:30 PM")
-            $checkin_date = null;
-            $checkin_time = null;
-            $checkout_date = null;
-            $checkout_time = null;
-            
-            if ($checkin_datetime) {
-                $parts = explode(' ', trim($checkin_datetime));
-                $checkin_date = $parts[0]; // Y-m-d
-                if (count($parts) >= 2) {
-                    $checkin_time = $parts[1]; // h:i (time in 12-hour format)
-                    if (count($parts) >= 3) {
-                        $checkin_time .= ' ' . $parts[2]; // Add AM/PM
-                    }
-                }
-            }
-            
-            if ($checkout_datetime) {
-                $parts = explode(' ', trim($checkout_datetime));
-                $checkout_date = $parts[0]; // Y-m-d
-                if (count($parts) >= 2) {
-                    $checkout_time = $parts[1]; // h:i (time in 12-hour format)
-                    if (count($parts) >= 3) {
-                        $checkout_time .= ' ' . $parts[2]; // Add AM/PM
-                    }
-                }
-            }
-
             $start_date = $checkin_date ?: null;
             $checkin_dt = null;
             $checkout_dt = null;
-            if ($checkin_date) {
-                $ct = $checkin_time ? $checkin_time : '00:00';
-                $checkin_dt = date('Y-m-d H:i:s', strtotime($checkin_date . ' ' . $ct));
+            
+            // Combine date and time into full datetime
+            if ($checkin_date && $checkin_time) {
+                // Combine date + time and convert to DATETIME format
+                $checkin_dt = date('Y-m-d H:i:s', strtotime($checkin_date . ' ' . $checkin_time));
+            } elseif ($checkin_date) {
+                // If only date provided, use midnight
+                $checkin_dt = date('Y-m-d H:i:s', strtotime($checkin_date));
             }
-            if ($checkout_date) {
-                $cot = $checkout_time ? $checkout_time : '00:00';
-                $checkout_dt = date('Y-m-d H:i:s', strtotime($checkout_date . ' ' . $cot));
+            
+            if ($checkout_date && $checkout_time) {
+                // Combine date + time and convert to DATETIME format
+                $checkout_dt = date('Y-m-d H:i:s', strtotime($checkout_date . ' ' . $checkout_time));
+            } elseif ($checkout_date) {
+                // If only date provided, use midnight
+                $checkout_dt = date('Y-m-d H:i:s', strtotime($checkout_date));
             }
 
             // Create tenant record WITHOUT room assignment (walk-in customer)
-            $sql = "INSERT INTO tenants (name, email, phone, start_date, checkin_time, checkout_time, status) VALUES (:name, :email, :phone, :start_date, :checkin_time, :checkout_time, 'active')";
+            $sql = "INSERT INTO tenants (name, email, phone, address, start_date, checkin_time, checkout_time, status) VALUES (:name, :email, :phone, :address, :start_date, :checkin_time, :checkout_time, 'active')";
             $stmt = $conn->prepare($sql);
             $stmt->execute([
                 'name' => $name,
                 'email' => $email,
                 'phone' => $phone,
+                'address' => $address,
                 'start_date' => $start_date,
                 'checkin_time' => $checkin_dt,
                 'checkout_time' => $checkout_dt
             ]);
             $newTenantId = $conn->lastInsertId();
+
+            // Sync address to tenant_accounts if an account exists for this tenant
+            if (!empty($address)) {
+                $sync_stmt = $conn->prepare("UPDATE tenant_accounts SET address = :address WHERE tenant_id = :tenant_id");
+                $sync_stmt->execute(['address' => $address, 'tenant_id' => $newTenantId]);
+            }
 
             // Save co-tenants if occupants > 1
             if ($tenant_count > 1) {
@@ -148,27 +139,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ]);
                 $roomRequestId = $conn->lastInsertId();
 
-                // Notify all admins about the new room booking
+                // Notify all admins and front desk staff about the new room booking
                 try {
-                    $room_info = $conn->prepare("SELECT room_number, room_type FROM rooms WHERE id = :room_id");
-                    $room_info->execute(['room_id' => $room_id]);
-                    $room_data = $room_info->fetch(PDO::FETCH_ASSOC);
-                    $room_number = $room_data['room_number'] ?? 'N/A';
-                    
-                    $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
-                    foreach ($admins as $admin) {
-                        createNotification(
-                            $conn,
-                            'admin',
-                            $admin['id'],
-                            'room_booked',
-                            'New Room Booking',
-                            'Customer ' . htmlspecialchars($name) . ' booked Room ' . $room_number . ' from ' . ($checkin_dt ?? $checkin_date ?? 'TBD') . ' to ' . ($checkout_dt ?? $checkout_date ?? 'TBD') . '.',
-                            $roomRequestId,
-                            'room_request',
-                            'admin_bookings.php'
-                        );
-                    }
+                    notifyAdminsNewBooking($conn, $roomRequestId, $newTenantId, $room_id);
                 } catch (Exception $e) {
                     error_log("Error creating booking notification: " . $e->getMessage());
                 }
@@ -215,6 +188,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = $_POST['name'];
         $email = $_POST['email'];
         $phone = $_POST['phone'];
+        $address = isset($_POST['address']) ? trim($_POST['address']) : '';
         $room_id = $_POST['room_id'] ?? null;
         $checkin_date = $_POST['checkin_date'] ?? null;
         $checkout_date = $_POST['checkout_date'] ?? null;
@@ -223,9 +197,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $conn->beginTransaction();
         try {
-            $sql = "UPDATE tenants SET name = :name, email = :email, phone = :phone, room_id = :room_id, start_date = :start_date WHERE id = :id";
+            $sql = "UPDATE tenants SET name = :name, email = :email, phone = :phone, address = :address, room_id = :room_id, start_date = :start_date WHERE id = :id";
             $stmt = $conn->prepare($sql);
-            $stmt->execute(['name' => $name, 'email' => $email, 'phone' => $phone, 'room_id' => $room_id, 'start_date' => $start_date, 'id' => $id]);
+            $stmt->execute(['name' => $name, 'email' => $email, 'phone' => $phone, 'address' => $address, 'room_id' => $room_id, 'start_date' => $start_date, 'id' => $id]);
+
+            // Keep tenant_accounts.address in sync when tenant record is edited
+            $sync_stmt = $conn->prepare("UPDATE tenant_accounts SET address = :address WHERE tenant_id = :tenant_id");
+            $sync_stmt->execute(['address' => $address, 'tenant_id' => $id]);
 
             if ($original_room_id != $room_id) {
                 // Update old room to available
@@ -503,6 +481,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <div class="mb-3">
                             <label for="phone" class="form-label">Phone</label>
                             <input type="text" class="form-control" id="phone" name="phone" value="<?php echo htmlspecialchars($tenant['phone']); ?>" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="address" class="form-label">Address</label>
+                            <input type="text" class="form-control" id="address" name="address" value="<?php echo htmlspecialchars($tenant['address'] ?? ''); ?>">
                         </div>
                         
                         <div class="mb-3">

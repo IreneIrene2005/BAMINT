@@ -16,17 +16,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     if ($action === 'generate') {
         // Generate monthly bills for all active tenants
-        $billing_month = $_POST['billing_month'] . '-01';
+        $billing_month_input = $_POST['billing_month'];
+        // If input is YYYY-MM, convert to YYYY-MM-01; if already YYYY-MM-DD, use as is
+        $billing_month = (strlen($billing_month_input) === 7) ? $billing_month_input . '-01' : $billing_month_input;
         $due_date = $_POST['due_date'];
         
         try {
             $conn->beginTransaction();
             
-            // Get all active tenants with their room rates
-            $sql = "SELECT tenants.id, tenants.name, rooms.id as room_id, rooms.rate 
+            // Get all active tenants with their room rates and check-in dates
+            $sql = "SELECT tenants.id, tenants.name, tenants.room_id, rooms.id as room_id, rooms.rate,
+                           MAX(rr.checkin_date) as checkin_date, MAX(rr.checkout_date) as checkout_date
                     FROM tenants 
                     JOIN rooms ON tenants.room_id = rooms.id 
-                    WHERE tenants.status = 'active'";
+                    LEFT JOIN room_requests rr ON tenants.id = rr.tenant_id AND tenants.room_id = rr.room_id
+                    WHERE tenants.status = 'active'
+                    GROUP BY tenants.id";
             
             $stmt = $conn->prepare($sql);
             $stmt->execute();
@@ -44,15 +49,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 
                 if ($check_stmt->rowCount() == 0) {
                     // Create new bill
-                    $insert_sql = "INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status) 
-                                  VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending')";
+                    $insert_sql = "INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, checkin_date, checkout_date) 
+                                  VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :checkin_date, :checkout_date)";
                     $insert_stmt = $conn->prepare($insert_sql);
                     $insert_stmt->execute([
                         'tenant_id' => $tenant['id'],
                         'room_id' => $tenant['room_id'],
                         'billing_month' => $billing_month,
                         'amount_due' => $tenant['rate'],
-                        'due_date' => $due_date
+                        'due_date' => $due_date,
+                        'checkin_date' => $tenant['checkin_date'] ?: null,
+                        'checkout_date' => $tenant['checkout_date'] ?: null
                     ]);
                     
                     // Get the bill ID for the notification
@@ -91,27 +98,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'add') {
         // Add manual bill
         $tenant_id = $_POST['tenant_id'];
-        $billing_month = $_POST['billing_month'] . '-01';
+        $billing_month_input = $_POST['billing_month'];
+        // If input is YYYY-MM, convert to YYYY-MM-01; if already YYYY-MM-DD, use as is
+        $billing_month = (strlen($billing_month_input) === 7) ? $billing_month_input . '-01' : $billing_month_input;
         $amount_due = $_POST['amount_due'];
         $due_date = $_POST['due_date'] ?? null;
         
         try {
-            // Get the tenant's room_id
-            $sql = "SELECT room_id FROM tenants WHERE id = :id";
+            // Get the tenant's room_id and check-in date from room_requests
+            $sql = "SELECT t.room_id, MAX(rr.checkin_date) as checkin_date, MAX(rr.checkout_date) as checkout_date 
+                    FROM tenants t 
+                    LEFT JOIN room_requests rr ON t.id = rr.tenant_id AND t.room_id = rr.room_id
+                    WHERE t.id = :id
+                    GROUP BY t.id";
             $stmt = $conn->prepare($sql);
             $stmt->execute(['id' => $tenant_id]);
             $tenant = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if ($tenant) {
-                $insert_sql = "INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status) 
-                              VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending')";
+                $insert_sql = "INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, checkin_date, checkout_date) 
+                              VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :checkin_date, :checkout_date)";
                 $insert_stmt = $conn->prepare($insert_sql);
                 $insert_stmt->execute([
                     'tenant_id' => $tenant_id,
                     'room_id' => $tenant['room_id'],
                     'billing_month' => $billing_month,
                     'amount_due' => $amount_due,
-                    'due_date' => $due_date
+                    'due_date' => $due_date,
+                    'checkin_date' => $tenant['checkin_date'] ?: null,
+                    'checkout_date' => $tenant['checkout_date'] ?: null
                 ]);
                 
                 // Get the bill ID for the notification
@@ -207,6 +222,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     due_date, 
                     status, 
                     notes, 
+                    checkin_date,
+                    checkout_date,
                     created_at,
                     updated_at
                 ) VALUES (
@@ -218,13 +235,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     :due_date, 
                     :status, 
                     :notes,
+                    :checkin_date,
+                    :checkout_date,
                     NOW(),
                     NOW()
                 )
             ";
             
-            $billing_month = date('Y-m-01');
-            $due_date = date('Y-m-15');
+            // Use actual checkin_date as billing_month, fallback to current date if not available
+            $billing_month = $booking['checkin_date'] ? (new DateTime($booking['checkin_date']))->format('Y-m-d') : date('Y-m-d');
+            $due_date = $booking['checkin_date'] ? (new DateTime($booking['checkin_date']))->format('Y-m-d') : date('Y-m-d');
             $payment_type_note = ($payment_type === 'downpayment') ? 'Downpayment (50%)' : 'Full Payment';
             $notes = "Payment Type: {$payment_type_note} | Payment Method: " . ucfirst($payment_method);
             
@@ -237,7 +257,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'amount_paid' => $amount_paid,
                 'due_date' => $due_date,
                 'status' => $status,
-                'notes' => $notes
+                'notes' => $notes,
+                'checkin_date' => $booking['checkin_date'] ?: null,
+                'checkout_date' => $booking['checkout_date'] ?: null
             ]);
             
             $bill_id = $conn->lastInsertId();
@@ -417,6 +439,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $room_id = $_POST['room_id'] ?? null;
         $checkin = $_POST['checkin_date'] ?? null;
         $checkout = $_POST['checkout_date'] ?? null;
+        $checkin_time = $_POST['checkin_time'] ?? null;
+        $checkout_time = $_POST['checkout_time'] ?? null;
         $payment_option = $_POST['payment_option'] ?? 'full_payment';
 
         if (!$tenant_id) {
@@ -449,29 +473,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $total_cost = $rate * max(1, $nights);
 
+            // Bill should always show FULL cost, regardless of payment option
+            $amount_due = round($total_cost, 2);
+            
+            // Payment transaction will record what was actually paid
             if ($payment_option === 'downpayment') {
-                $amount_due = round($total_cost * 0.5, 2);
+                $amount_paid_now = round($total_cost * 0.5, 2);
+                $payment_notes = "Downpayment (50%) - Balance due: ₱" . number_format($total_cost * 0.5, 2);
             } else {
-                $amount_due = round($total_cost, 2);
+                $amount_paid_now = round($total_cost, 2);
+                $payment_notes = "Full payment";
             }
 
             // Create or update bill for this tenant and room (pending)
-            $billing_month = $checkin ? (new DateTime($checkin))->format('Y-m') : date('Y-m');
-            $due_date = $checkin ?: date('Y-m-d');
+            $billing_month = $checkin ? (new DateTime($checkin))->format('Y-m-d') : date('Y-m-d');
+            $due_date = $checkin ? (new DateTime($checkin))->format('Y-m-d') : date('Y-m-d');
 
             $notes = ($payment_option === 'downpayment') ? "ADVANCE PAYMENT (Downpayment) - {$nights} night(s), ₱" . number_format($rate,2) . "/night" : "ADVANCE PAYMENT - Full payment (" . $nights . " night(s))";
 
             // Insert bill
-            $insert = $conn->prepare("INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, created_at, updated_at) VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, NOW(), NOW())");
+            $insert = $conn->prepare("INSERT INTO bills (tenant_id, room_id, billing_month, amount_due, due_date, status, notes, checkin_date, checkout_date, checkin_time, checkout_time, created_at, updated_at) VALUES (:tenant_id, :room_id, :billing_month, :amount_due, :due_date, 'pending', :notes, :checkin_date, :checkout_date, :checkin_time, :checkout_time, NOW(), NOW())");
             $insert->execute([
                 'tenant_id' => $tenant_id,
                 'room_id' => $room_id,
                 'billing_month' => $billing_month,
                 'amount_due' => $amount_due,
                 'due_date' => $due_date,
-                'notes' => $notes
+                'notes' => $notes,
+                'checkin_date' => $checkin ?: null,
+                'checkout_date' => $checkout ?: null,
+                'checkin_time' => $checkin_time ?: null,
+                'checkout_time' => $checkout_time ?: null
             ]);
             $bill_id = $conn->lastInsertId();
+
+            // Record the payment transaction (downpayment or full) and update bill
+            $payment_status = ($payment_option === 'downpayment') ? 'partial' : 'paid';
+            $update_bill = $conn->prepare("UPDATE bills SET amount_paid = :amount_paid, status = :status WHERE id = :bill_id");
+            $update_bill->execute([
+                'amount_paid' => $amount_paid_now,
+                'status' => $payment_status,
+                'bill_id' => $bill_id
+            ]);
+            
+            // Create payment transaction
+            $payment_insert = $conn->prepare("INSERT INTO payment_transactions (bill_id, tenant_id, payment_amount, payment_method, payment_type, payment_status, payment_date, notes, recorded_by, created_at) VALUES (:bill_id, :tenant_id, :payment_amount, :payment_method, :payment_type, :payment_status, NOW(), :notes, :recorded_by, NOW())");
+            $payment_insert->execute([
+                'bill_id' => $bill_id,
+                'tenant_id' => $tenant_id,
+                'payment_amount' => $amount_paid_now,
+                'payment_method' => 'cash',
+                'payment_type' => ($payment_option === 'downpayment') ? 'downpayment' : 'full',
+                'payment_status' => 'approved',
+                'notes' => $payment_notes,
+                'recorded_by' => $_SESSION['admin_id'] ?? null
+            ]);
 
             // Mark room occupied so it's reserved
             if ($room_id) {
@@ -479,9 +535,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $upd->execute(['id' => $room_id]);
             }
 
-            // If there is a pending room_request, update its status to pending_payment (already) and link to bill via notes or leave as-is
-            $rr_stmt = $conn->prepare("UPDATE room_requests SET status = 'pending_payment' WHERE tenant_id = :tenant_id AND room_id = :room_id AND status != 'approved'");
-            $rr_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $room_id]);
+            // Create or update room_request for walk-in customer
+            $check_rr = $conn->prepare("SELECT id FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id");
+            $check_rr->execute(['tenant_id' => $tenant_id, 'room_id' => $room_id]);
+            
+            if ($check_rr->rowCount() > 0) {
+                // Update existing room_request with times and status
+                $rr_stmt = $conn->prepare("UPDATE room_requests SET status = 'pending_payment', checkin_date = :checkin_date, checkout_date = :checkout_date, checkin_time = :checkin_time, checkout_time = :checkout_time WHERE tenant_id = :tenant_id AND room_id = :room_id AND status != 'approved'");
+                $rr_stmt->execute([
+                    'tenant_id' => $tenant_id, 
+                    'room_id' => $room_id,
+                    'checkin_date' => $checkin ?: null,
+                    'checkout_date' => $checkout ?: null,
+                    'checkin_time' => $checkin_time ?: null,
+                    'checkout_time' => $checkout_time ?: null
+                ]);
+            } else {
+                // Create new room_request for walk-in customer
+                $insert_rr = $conn->prepare("INSERT INTO room_requests (tenant_id, room_id, checkin_date, checkout_date, checkin_time, checkout_time, status, created_at) 
+                                            VALUES (:tenant_id, :room_id, :checkin_date, :checkout_date, :checkin_time, :checkout_time, 'pending_payment', NOW())");
+                $insert_rr->execute([
+                    'tenant_id' => $tenant_id, 
+                    'room_id' => $room_id,
+                    'checkin_date' => $checkin ?: null,
+                    'checkout_date' => $checkout ?: null,
+                    'checkin_time' => $checkin_time ?: null,
+                    'checkout_time' => $checkout_time ?: null
+                ]);
+            }
 
             $conn->commit();
             $_SESSION['message'] = 'Invoice generated. Bill ID #' . $bill_id;
@@ -960,11 +1041,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     </td>
                                 </tr>
                                 <tr>
-                                    <td><strong>Room Balance After Downpayment</strong></td>
+                                    <td><strong>Total Amount Paid</strong></td>
                                     <td class="text-end">
                                         <?php
-                                        $room_balance = ($total_cost !== null ? $total_cost : 0) - $downpayment;
-                                        echo '<strong>₱' . number_format($room_balance, 2) . '</strong>';
+                                        // Calculate total paid from all verified/approved payments
+                                        $total_paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as total_paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved')");
+                                        $total_paid_stmt->execute(['bill_id' => $bill['id']]);
+                                        $total_paid = floatval($total_paid_stmt->fetchColumn());
+                                        echo '<strong>₱' . number_format($total_paid, 2) . '</strong>';
+                                        ?>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Room Balance</strong></td>
+                                    <td class="text-end">
+                                        <?php
+                                        $room_balance = ($total_cost !== null ? $total_cost : 0) - $total_paid;
+                                        echo '<strong>₱' . number_format(max(0, $room_balance), 2) . '</strong>';
                                         ?>
                                     </td>
                                 </tr>
@@ -984,7 +1077,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     <td><strong>Grand Total Due</strong></td>
                                     <td class="text-end">
                                         <?php
-                                        $grand_total_due = $room_balance + $total_charges;
+                                        // Grand Total Due = Remaining Room Balance (if any) + Additional Charges
+                                        // If room is fully paid, Grand Total Due = Additional Charges only
+                                        $grand_total_due = max(0, $room_balance) + $total_charges;
                                         echo '<strong>₱' . number_format($grand_total_due, 2) . '</strong>';
                                         ?>
                                     </td>

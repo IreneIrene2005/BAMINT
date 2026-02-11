@@ -8,8 +8,8 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
 
 require_once "db/database.php";
 
-// Admin role check
-if ($_SESSION['role'] !== 'admin') {
+// Admin/Front Desk role check
+if (!in_array($_SESSION['role'], ['admin', 'front_desk'])) {
     header("location: index.php");
     exit;
 }
@@ -58,50 +58,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     ");
                     $update_bill->execute(['status' => $bill_status, 'amount_paid' => $total_paid, 'id' => $payment_info['bill_id']]);
 
-                    // CHECK: Is this an advance/move-in payment? Handle both partial (downpayment) and full payment
-                    if (strpos($payment_info['notes'], 'ADVANCE PAYMENT') !== false) {
-                        if ($bill_status === 'paid') {
-                            // Full payment: assign tenant, mark active, set room occupied, approve request
-                            $tenant_update = $conn->prepare("
-                                UPDATE tenants 
-                                SET status = 'active', start_date = NOW(), room_id = :room_id
-                                WHERE id = :tenant_id
-                            ");
-                            $tenant_update->execute(['tenant_id' => $payment_info['tenant_id'], 'room_id' => $payment_info['room_id']]);
-
-                            $room_update = $conn->prepare("
-                                UPDATE rooms 
-                                SET status = 'occupied'
-                                WHERE id = :room_id
-                            ");
-                            $room_update->execute(['room_id' => $payment_info['room_id']]);
-
-                            $request_update = $conn->prepare("
-                                UPDATE room_requests 
-                                SET status = 'approved'
-                                WHERE tenant_id = :tenant_id AND room_id = :room_id AND status = 'pending_payment'
-                            ");
-                            $request_update->execute([
-                                'tenant_id' => $payment_info['tenant_id'],
-                                'room_id' => $payment_info['room_id']
-                            ]);
-                        } elseif ($bill_status === 'partial') {
-                            // Partial/downpayment: assign tenant, mark active, set room occupied (approved payment = occupied)
-                            $tenant_update = $conn->prepare("
-                                UPDATE tenants 
-                                SET status = 'active', start_date = NOW(), room_id = :room_id
-                                WHERE id = :tenant_id
-                            ");
-                            $tenant_update->execute(['tenant_id' => $payment_info['tenant_id'], 'room_id' => $payment_info['room_id']]);
-
-                            $room_update = $conn->prepare("
-                                UPDATE rooms 
-                                SET status = 'occupied'
-                                WHERE id = :room_id
-                            ");
-                            $room_update->execute(['room_id' => $payment_info['room_id']]);
-                        }
+                    // If checkin_date is still NULL, try to populate from room_requests
+                    $check_dates = $conn->prepare("SELECT checkin_date, checkout_date FROM bills WHERE id = :id");
+                    $check_dates->execute(['id' => $payment_info['bill_id']]);
+                    $date_info = $check_dates->fetch(PDO::FETCH_ASSOC);
+                    
+                    if (!$date_info['checkin_date']) {
+                        // Try to get from room_requests
+                        $get_from_rr = $conn->prepare("
+                            UPDATE bills b
+                            JOIN room_requests rr ON b.tenant_id = rr.tenant_id AND b.room_id = rr.room_id
+                            SET b.checkin_date = rr.checkin_date, b.checkout_date = rr.checkout_date
+                            WHERE b.id = :bill_id AND b.checkin_date IS NULL AND rr.checkin_date IS NOT NULL
+                        ");
+                        $get_from_rr->execute(['bill_id' => $payment_info['bill_id']]);
                     }
+
+                    // NOTE: Room occupation will be handled when admin approves the request in room_requests_queue.php
+                    // Do NOT automatically mark room as occupied here
                 }
 
             } else {
@@ -133,15 +107,54 @@ $filter_tenant = isset($_GET['tenant']) ? $_GET['tenant'] : '';
 $filter_month = isset($_GET['month']) ? $_GET['month'] : '';
 $view = isset($_GET['view']) ? $_GET['view'] : 'active'; // 'active' or 'archive'
 
+// Auto-populate missing checkin_date and checkout_date from room_requests for bills that don't have them yet
+try {
+    // Simple approach: update bills with NULL/empty checkin_date by getting from room_requests
+    $fill_missing = $conn->prepare("
+        UPDATE bills b
+        INNER JOIN room_requests rr ON b.tenant_id = rr.tenant_id AND b.room_id = rr.room_id
+        SET b.checkin_date = rr.checkin_date, 
+            b.checkout_date = rr.checkout_date, 
+            b.billing_month = rr.checkin_date
+        WHERE (b.checkin_date IS NULL OR b.checkin_date = '0000-00-00' OR b.checkin_date = '')
+        AND rr.checkin_date IS NOT NULL 
+        AND rr.checkin_date != '0000-00-00'
+        AND rr.checkin_date != ''
+    ");
+    $fill_missing->execute();
+} catch (Exception $e) {
+    error_log("Auto-population of dates failed: " . $e->getMessage());
+}
+
+// Auto-fix walk-in downpayment bills where amount_due was incorrectly set to downpayment amount
+try {
+    // Use SQL to calculate correct amount_due: room_rate × nights
+    $fix_downpayment = $conn->prepare("
+        UPDATE bills b
+        JOIN rooms r ON b.room_id = r.id
+        SET b.amount_due = ROUND(r.rate * GREATEST(1, DATEDIFF(b.checkout_date, b.checkin_date)), 2)
+        WHERE b.notes LIKE '%Downpayment%'
+        AND b.amount_due = b.amount_paid
+        AND b.checkin_date IS NOT NULL 
+        AND b.checkout_date IS NOT NULL
+        AND b.checkin_date != '0000-00-00'
+        AND b.checkout_date != '0000-00-00'
+        AND b.status IN ('partial', 'pending')
+    ");
+    $fix_downpayment->execute();
+    $rows_fixed = $fix_downpayment->rowCount();
+    if ($rows_fixed > 0) {
+        error_log("Fixed $rows_fixed downpayment bills with incorrect amount_due");
+    }
+} catch (Exception $e) {
+    error_log("Auto-fix downpayment bills failed: " . $e->getMessage());
+}
+
 // Build the SQL query with search and filter for ACTIVE bills
 $sql = "SELECT bills.*, tenants.name, tenants.email, rooms.room_number FROM bills 
         LEFT JOIN tenants ON bills.tenant_id = tenants.id 
         LEFT JOIN rooms ON bills.room_id = rooms.id 
         WHERE 1=1";
-
-// Simulation: force month display to October 2025 (presentation only)
-$simulate_month = true;
-$simulated_month_date = '2025-10-01';
 
 // Filter: Exclude paid bills older than 7 days (those go to archive) AND exclude cancelled bills
 $sql .= " AND NOT (bills.status = 'paid' AND DATE_ADD(bills.updated_at, INTERVAL 7 DAY) < NOW())";
@@ -160,10 +173,10 @@ if ($filter_tenant) {
 }
 
 if ($filter_month) {
-    $sql .= " AND DATE_FORMAT(bills.billing_month, '%Y-%m') = :month";
+    $sql .= " AND DATE_FORMAT(bills.checkin_date, '%Y-%m') = :month";
 }
 
-$sql .= " GROUP BY bills.id ORDER BY bills.billing_month DESC, tenants.name ASC";
+$sql .= " GROUP BY bills.id ORDER BY bills.checkin_date DESC, tenants.name ASC";
 
 // Build archive query (paid bills older than 7 days OR cancelled bills)
 $archive_sql = "SELECT bills.*, tenants.name, tenants.email, rooms.room_number FROM bills 
@@ -180,10 +193,10 @@ if ($filter_tenant) {
 }
 
 if ($filter_month) {
-    $archive_sql .= " AND DATE_FORMAT(bills.billing_month, '%Y-%m') = :month";
+    $archive_sql .= " AND DATE_FORMAT(bills.checkin_date, '%Y-%m') = :month";
 }
 
-$archive_sql .= " GROUP BY bills.id ORDER BY bills.billing_month DESC, tenants.name ASC";
+$archive_sql .= " GROUP BY bills.id ORDER BY bills.checkin_date DESC, tenants.name ASC";
 
 $stmt = $conn->prepare($sql);
 $archive_stmt = $conn->prepare($archive_sql);
@@ -234,7 +247,7 @@ try {
             pt.notes,
             t.name as tenant_name,
             t.email,
-            b.billing_month,
+            b.checkin_date,
             b.amount_due,
             b.amount_paid,
             r.room_number
@@ -268,12 +281,12 @@ try {
         AND EXISTS (
             SELECT 1 FROM bills b
             WHERE b.tenant_id = t.id 
-            AND b.billing_month = :current_month 
+            AND DATE_FORMAT(b.checkin_date, '%Y-%m') = :current_month 
             AND (b.status = 'paid' OR b.status = 'partial')
         )
         AND NOT EXISTS (
             SELECT 1 FROM bills 
-            WHERE tenant_id = t.id AND billing_month = :next_month
+            WHERE tenant_id = t.id AND DATE_FORMAT(checkin_date, '%Y-%m') = :next_month
         )
         ORDER BY t.name ASC
     ");
@@ -362,14 +375,7 @@ try {
                         <i class="bi bi-box-arrow-right"></i>
                         Check Out
                     </button>
-                    <button type="button" class="btn btn-sm btn-outline-secondary me-2" data-bs-toggle="modal" data-bs-target="#generateBillsModal">
-                        <i class="bi bi-plus-circle"></i>
-                        Generate Bills
-                    </button>
-                    <button type="button" class="btn btn-sm btn-primary me-2" data-bs-toggle="modal" data-bs-target="#addNewBillModal">
-                        <i class="bi bi-plus-circle"></i>
-                        Add New Bill
-                    </button>
+                    <!-- Generate Bills button removed -->
                 </div>
             </div>
 
@@ -400,11 +406,9 @@ try {
                             continue;
                         }
                     }
-                    $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
-                    $room_req_stmt->execute(['tenant_id' => $row['tenant_id'], 'room_id' => $row['room_id']]);
-                    $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                    $checkin = $dates ? $dates['checkin_date'] : null;
-                    $checkout = $dates ? $dates['checkout_date'] : null;
+                    // Use checkin_date and checkout_date from bills table (now populated when bill created)
+                    $checkin = $row['checkin_date'];
+                    $checkout = $row['checkout_date'];
                     // Calculate amount paid from verified/approved payment transactions (includes checkout payments)
                     $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved')");
                     $sum_stmt->execute(['bill_id' => $row['id']]);
@@ -438,12 +442,37 @@ try {
                     
                     // Total billable = Bill amount + Additional charges
                     $bill_amount = floatval($row['amount_due']);
+                    
+                    // Fix downpayment bills where amount_due = amount_paid (indicates downpayment was incorrectly set as amount_due)
+                    if (stripos($row['notes'], 'Downpayment') !== false 
+                        && $bill_amount == $amount_paid 
+                        && $row['checkin_date'] 
+                        && $row['checkout_date']
+                        && $row['checkin_date'] != '0000-00-00'
+                        && $row['checkout_date'] != '0000-00-00') {
+                        // Recalculate correct bill amount
+                        $room_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
+                        $room_stmt->execute(['room_id' => $row['room_id']]);
+                        $room_rate = floatval($room_stmt->fetchColumn());
+                        $ci = strtotime($row['checkin_date']);
+                        $co = strtotime($row['checkout_date']);
+                        $nights = max(1, (int)(($co - $ci) / 86400));
+                        $correct_bill_amount = round($room_rate * $nights, 2);
+                        
+                        // Only use calculated amount if it's more than current (catches the downpayment error)
+                        if ($correct_bill_amount > $bill_amount) {
+                            $bill_amount = $correct_bill_amount;
+                        }
+                    }
+                    
                     $total_billable = $bill_amount + $total_charges;
                     
                     // Grand Total Due calculation:
                     // If bill is cancelled, Grand Total Due = 0 (cancellation recorded)
                     // If tenant is inactive (checked out), Grand Total Due = 0 (already paid)
-                    // If tenant is active, Grand Total Due = Amount Paid + Total Additional Charges (total billable)
+                    // If tenant is active:
+                    //   - If customer paid full room amount, Grand Total Due = only additional charges
+                    //   - If customer paid partial, Grand Total Due = remaining room balance + additional charges
                     if ($bill_status_from_db === 'cancelled') {
                         // Bill has been cancelled - Grand Total Due = 0
                         $grand_total_due = 0;
@@ -451,8 +480,15 @@ try {
                         // Customer has checked out - they paid, so Grand Total Due = 0
                         $grand_total_due = 0;
                     } else {
-                        // Customer is still active - show total billable (amount paid + charges)
-                        $grand_total_due = $amount_paid + $total_charges;
+                        // Customer is still active - calculate remaining balance
+                        $remaining_balance = max(0, $bill_amount - $amount_paid);
+                        // If remaining balance is 0 and there are additional charges, show those as GTD
+                        // Otherwise, show remaining balance only (TAC shown separately)
+                        if ($remaining_balance == 0 && $total_charges > 0) {
+                            $grand_total_due = $total_charges;
+                        } else {
+                            $grand_total_due = $remaining_balance;
+                        }
                     }
                     
                         // Always add grand_total_due for the active listing
@@ -464,6 +500,7 @@ try {
                         'checkout' => $checkout,
                         'name' => $row['name'],
                         'room_number' => $row['room_number'],
+                        'checkin_date' => $row['checkin_date'],
                         'amount_due' => $bill_amount,
                         'grand_total_due' => $grand_total_due,
                         'amount_paid' => $amount_paid,
@@ -721,8 +758,8 @@ try {
                         $balance = floatval($payment['amount_due']) - $total_paid_now;
                         // Determine safe billing month display
                         $billing_display = 'Not set';
-                        if (!empty($payment['billing_month']) && strtotime($payment['billing_month']) !== false && strtotime($payment['billing_month']) > 0) {
-                            $billing_display = date('M Y', strtotime($payment['billing_month']));
+                        if (!empty($payment['checkin_date']) && strtotime($payment['checkin_date']) !== false && strtotime($payment['checkin_date']) > 0) {
+                            $billing_display = date('M Y', strtotime($payment['checkin_date']));
                         } else {
                             try {
                                 // Try to derive from bill row (created_at) or room_request checkin_date
@@ -824,10 +861,10 @@ try {
                                             $already_paid = floatval($paid_stmt->fetchColumn());
                                             $balance_now = $bill_amount_due - $already_paid;
 
-                                            // Determine billing month display: prefer billing_month if valid, else derive from room request or bill created_at
+                                            // Determine billing month display: prefer checkin_date if valid, else derive from room request or bill created_at
                                             $billing_display = 'Not set';
-                                            if (!empty($payment['billing_month']) && strtotime($payment['billing_month']) !== false && strtotime($payment['billing_month']) > 0) {
-                                                $billing_display = date('F Y', strtotime($payment['billing_month']));
+                                            if (!empty($payment['checkin_date']) && strtotime($payment['checkin_date']) !== false && strtotime($payment['checkin_date']) > 0) {
+                                                $billing_display = date('F Y', strtotime($payment['checkin_date']));
                                             } else {
                                                 // Try to derive from room_requests (checkin date)
                                                 try {
@@ -901,13 +938,6 @@ try {
                                 </div>
                                 <div class="modal-footer">
                                     <form method="POST" style="display: inline;">
-                                        <input type="hidden" name="action" value="reject">
-                                        <input type="hidden" name="payment_id" value="<?php echo $payment['id']; ?>">
-                                        <button type="submit" class="btn btn-danger" onclick="return confirm('Reject this payment?');">
-                                            <i class="bi bi-x-circle"></i> Reject
-                                        </button>
-                                    </form>
-                                    <form method="POST" style="display: inline;">
                                         <input type="hidden" name="action" value="verify">
                                         <input type="hidden" name="payment_id" value="<?php echo $payment['id']; ?>">
                                         <button type="submit" class="btn btn-success">
@@ -975,6 +1005,7 @@ try {
                                 <th>Stay Dates</th>
                                 <th>Customer</th>
                                 <th>Room</th>
+                                <th>Billing Day</th>
                                 <th>Grand Total Due (₱)</th>
                                 <th>Amount Paid (₱)</th>
                                 <th>Payment Method Check-in</th>
@@ -996,6 +1027,7 @@ try {
                             </td>
                             <td><?php echo htmlspecialchars($row['name']); ?></td>
                             <td><?php echo htmlspecialchars($row['room_number']); ?></td>
+                            <td><?php echo $row['checkin_date'] && $row['checkin_date'] !== '0000-00-00' && $row['checkin_date'] !== null ? date('M d, Y', strtotime($row['checkin_date'])) : '<span class="text-muted">N/A</span>'; ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['grand_total_due'], 2)); ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['amount_paid'], 2)); ?></td>
                             <td><?php
@@ -1099,6 +1131,7 @@ try {
                         <thead>
                             <tr>
                                 <th>Billing Month</th>
+                                <th>Billing Day</th>
                                 <th>Customer</th>
                                 <th>Room</th>
                                 <th>Amount Due (₱)</th>
@@ -1118,9 +1151,9 @@ try {
                                     if (!empty($simulate_month)) {
                                         echo 'October 2025';
                                     } else {
-                                        // Safely format billing_month - handle various date formats
-                                        if (!empty($row['billing_month'])) {
-                                            $bm = strtotime($row['billing_month']);
+                                        // Safely format checkin_date - handle various date formats
+                                        if (!empty($row['checkin_date'])) {
+                                            $bm = strtotime($row['checkin_date']);
                                             // If parsing failed OR the year looks invalid, fallback to paid_date/updated_at
                                             if ($bm !== false) {
                                                 $year = (int)date('Y', $bm);
@@ -1143,7 +1176,7 @@ try {
                                                 }
                                             }
                                         } else {
-                                            // No billing_month - use paid_date/updated_at
+                                            // No checkin_date - use paid_date/updated_at
                                             if (!empty($row['paid_date']) && $row['paid_date'] !== '0000-00-00 00:00:00') {
                                                 echo htmlspecialchars(date('F Y', strtotime($row['paid_date'])));
                                             } else {
@@ -1152,6 +1185,7 @@ try {
                                         }
                                     }
                                 ?></td>
+                                <td><?php echo $row['checkin_date'] && $row['checkin_date'] !== '0000-00-00' && $row['checkin_date'] !== null ? date('M d, Y', strtotime($row['checkin_date'])) : '<span class="text-muted">N/A</span>'; ?></td>
                                 <td><?php echo htmlspecialchars($row['name']); ?></td>
                                 <td><?php echo htmlspecialchars($row['room_number']); ?></td>
                                 <td><?php echo htmlspecialchars(number_format($row['amount_due'], 2)); ?></td>
@@ -1203,31 +1237,7 @@ try {
     </div>
 </div>
 
-<!-- Generate Bills Modal -->
-<div class="modal fade" id="generateBillsModal" tabindex="-1" aria-labelledby="generateBillsModalLabel" aria-hidden="true">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="generateBillsModalLabel">Generate Monthly Bills</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <form action="bill_actions.php?action=generate" method="post">
-          <div class="mb-3">
-            <label for="billing_month" class="form-label">Billing Month</label>
-            <input type="month" class="form-control" id="billing_month" name="billing_month" value="<?php echo date('Y-m'); ?>" required>
-          </div>
-          <div class="mb-3">
-            <label for="due_date" class="form-label">Due Date</label>
-            <input type="date" class="form-control" id="due_date" name="due_date" value="<?php echo date('Y-m-15'); ?>" required>
-          </div>
-          <p class="text-muted">This will create bills for all active tenants based on their room rates.</p>
-          <button type="submit" class="btn btn-primary">Generate Bills</button>
-        </form>
-      </div>
-    </div>
-  </div>
-</div>
+<!-- Generate Bills modal removed per request -->
 
 <!-- Add Manual Bill Modal -->
 <div class="modal fade" id="addBillModal" tabindex="-1" aria-labelledby="addBillModalLabel" aria-hidden="true">

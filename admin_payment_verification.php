@@ -6,7 +6,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 }
 require_once "db/database.php";
 require_once "db/notifications.php";
-$admin_id = $_SESSION["id"];
+$admin_id = $_SESSION["admin_id"];
 $message = '';
 $message_type = '';
 
@@ -74,6 +74,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     } else {
                         // Full payment notification
                         notifyTenantPaymentVerification($conn, $payment_info['tenant_id'], $payment_id, 'approved');
+                    }
+
+                    // Notify all admins about the payment verification
+                    try {
+                        $tenant_stmt = $conn->prepare("SELECT name FROM tenants WHERE id = :tenant_id");
+                        $tenant_stmt->execute(['tenant_id' => $payment_info['tenant_id']]);
+                        $tenant_info = $tenant_stmt->fetch(PDO::FETCH_ASSOC);
+                        $tenant_name = $tenant_info['name'] ?? 'Unknown';
+
+                        $all_admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
+                        foreach ($all_admins as $admin) {
+                            $notification_message = 'Payment of ₱' . number_format($payment_info['amount'], 2) . ' from ' . htmlspecialchars($tenant_name) . ' has been verified. Bill status: ' . ucfirst($bill_status) . '.';
+                            
+                            createNotification(
+                                $conn,
+                                'admin',
+                                $admin['id'],
+                                'payment_verified',
+                                'Payment Verified',
+                                $notification_message,
+                                $payment_info['bill_id'],
+                                'bill',
+                                'admin_payment_verification.php'
+                            );
+                        }
+                    } catch (Exception $e) {
+                        error_log('Admin notification for payment verification failed: ' . $e->getMessage());
                     }
                 }
                 $message = "✓ Payment verified and recorded successfully!";

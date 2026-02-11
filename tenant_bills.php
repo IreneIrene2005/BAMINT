@@ -282,12 +282,8 @@ try {
                                             $sum_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
                                             $sum_stmt->execute(['bill_id' => $bill['id']]);
                                             $live_paid = floatval($sum_stmt->fetchColumn());
-                                            if ($live_paid > 0 && $live_paid < $room_total) {
-                                                $recent_bill_balance = $room_total - $live_paid;
-                                            } else {
-                                                $recent_bill_balance = $room_total;
-                                            }
-                                            if ($recent_bill_balance < 0) $recent_bill_balance = 0.0;
+                                            // Remaining room balance (zero if fully paid)
+                                            $recent_bill_balance = max(0, $room_total - $live_paid);
                                             break;
                                         }
                                     }
@@ -357,7 +353,14 @@ try {
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between align-items-start mb-2">
                                         <h6 class="card-title">
-                                            <?php echo date('F Y', strtotime($payment['billing_month'])); ?>
+                                            <?php 
+                                            // Use payment_date for display
+                                            if (!empty($payment['payment_date'])) {
+                                                echo date('F Y', strtotime($payment['payment_date']));
+                                            } else {
+                                                echo 'Payment Pending';
+                                            }
+                                            ?>
                                         </h6>
                                         <span class="badge bg-warning">
                                             ⏳ Awaiting Review
@@ -415,6 +418,32 @@ try {
                                 </div>
                             </div>
                         </div>
+                        <?php
+                        // Initialize variables for bill display
+                        $checkin = null;
+                        $checkout = null;
+                        $amount_paid_live = 0;
+                        
+                        // Fetch checkin/checkout dates from most recent room request
+                        if (!empty($bills)) {
+                            $recent_bill = current($bills);
+                            if ($recent_bill && isset($recent_bill['room_id'])) {
+                                $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                $room_req_stmt->execute(['tenant_id' => $customer_id, 'room_id' => $recent_bill['room_id']]);
+                                $room_req_data = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                if ($room_req_data) {
+                                    $checkin = $room_req_data['checkin_date'];
+                                    $checkout = $room_req_data['checkout_date'];
+                                }
+                                
+                                // Calculate total paid amount from verified/approved payments
+                                $paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount), 0) as total_paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved')");
+                                $paid_stmt->execute(['bill_id' => $recent_bill['id']]);
+                                $paid_result = $paid_stmt->fetch(PDO::FETCH_ASSOC);
+                                $amount_paid_live = $paid_result ? floatval($paid_result['total_paid']) : 0;
+                            }
+                        }
+                        ?>
                                                 <?php if ($checkin && $checkout): ?>
                                                     <br><small class="text-muted">Stay: <?php echo date('M d, Y', strtotime($checkin)); ?> - <?php echo date('M d, Y', strtotime($checkout)); ?></small>
                                                 <?php endif; ?>
@@ -425,11 +454,11 @@ try {
                                             </div>
                                         </div>
 
-                                        <?php if ($bill['discount'] > 0): ?>
+                                        <?php if ((isset($bill['discount']) ? $bill['discount'] : 0) > 0): ?>
                                             <div class="row mb-3">
                                                 <div class="col-12">
                                                     <small class="text-muted d-block">Discount Applied</small>
-                                                    <strong class="text-info">₱<?php echo number_format($bill['discount'], 2); ?></strong>
+                                                    <strong class="text-info">₱<?php echo number_format(isset($bill['discount']) ? $bill['discount'] : 0, 2); ?></strong>
                                                 </div>
                                             </div>
                                         <?php endif; ?>
@@ -452,11 +481,6 @@ try {
                                                 ($bill['status'] === 'pending' || $bill['status'] === 'pending_payment') &&
                                                 stripos($bill['notes'], 'ADVANCE PAYMENT') !== false
                                             ): ?>
-                                                <div class="mt-3">
-                                                    <a href="tenant_make_payment.php?bill_id=<?php echo $bill['id']; ?>" class="btn btn-primary w-100">
-                                                        <i class="bi bi-credit-card"></i> Pay Downpayment
-                                                    </a>
-                                                </div>
                                             <?php endif; ?>
                                         <?php endif; ?>
                                     </div>
@@ -497,11 +521,11 @@ try {
                                                 </div>
                                             </div>
 
-                                            <?php if ($bill['discount'] > 0): ?>
+                                            <?php if ((isset($bill['discount']) ? $bill['discount'] : 0) > 0): ?>
                                                 <div class="row mb-3">
                                                     <div class="col-12">
                                                         <small class="text-muted d-block">Discount Applied</small>
-                                                        <strong class="text-info">₱<?php echo number_format($bill['discount'], 2); ?></strong>
+                                                        <strong class="text-info">₱<?php echo number_format(isset($bill['discount']) ? $bill['discount'] : 0, 2); ?></strong>
                                                     </div>
                                                 </div>
                                             <?php endif; ?>

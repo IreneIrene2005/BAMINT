@@ -128,74 +128,47 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
     <title>Tenant Management - BAMINT Admin</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    <link rel="stylesheet" href="public/css/style.css">
     <style>
-        body { background-color: #f8f9fa; }
-        .header-banner {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 2rem;
-            border-radius: 8px;
-            margin-bottom: 2rem;
-        }
         .metric-card {
-            background: white;
             border-radius: 8px;
-            padding: 1.5rem;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            margin-bottom: 1rem;
-        }
-        .metric-value {
-            font-size: 2.5rem;
-            font-weight: bold;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-        .metric-label {
-            color: #6c757d;
-            font-size: 0.9rem;
-            margin-top: 0.5rem;
-        }
-        .tenant-card {
-            background: white;
-            border-radius: 8px;
-            border-left: 4px solid #667eea;
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             padding: 1.5rem;
-            margin-bottom: 1rem;
-            transition: transform 0.3s;
+            background: white;
+            transition: transform 0.2s, box-shadow 0.2s;
         }
-        .tenant-card:hover {
-            transform: translateY(-2px);
+        .metric-card:hover {
+            transform: translateY(-4px);
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         }
-        .tenant-name {
-            font-size: 1.2rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin: 10px 0;
         }
-        .tenant-detail {
-            display: flex;
-            justify-content: space-between;
-            padding: 0.5rem 0;
-            border-bottom: 1px solid #f0f0f0;
+        .metric-label {
             font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 5px;
         }
-        .tenant-detail:last-child {
-            border-bottom: none;
+        .card {
+            border-radius: 8px;
+            transition: transform 0.2s, box-shadow 0.2s;
         }
-        .detail-label {
-            color: #6c757d;
-            font-weight: 500;
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
         }
-        .detail-value {
-            color: #333;
+        .card-header {
+            background-color: #f8f9fa !important;
         }
-        .badge-status {
-            padding: 0.4rem 0.8rem;
-            border-radius: 20px;
-            font-size: 0.85rem;
+        .card-footer {
+            background-color: #f8f9fa !important;
+        }
+        .card-body small {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 2px;
         }
     </style>
 </head>
@@ -206,11 +179,14 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
             <?php include 'templates/sidebar.php'; ?>
 
             <!-- Main Content -->
-            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
-                <!-- Header -->
-                <div class="header-banner">
-                    <h1><i class="bi bi-people"></i> Tenant Management</h1>
-                    <p class="mb-0">View and verify tenant information and changes</p>
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2">
+                        <i class="bi bi-people"></i> Tenant Management
+                    </h1>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="location.reload();" title="Refresh data">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                    </button>
                 </div>
 
                 <?php if (!empty($success_msg)): ?>
@@ -231,7 +207,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
                 <div class="row mb-4">
                     <div class="col-md-3">
                         <div class="metric-card">
-                            <div class="metric-value"><?php echo $stats['total_tenants'] ?? 0; ?></div>
+                            <div class="metric-value" style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"><?php echo $stats['total_tenants'] ?? 0; ?></div>
                             <div class="metric-label">Total Tenants</div>
                         </div>
                     </div>
@@ -282,53 +258,59 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
                 </div>
 
                 <!-- Tenant List -->
-                <div>
+                <div class="row">
                     <?php if (empty($tenants)): ?>
-                        <div class="alert alert-info">
-                            <i class="bi bi-info-circle"></i> No tenants found matching the criteria.
+                        <div class="col-12">
+                            <div class="alert alert-info">
+                                <i class="bi bi-info-circle"></i> No tenants found matching the criteria.
+                            </div>
                         </div>
                     <?php else: ?>
                         <?php foreach ($tenants as $tenant): ?>
-                            <div class="tenant-card">
-                                <div class="row">
-                                    <div class="col-md-8">
-                                        <div class="tenant-name">
-                                            <?php echo htmlspecialchars($tenant['name']); ?>
-                                            <span class="badge badge-status" style="background: <?php echo $tenant['status'] === 'active' ? '#10b981' : '#6c757d'; ?>;color: white;">
+                            <div class="col-md-6 mb-4">
+                                <div class="card h-100 border-0 shadow-sm">
+                                    <div class="card-header bg-white border-bottom">
+                                        <div class="d-flex justify-content-between align-items-start">
+                                            <div>
+                                                <h5 class="card-title mb-0"><?php echo htmlspecialchars($tenant['name']); ?></h5>
+                                            </div>
+                                            <span class="badge" style="background: <?php echo $tenant['status'] === 'active' ? '#10b981' : '#6c757d'; ?>;color: white;">
                                                 <?php echo ucfirst($tenant['status']); ?>
                                             </span>
                                         </div>
+                                    </div>
 
-                                        <div class="tenant-detail">
-                                            <span class="detail-label"><i class="bi bi-envelope"></i> Email:</span>
-                                            <span class="detail-value"><?php echo htmlspecialchars($tenant['email'] ?? 'N/A'); ?></span>
+                                    <div class="card-body">
+                                        <div class="mb-3">
+                                            <small class="text-muted"><i class="bi bi-envelope"></i> Email</small>
+                                            <p class="mb-0"><?php echo htmlspecialchars($tenant['email'] ?? 'N/A'); ?></p>
                                         </div>
 
-                                        <div class="tenant-detail">
-                                            <span class="detail-label"><i class="bi bi-telephone"></i> Phone:</span>
-                                            <span class="detail-value"><?php echo htmlspecialchars($tenant['phone'] ?? 'N/A'); ?></span>
+                                        <div class="mb-3">
+                                            <small class="text-muted"><i class="bi bi-telephone"></i> Phone</small>
+                                            <p class="mb-0"><?php echo htmlspecialchars($tenant['phone'] ?? 'N/A'); ?></p>
                                         </div>
 
-                                        <div class="tenant-detail">
-                                            <span class="detail-label"><i class="bi bi-door-open"></i> Room:</span>
-                                            <span class="detail-value"><?php echo ($tenant['status'] === 'active' && ($tenant['room_id'] ?? null)) ? htmlspecialchars($tenant['room_number']) . ' - ' . htmlspecialchars($tenant['room_type']) : '-'; ?></span>
+                                        <div class="mb-3">
+                                            <small class="text-muted"><i class="bi bi-door-open"></i> Room</small>
+                                            <p class="mb-0"><?php echo ($tenant['status'] === 'active' && ($tenant['room_id'] ?? null)) ? htmlspecialchars($tenant['room_number']) . ' - ' . htmlspecialchars($tenant['room_type']) : '-'; ?></p>
                                         </div>
 
                                         <?php if ($tenant['status'] === 'active' && $tenant['start_date']): ?>
-                                            <div class="tenant-detail">
-                                                <span class="detail-label"><i class="bi bi-calendar"></i> Move-in Date:</span>
-                                                <span class="detail-value"><?php echo date('M d, Y', strtotime($tenant['start_date'])); ?></span>
+                                            <div class="mb-3">
+                                                <small class="text-muted"><i class="bi bi-calendar"></i> Move-in Date</small>
+                                                <p class="mb-0"><?php echo date('M d, Y', strtotime($tenant['start_date'])); ?></p>
                                             </div>
                                         <?php endif; ?>
 
-                                        <div class="tenant-detail">
-                                            <span class="detail-label"><i class="bi bi-percent"></i> Payments Last 30 Days:</span>
-                                            <span class="detail-value text-success">₱<?php echo number_format($tenant['payments_last_30_days'] ?? 0, 2); ?></span>
+                                        <div>
+                                            <small class="text-muted"><i class="bi bi-percent"></i> Payments (Last 30 Days)</small>
+                                            <p class="mb-0 text-success fw-bold">₱<?php echo number_format($tenant['payments_last_30_days'] ?? 0, 2); ?></p>
                                         </div>
                                     </div>
 
-                                    <div class="col-md-4">
-                                        <div class="d-flex flex-column gap-2">
+                                    <div class="card-footer bg-white border-top">
+                                        <div class="d-grid gap-2">
                                             <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" 
                                                     data-bs-target="#tenantModal" 
                                                     onclick="loadTenantDetails(<?php echo $tenant['id']; ?>)">

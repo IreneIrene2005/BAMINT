@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS `walk_in_sessions` (
   CONSTRAINT `walk_in_sessions_ibfk_3` FOREIGN KEY (`bill_id`) REFERENCES `bills` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Add address column to tenant_accounts table
+ALTER TABLE `tenant_accounts` ADD COLUMN IF NOT EXISTS `address` text DEFAULT NULL;
+
 -- Verification query: Check tables after updates
 SELECT TABLE_NAME, COLUMN_NAME, IS_NULLABLE, COLUMN_TYPE 
 FROM INFORMATION_SCHEMA.COLUMNS 

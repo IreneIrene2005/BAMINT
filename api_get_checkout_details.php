@@ -1,7 +1,7 @@
 <?php
 session_start();
 
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "admin") {
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array($_SESSION["role"], ['admin', 'front_desk'])) {
     http_response_code(403);
     echo json_encode(['success' => false, 'message' => 'Unauthorized']);
     exit;
@@ -68,8 +68,20 @@ try {
         $total_charges += floatval($c['cost']);
     }
 
-    // Grand Total Due = Amount Paid + Total Charges (same formula as in bills.php table)
-    $grand_total_due = $total_paid + $total_charges;
+    // Grand Total Due - uses same calculation as bills.php table
+    // Calculation matches bills.php lines 475-495
+    $remaining_balance = max(0, $total_due - $total_paid);
+    
+    // If remaining balance > 0: show remaining balance
+    // If remaining balance = 0 AND charges > 0: show charges
+    // Otherwise: show 0
+    if ($remaining_balance > 0) {
+        $grand_total_due = $remaining_balance;
+    } elseif ($remaining_balance == 0 && $total_charges > 0) {
+        $grand_total_due = $total_charges;
+    } else {
+        $grand_total_due = 0;
+    }
 
     echo json_encode([
         'success' => true,

@@ -5,6 +5,8 @@ session_start();
 if (isset($_SESSION["loggedin"]) && $_SESSION["loggedin"] === true) {
     if ($_SESSION["role"] === "admin") {
         header("location: dashboard.php");
+    } else if ($_SESSION["role"] === "front_desk") {
+        header("location: front_desk_dashboard.php");
     } else {
         header("location: tenant_dashboard.php");
     }
@@ -20,8 +22,8 @@ $role = isset($_GET['role']) ? $_GET['role'] : 'admin'; // Default to admin
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $role = isset($_POST['role']) ? $_POST['role'] : 'admin';
 
-    if ($role === 'admin') {
-        // Admin Login
+    if ($role === 'admin' || $role === 'front_desk') {
+        // Admin/Front Desk Login
         if (empty(trim($_POST["username"]))) {
             $username_err = "Please enter username.";
         } else {
@@ -35,7 +37,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         }
 
         if (empty($username_err) && empty($password_err)) {
-            $sql = "SELECT id, username, password FROM admins WHERE username = :username";
+            $sql = "SELECT id, username, password, role FROM admins WHERE username = :username";
 
             if ($stmt = $conn->prepare($sql)) {
                 $stmt->bindParam(":username", $param_username, PDO::PARAM_STR);
@@ -46,20 +48,35 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                         if ($row = $stmt->fetch()) {
                             $id = $row["id"];
                             $hashed_password = $row["password"];
+                            $user_role = $row["role"] ?? 'admin'; // Default to admin if role not set
+                            
                             if (password_verify($password, $hashed_password)) {
-                                $_SESSION["loggedin"] = true;
-                                $_SESSION["id"] = $id;
-                                $_SESSION["username"] = $username;
-                                $_SESSION["role"] = "admin";
+                                // Check if user role matches requested role
+                                if ($role === 'admin' && $user_role !== 'admin') {
+                                    $username_err = "This account does not have admin privileges.";
+                                } else if ($role === 'front_desk' && $user_role !== 'front_desk') {
+                                    $username_err = "This account does not have front desk privileges.";
+                                } else {
+                                    $_SESSION["loggedin"] = true;
+                                    $_SESSION["admin_id"] = $id;
+                                    $_SESSION["username"] = $username;
+                                    $_SESSION["role"] = $user_role;
 
-                                header("location: dashboard.php");
-                                exit;
+                                    if ($user_role === 'admin') {
+                                        header("location: dashboard.php");
+                                    } else if ($user_role === 'front_desk') {
+                                        header("location: front_desk_dashboard.php");
+                                    } else {
+                                        header("location: index.php");
+                                    }
+                                    exit;
+                                }
                             } else {
                                 $password_err = "The password you entered was not valid.";
                             }
                         }
                     } else {
-                        $username_err = "No admin account found with that username.";
+                        $username_err = "No account found with that username.";
                     }
                 } else {
                     $login_err = "Oops! Something went wrong. Please try again later.";
@@ -267,13 +284,16 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     <div class="login-container">
         <div class="login-header">
             <h1><i class="bi bi-door-open"></i> BAMINT</h1>
-            <p>Boarding House Management System</p>
+            <p>Hotel Online Booking System</p>
         </div>
 
         <!-- Role Selection Tabs -->
         <div class="role-tabs">
             <button type="button" class="role-tab active" data-role="admin" onclick="switchRole('admin')">
                 <i class="bi bi-shield-check"></i> Admin
+            </button>
+            <button type="button" class="role-tab" data-role="front_desk" onclick="switchRole('front_desk')">
+                <i class="bi bi-person-badge"></i> Front Desk
             </button>
             <button type="button" class="role-tab" data-role="tenant" onclick="switchRole('tenant')">
                 <i class="bi bi-person"></i> Customer
@@ -307,6 +327,29 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             <button type="submit" class="btn-login">Login as Admin</button>
 
             <!-- Admin account creation link intentionally removed to prevent admin self-registration -->
+        </form>
+
+        <!-- Front Desk Login Form -->
+        <form id="front_deskForm" class="form-section" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
+            <input type="hidden" name="role" value="front_desk">
+
+            <div class="form-group <?php echo (!empty($username_err) && $role === 'front_desk') ? 'has-error' : ''; ?>">
+                <label class="form-label">Username</label>
+                <input type="text" name="username" class="form-control" value="<?php echo htmlspecialchars($username); ?>" placeholder="Enter your username">
+                <?php if (!empty($username_err) && $role === 'front_desk'): ?>
+                    <span class="text-danger"><?php echo htmlspecialchars($username_err); ?></span>
+                <?php endif; ?>
+            </div>
+
+            <div class="form-group <?php echo (!empty($password_err) && $role === 'front_desk') ? 'has-error' : ''; ?>">
+                <label class="form-label">Password</label>
+                <input type="password" name="password" class="form-control" placeholder="Enter your password">
+                <?php if (!empty($password_err) && $role === 'front_desk'): ?>
+                    <span class="text-danger"><?php echo htmlspecialchars($password_err); ?></span>
+                <?php endif; ?>
+            </div>
+
+            <button type="submit" class="btn-login">Login as Front Desk</button>
         </form>
 
         <!-- Tenant Login Form -->
@@ -349,7 +392,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             document.querySelectorAll('.form-section').forEach(form => {
                 form.classList.remove('active');
             });
-            document.getElementById(role + 'Form').classList.add('active');
+            // Handle front_desk form id which uses underscore
+            const formId = role === 'front_desk' ? 'front_deskForm' : role + 'Form';
+            document.getElementById(formId).classList.add('active');
         }
     </script>
 </body>

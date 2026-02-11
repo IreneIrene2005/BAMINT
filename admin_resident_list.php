@@ -1,8 +1,8 @@
 <?php
 session_start();
 
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "admin") {
-    header("location: index.php?role=admin");
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array($_SESSION["role"], ['admin', 'front_desk'])) {
+    header("location: index.php");
     exit;
 }
 
@@ -129,14 +129,14 @@ try {
     // Continue without amenities list
 }
 
-// Fetch active tenants for dropdown
+// Fetch active tenants for dropdown: only active tenants with a room assigned
 $active_tenants = [];
 try {
     $stmt = $conn->prepare("
         SELECT t.id, t.name, t.phone, t.email, r.room_number 
         FROM tenants t 
         LEFT JOIN rooms r ON t.room_id = r.id 
-        WHERE t.status = 'active' 
+        WHERE t.status = 'active' AND t.room_id IS NOT NULL 
         ORDER BY t.name ASC
     ");
     $stmt->execute();
@@ -216,15 +216,17 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
                 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center mb-4">
                     <div>
                         <h1 class="mb-1"><i class="bi bi-gift-fill"></i> Extra Amenities</h1>
-                        <p class="text-muted">Manage guest amenities and pricing</p>
+                        <p class="text-muted"><?php echo $_SESSION['role'] === 'admin' ? 'Manage guest amenities and pricing' : 'Available amenities for ordering'; ?></p>
                     </div>
                     <div class="btn-group" role="group">
                         <button type="button" class="btn btn-success" data-bs-toggle="modal" data-bs-target="#orderAmenityModal">
-                            <i class="bi bi-bag-plus"></i> Order Amenities for Walk-in Customer
+                            <i class="bi bi-bag-plus"></i> Order Amenities
                         </button>
+                        <?php if ($_SESSION['role'] === 'admin'): ?>
                         <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addAmenityModal">
                             <i class="bi bi-plus-circle"></i> Add Amenity
                         </button>
+                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -289,6 +291,7 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
                                         <p class="card-text text-muted small mb-3">
                                             <?php echo htmlspecialchars($amenity['description'] ?? 'No description'); ?>
                                         </p>
+                                        <?php if ($_SESSION['role'] === 'admin'): ?>
                                         <div class="d-flex gap-2">
                                             <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#editAmenityModal<?php echo $amenity['id']; ?>">
                                                 <i class="bi bi-pencil"></i> Edit
@@ -301,10 +304,12 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
                                                 </button>
                                             </form>
                                         </div>
+                                        <?php endif; ?>
                                     </div>
                                 </div>
                             </div>
 
+                            <?php if ($_SESSION['role'] === 'admin'): ?>
                             <!-- Edit Amenity Modal -->
                             <div class="modal fade" id="editAmenityModal<?php echo $amenity['id']; ?>" tabindex="-1" aria-hidden="true">
                                 <div class="modal-dialog">
@@ -344,6 +349,7 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
                                     </div>
                                 </div>
                             </div>
+                            <?php endif; ?>
                         <?php endforeach; ?>
                     <?php endif; ?>
                 </div>
@@ -351,6 +357,7 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
         </div>
     </div>
 
+    <?php if ($_SESSION['role'] === 'admin'): ?>
     <!-- Add Amenity Modal -->
     <div class="modal fade" id="addAmenityModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog">
@@ -389,13 +396,14 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
             </div>
         </div>
     </div>
+    <?php endif; ?>
 
     <!-- Order Amenity Modal -->
     <div class="modal fade" id="orderAmenityModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
-                    <h5 class="modal-title"><i class="bi bi-bag-plus"></i> Order Amenities for Walk-in Customer</h5>
+                    <h5 class="modal-title"><i class="bi bi-bag-plus"></i> Order Amenities</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" style="filter: brightness(0) invert(1);"></button>
                 </div>
                 <form method="POST" id="orderAmenityForm">
@@ -502,6 +510,53 @@ $total_revenue_potential = array_sum(array_column($amenities, 'price'));
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Real-time amenities update for front desk users
+        const isFrontDesk = '<?php echo $_SESSION['role']; ?>' === 'front_desk';
+        let lastAmenitiesChecksum = null;
+        
+        // Calculate checksum for amenities to detect changes
+        function calculateChecksum(data) {
+            let str = JSON.stringify(data);
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                const char = str.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash; // Convert to 32bit integer
+            }
+            return hash.toString();
+        }
+        
+        // Fetch amenities from API
+        async function fetchAmenities() {
+            try {
+                const response = await fetch('api_get_amenities.php');
+                const result = await response.json();
+                
+                if (result.success) {
+                    const currentChecksum = calculateChecksum(result.data);
+                    
+                    // If amenities changed, reload the page
+                    if (lastAmenitiesChecksum !== null && lastAmenitiesChecksum !== currentChecksum) {
+                        console.log('Amenities updated by admin, refreshing page...');
+                        location.reload();
+                    }
+                    
+                    lastAmenitiesChecksum = currentChecksum;
+                }
+            } catch (error) {
+                console.error('Error fetching amenities:', error);
+            }
+        }
+        
+        // Start polling for front desk users (check every 5 seconds)
+        if (isFrontDesk) {
+            // Initial fetch
+            fetchAmenities();
+            // Poll every 5 seconds
+            setInterval(fetchAmenities, 5000);
+            console.log('Real-time amenities polling enabled (5 second interval)');
+        }
+        
         function updateTenantDetails() {
             const select = document.getElementById('tenant_select');
             const option = select.options[select.selectedIndex];

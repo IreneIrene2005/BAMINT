@@ -7,6 +7,7 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
 }
 
 require_once "db/database.php";
+require_once "db/notifications.php";
 
 $tenant_id = $_SESSION["tenant_id"];
 $success_msg = "";
@@ -53,6 +54,33 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_request'])) {
                 'priority' => $priority,
                 'cost' => $cost
             ]);
+
+            $request_id = $conn->lastInsertId();
+
+            // Notify all admins about the new amenity request
+            try {
+                $tenant_stmt = $conn->prepare("SELECT name FROM tenants WHERE id = :tenant_id");
+                $tenant_stmt->execute(['tenant_id' => $tenant_id]);
+                $tenant_info = $tenant_stmt->fetch(PDO::FETCH_ASSOC);
+                $tenant_name = $tenant_info['name'] ?? 'Unknown';
+
+                $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($admins as $admin) {
+                    createNotification(
+                        $conn,
+                        'admin',
+                        $admin['id'],
+                        'amenity_requested',
+                        'New Amenity Request',
+                        htmlspecialchars($tenant_name) . ' requested: ' . htmlspecialchars($category) . ' (' . ucfirst($priority) . ' priority). Cost: ₱' . number_format($cost ?? 0, 2) . '.',
+                        $request_id,
+                        'amenity',
+                        'admin_maintenance_queue.php'
+                    );
+                }
+            } catch (Exception $e) {
+                error_log('Admin notification for amenity request failed: ' . $e->getMessage());
+            }
 
             $success_msg = "Amenity request submitted successfully!";
         } catch (Exception $e) {

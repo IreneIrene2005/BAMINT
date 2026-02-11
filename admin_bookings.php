@@ -1,8 +1,8 @@
 <?php
 session_start();
 
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "admin") {
-    header("location: index.php?role=admin");
+if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array($_SESSION["role"], ['admin', 'front_desk'])) {
+    header("location: index.php");
     exit;
 }
 
@@ -11,13 +11,21 @@ require_once "db/notifications.php";
 
 $filter_status = $_GET['status'] ?? 'all';
 $search_query = $_GET['search'] ?? '';
+$date_filter = $_GET['date_filter'] ?? 'all';
 $tab = $_GET['tab'] ?? 'active'; // 'active', 'archived', or 'room_cancellations'
 $success_msg = "";
 $error_msg = "";
 $stats = [];
-$cancellations = [];
+$pending_cancellations = [];
+$approved_cancellations = [];
 $archived_cancellations = [];
 $room_cancellations = [];
+
+// Check if approval was successful
+if (isset($_SESSION['approval_success']) && $_SESSION['approval_success']) {
+    $success_msg = "Cancellation request approved and processed.";
+    unset($_SESSION['approval_success']);
+}
 
 try {
     if ($tab === 'room_cancellations') {
@@ -39,7 +47,6 @@ try {
             $params['search'] = "%$search_query%";
         }
 
-        $date_filter = $_GET['date_filter'] ?? 'all';
         if ($date_filter === 'today') {
             $query .= " AND DATE(rr.checkin_date) = CURDATE()";
         } elseif ($date_filter === 'week') {
@@ -70,7 +77,6 @@ try {
             $params['search'] = "%$search_query%";
         }
 
-        $date_filter = $_GET['date_filter'] ?? 'all';
         if ($date_filter === 'today') {
             $query .= " AND DATE(bca.archived_at) = CURDATE()";
         } elseif ($date_filter === 'week') {
@@ -85,13 +91,13 @@ try {
         $stmt->execute($params);
         $archived_cancellations = $stmt->fetchAll(PDO::FETCH_ASSOC);
     } else {
-        // Build query for active cancellations
+        // Build query for PENDING cancellations awaiting approval
         $query = "
             SELECT bc.*, t.name, t.email, t.phone, r.room_number, r.room_type
             FROM booking_cancellations bc
             INNER JOIN tenants t ON bc.tenant_id = t.id
             INNER JOIN rooms r ON bc.room_id = r.id
-            WHERE 1=1
+            WHERE bc.refund_approved = 0
         ";
 
         $params = [];
@@ -101,7 +107,6 @@ try {
             $params['search'] = "%$search_query%";
         }
 
-        $date_filter = $_GET['date_filter'] ?? 'all';
         if ($date_filter === 'today') {
             $query .= " AND DATE(bc.cancelled_at) = CURDATE()";
         } elseif ($date_filter === 'week') {
@@ -114,20 +119,50 @@ try {
 
         $stmt = $conn->prepare($query);
         $stmt->execute($params);
-        $cancellations = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $pending_cancellations = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Build query for APPROVED cancellations (already processed)
+        $approved_query = "
+            SELECT bc.*, t.name, t.email, t.phone, r.room_number, r.room_type
+            FROM booking_cancellations bc
+            INNER JOIN tenants t ON bc.tenant_id = t.id
+            INNER JOIN rooms r ON bc.room_id = r.id
+            WHERE bc.refund_approved = 1
+        ";
+
+        $approved_params = [];
+
+        if (!empty($search_query)) {
+            $approved_query .= " AND (t.name LIKE :search OR t.email LIKE :search OR t.phone LIKE :search OR r.room_number LIKE :search)";
+            $approved_params['search'] = "%$search_query%";
+        }
+
+        if ($date_filter === 'today') {
+            $approved_query .= " AND DATE(bc.refund_date) = CURDATE()";
+        } elseif ($date_filter === 'week') {
+            $approved_query .= " AND DATE(bc.refund_date) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)";
+        } elseif ($date_filter === 'month') {
+            $approved_query .= " AND DATE(bc.refund_date) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)";
+        }
+
+        $approved_query .= " ORDER BY bc.refund_date DESC";
+
+        $stmt = $conn->prepare($approved_query);
+        $stmt->execute($approved_params);
+        $approved_cancellations = $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
-    // Get statistics for all cancellations (active + archived) so totals never decrease
+    // Get statistics for APPROVED cancellations + ARCHIVED records (preserved history)
     $stats_query = "
         SELECT 
             COUNT(*) as total_cancellations,
-            COUNT(CASE WHEN DATE(cancelled_at) = CURDATE() THEN 1 END) as today_cancellations,
-            SUM(payment_amount) as total_cancelled_payment,
+            COUNT(CASE WHEN DATE(refund_date) = CURDATE() THEN 1 END) as today_cancellations,
+            SUM(refund_amount) as total_cancelled_payment,
             COUNT(DISTINCT tenant_id) as unique_customers
         FROM (
-            SELECT cancelled_at, payment_amount, tenant_id FROM booking_cancellations
+            SELECT refund_date, refund_amount, tenant_id FROM booking_cancellations WHERE refund_approved = 1
             UNION ALL
-            SELECT archived_at as cancelled_at, payment_amount, tenant_id FROM booking_cancellations_archive
+            SELECT archived_at as refund_date, payment_amount as refund_amount, tenant_id FROM booking_cancellations_archive
         ) combined
     ";
     
@@ -143,18 +178,149 @@ try {
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
     $cancellation_id = intval($_POST['cancellation_id'] ?? 0);
     
-    if ($_POST['action'] === 'approve_refund') {
+    if ($_POST['action'] === 'approve_cancellation_request') {
         try {
             $refund_notes = $_POST['refund_notes'] ?? '';
             $refund_amount = floatval($_POST['refund_amount'] ?? 0);
 
             $conn->beginTransaction();
 
-            // Get tenant_id from cancellation record first
+            // Get cancellation details
+            $cancel_stmt = $conn->prepare("
+                SELECT bc.*, b.id as bill_id, r.id as room_id
+                FROM booking_cancellations bc
+                INNER JOIN bills b ON bc.bill_id = b.id
+                INNER JOIN rooms r ON bc.room_id = r.id
+                WHERE bc.id = :id
+            ");
+            $cancel_stmt->execute(['id' => $cancellation_id]);
+            $cancellation = $cancel_stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$cancellation) {
+                $error_msg = "Cancellation request not found.";
+            } else {
+                $tenant_id = $cancellation['tenant_id'];
+                $bill_id = $cancellation['bill_id'];
+                $room_id = $cancellation['room_id'];
+
+                // Update cancellation record with approval
+                $approve_stmt = $conn->prepare("
+                    UPDATE booking_cancellations 
+                    SET refund_approved = 1, refund_amount = :amount, refund_notes = :notes, refund_date = NOW(), reviewed_at = NOW()
+                    WHERE id = :id
+                ");
+                $approve_stmt->execute([
+                    'amount' => $refund_amount,
+                    'notes' => $refund_notes,
+                    'id' => $cancellation_id
+                ]);
+
+                // Create refund as a negative payment transaction so it shows in tenant records
+                if ($refund_amount > 0) {
+                    $refund_stmt = $conn->prepare("
+                        INSERT INTO payment_transactions (bill_id, tenant_id, payment_amount, payment_status, payment_date, notes)
+                        VALUES (:bill_id, :tenant_id, :payment_amount, 'refunded', CURDATE(), :notes)
+                    ");
+                    $refund_notes_full = 'Cancellation Refund - ' . ($refund_notes ?: 'Customer requested cancellation');
+                    $refund_stmt->execute([
+                        'bill_id' => $bill_id,
+                        'tenant_id' => $tenant_id,
+                        'payment_amount' => -$refund_amount, // negative to represent refund
+                        'notes' => $refund_notes_full
+                    ]);
+                }
+
+                // Now process the actual cancellation
+                // Update bill status to cancelled
+                $bill_update = $conn->prepare("UPDATE bills SET status = 'cancelled', updated_at = NOW() WHERE id = :bill_id");
+                $bill_update->execute(['bill_id' => $bill_id]);
+
+                // Mark room as available again
+                $room_update = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+                $room_update->execute(['room_id' => $room_id]);
+
+                // Clear tenant's room assignment
+                $tenant_clear = $conn->prepare("UPDATE tenants SET room_id = NULL WHERE id = :tenant_id");
+                $tenant_clear->execute(['tenant_id' => $tenant_id]);
+
+                // Update room_request status to cancelled
+                $room_request_update = $conn->prepare("UPDATE room_requests SET status = 'cancelled' WHERE tenant_id = :tenant_id AND room_id = :room_id AND status NOT IN ('archived', 'deleted', 'rejected', 'cancelled')");
+                $room_request_update->execute(['tenant_id' => $tenant_id, 'room_id' => $room_id]);
+
+                $conn->commit();
+
+                // Send notification to customer about approved cancellation
+                createNotification(
+                    $conn,
+                    'tenant',
+                    $tenant_id,
+                    'cancellation_approved',
+                    'Cancellation Approved',
+                    'Your booking cancellation has been approved. Refund Amount: ₱' . number_format($refund_amount, 2) . '.',
+                    $bill_id,
+                    'booking',
+                    'tenant_dashboard.php'
+                );
+
+                $success_msg = "Cancellation request approved and processed.";
+                
+                // Redirect to refresh the page and show the approved cancellation in the modal
+                $_SESSION['approval_success'] = true;
+                header("Location: ?tab=active&search=" . urlencode($search_query) . "&date_filter=" . urlencode($date_filter));
+                exit;
+            }
+        } catch (Exception $e) {
+            if ($conn->inTransaction()) {
+                $conn->rollBack();
+            }
+            $error_msg = "Error approving cancellation: " . $e->getMessage();
+        }
+    } elseif ($_POST['action'] === 'reject_cancellation_request') {
+        try {
+            $rejection_reason = $_POST['rejection_reason'] ?? 'Your cancellation request was rejected.';
+
+            // Get tenant_id
             $cancel_stmt = $conn->prepare("SELECT tenant_id FROM booking_cancellations WHERE id = :id");
             $cancel_stmt->execute(['id' => $cancellation_id]);
             $cancel_row = $cancel_stmt->fetch(PDO::FETCH_ASSOC);
             $tenant_id = $cancel_row ? $cancel_row['tenant_id'] : null;
+
+            // Delete the cancellation request (since it was rejected)
+            $stmt = $conn->prepare("DELETE FROM booking_cancellations WHERE id = :id");
+            $stmt->execute(['id' => $cancellation_id]);
+
+            // Send notification to customer about rejection
+            if ($tenant_id) {
+                createNotification(
+                    $conn,
+                    'tenant',
+                    $tenant_id,
+                    'cancellation_rejected',
+                    'Cancellation Request Rejected',
+                    'Your cancellation request has been rejected. ' . $rejection_reason,
+                    null,
+                    'booking',
+                    'tenant_dashboard.php'
+                );
+            }
+
+            $success_msg = "Cancellation request rejected.";
+        } catch (Exception $e) {
+            $error_msg = "Error rejecting cancellation: " . $e->getMessage();
+        }
+    } elseif ($_POST['action'] === 'approve_refund') {
+        try {
+            $refund_notes = $_POST['refund_notes'] ?? '';
+            $refund_amount = floatval($_POST['refund_amount'] ?? 0);
+
+            $conn->beginTransaction();
+
+            // Get tenant_id and bill_id from cancellation record first
+            $cancel_stmt = $conn->prepare("SELECT tenant_id, bill_id FROM booking_cancellations WHERE id = :id");
+            $cancel_stmt->execute(['id' => $cancellation_id]);
+            $cancel_row = $cancel_stmt->fetch(PDO::FETCH_ASSOC);
+            $tenant_id = $cancel_row ? $cancel_row['tenant_id'] : null;
+            $bill_id = $cancel_row ? $cancel_row['bill_id'] : null;
 
             // Update cancellation record with refund info
             $stmt = $conn->prepare("
@@ -167,6 +333,21 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                 'notes' => $refund_notes,
                 'id' => $cancellation_id
             ]);
+
+            // Create refund as a negative payment transaction so it shows in tenant records
+            if ($bill_id && $refund_amount > 0) {
+                $refund_stmt = $conn->prepare("
+                    INSERT INTO payment_transactions (bill_id, tenant_id, payment_amount, payment_status, payment_date, notes)
+                    VALUES (:bill_id, :tenant_id, :payment_amount, 'refunded', CURDATE(), :notes)
+                ");
+                $refund_notes_full = 'Cancellation Refund - ' . ($refund_notes ?: 'Customer requested cancellation');
+                $refund_stmt->execute([
+                    'bill_id' => $bill_id,
+                    'tenant_id' => $tenant_id,
+                    'payment_amount' => -$refund_amount, // negative to represent refund
+                    'notes' => $refund_notes_full
+                ]);
+            }
 
             $conn->commit();
             
@@ -400,76 +581,28 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
     <title>Booking Cancellations - BAMINT Admin</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    <link rel="stylesheet" href="public/css/style.css">
     <style>
-        body { background-color: #f8f9fa; }
-        .header-banner {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 2rem;
-            border-radius: 8px;
-            margin-bottom: 2rem;
-        }
         .metric-card {
-            background: white;
             border-radius: 8px;
-            padding: 1.5rem;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            margin-bottom: 1rem;
-        }
-        .metric-value {
-            font-size: 2.5rem;
-            font-weight: bold;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-        .metric-label {
-            color: #6c757d;
-            font-size: 0.9rem;
-            margin-top: 0.5rem;
-        }
-        .cancellation-card {
-            background: white;
-            border-radius: 8px;
-            border-left: 4px solid #dc3545;
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             padding: 1.5rem;
-            margin-bottom: 1rem;
-            transition: transform 0.3s;
+            background: white;
+            transition: transform 0.2s, box-shadow 0.2s;
         }
-        .cancellation-card:hover {
-            transform: translateY(-2px);
+        .metric-card:hover {
+            transform: translateY(-4px);
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         }
-        .customer-name {
-            font-size: 1.2rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-            color: #333;
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin: 10px 0;
         }
-        .info-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 0.5rem 0;
-            border-bottom: 1px solid #f0f0f0;
+        .metric-label {
             font-size: 0.9rem;
-        }
-        .info-row:last-child {
-            border-bottom: none;
-        }
-        .info-label {
-            color: #6c757d;
-            font-weight: 500;
-        }
-        .info-value {
-            color: #333;
-            font-weight: 500;
-        }
-        .badge-status {
-            padding: 0.4rem 0.8rem;
-            border-radius: 20px;
-            font-size: 0.85rem;
+            color: #666;
+            margin-bottom: 5px;
         }
     </style>
 </head>
@@ -480,7 +613,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
             <?php include 'templates/sidebar.php'; ?>
 
             <!-- Main Content -->
-            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
                 <!-- Header -->
                 <div class="header-banner">
                     <h1><i class="bi bi-x-circle"></i> Booking Management</h1>
@@ -507,14 +640,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                         <a class="nav-link <?php echo $tab === 'active' ? 'active' : ''; ?>" 
                            href="?tab=active&search=<?php echo htmlspecialchars($search_query); ?>&date_filter=<?php echo htmlspecialchars($_GET['date_filter'] ?? 'all'); ?>" role="tab">
                             <i class="bi bi-hourglass-split"></i> Active Cancellations
-                            <span class="badge bg-danger ms-2"><?php echo count($cancellations); ?></span>
-                        </a>
-                    </li>
-                    <li class="nav-item" role="presentation">
-                                <a class="nav-link <?php echo $tab === 'room_cancellations' ? 'active' : ''; ?>" 
-                                    href="?tab=room_cancellations&search=<?php echo htmlspecialchars($search_query); ?>&date_filter=<?php echo htmlspecialchars($_GET['date_filter'] ?? 'all'); ?>" role="tab">
-                                     <i class="bi bi-hourglass-split"></i> Pending Approvals
-                                     <span class="badge bg-warning ms-2"><?php echo count($room_cancellations); ?></span>
+                            <span class="badge bg-danger ms-2"><?php echo count($pending_cancellations) + count($approved_cancellations); ?></span>
                         </a>
                     </li>
                     <li class="nav-item" role="presentation">
@@ -531,14 +657,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                 <div class="row mb-4">
                     <div class="col-md-3">
                         <div class="metric-card">
-                            <div class="metric-value"><?php echo $stats['total_cancellations'] ?? 0; ?></div>
+                            <div class="metric-value" style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"><?php echo $stats['total_cancellations'] ?? 0; ?></div>
                             <div class="metric-label">Total Cancellations</div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="metric-card">
-                            <div class="metric-value" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"><?php echo $stats['today_cancellations'] ?? 0; ?></div>
-                            <div class="metric-label">Cancelled Today</div>
                         </div>
                     </div>
                     <div class="col-md-3">
@@ -547,12 +667,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                             <div class="metric-label">Total Cancelled Payment</div>
                         </div>
                     </div>
-                    <div class="col-md-3">
-                        <div class="metric-card">
-                            <div class="metric-value" style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"><?php echo $stats['unique_customers'] ?? 0; ?></div>
-                            <div class="metric-label">Customers Cancelled</div>
-                        </div>
-                    </div>
+                    <!-- 'Cancelled Today' and 'Customers Cancelled' metrics removed per request -->
                 </div>
                 <?php elseif ($tab === 'room_cancellations'): ?>
                 <div class="row mb-4">
@@ -598,87 +713,181 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                 <!-- Cancellations List -->
                 <div>
                     <?php if ($tab === 'active'): ?>
-                        <?php if (empty($cancellations)): ?>
+                        <!-- PENDING CANCELLATIONS AWAITING APPROVAL -->
+                        <?php if (empty($pending_cancellations)): ?>
                             <div class="alert alert-info">
-                                <i class="bi bi-info-circle"></i> No active cancellations found.
+                                <i class="bi bi-info-circle"></i> No pending cancellation requests awaiting approval.
                             </div>
                         <?php else: ?>
-                            <?php foreach ($cancellations as $cancel): ?>
-                                <div class="cancellation-card">
-                                    <div class="row">
-                                        <div class="col-md-8">
-                                            <div class="customer-name">
-                                                <?php echo htmlspecialchars($cancel['name']); ?>
-                                                <span class="badge badge-status" style="background: #dc3545; color: white;">
-                                                    Pending
-                                                </span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-envelope"></i> Email:</span>
-                                                <span class="info-value"><?php echo htmlspecialchars($cancel['email'] ?? 'N/A'); ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-telephone"></i> Phone:</span>
-                                                <span class="info-value"><?php echo htmlspecialchars($cancel['phone'] ?? 'N/A'); ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-door-open"></i> Room:</span>
-                                                <span class="info-value"><?php echo htmlspecialchars($cancel['room_number']); ?> (<?php echo htmlspecialchars($cancel['room_type']); ?>)</span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-calendar-check"></i> Check-in:</span>
-                                                <span class="info-value"><?php echo $cancel['checkin_date'] ? date('M d, Y', strtotime($cancel['checkin_date'])) : 'N/A'; ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-calendar-x"></i> Check-out:</span>
-                                                <span class="info-value"><?php echo $cancel['checkout_date'] ? date('M d, Y', strtotime($cancel['checkout_date'])) : 'N/A'; ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-cash-coin"></i> Payment Amount:</span>
-                                                <span class="info-value text-danger">₱<?php echo number_format($cancel['payment_amount'], 2); ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-clock"></i> Cancelled on:</span>
-                                                <span class="info-value"><?php echo date('M d, Y • H:i A', strtotime($cancel['cancelled_at'])); ?></span>
-                                            </div>
-
-                                            <?php if (!empty($cancel['reason']) && $cancel['reason'] !== 'Customer initiated cancellation'): ?>
-                                                <div class="info-row" style="background: #f8f9fa; padding: 0.75rem; border-radius: 4px; margin-top: 0.5rem; border-left: 3px solid #6c757d;">
-                                                    <div style="width: 100%;">
-                                                        <span class="info-label"><i class="bi bi-chat-left-text"></i> Cancellation Reason:</span>
-                                                        <div class="info-value" style="margin-top: 0.3rem; color: #555;"><?php echo htmlspecialchars($cancel['reason']); ?></div>
-                                                    </div>
+                            <h5 class="mb-3"><i class="bi bi-hourglass-split"></i> Pending Approval</h5>
+                            <div class="row">
+                                <?php foreach ($pending_cancellations as $cancel): ?>
+                                <div class="col-lg-6 mb-4">
+                                    <div class="card border-danger shadow-sm h-100">
+                                        <div class="card-header bg-danger text-white">
+                                            <div class="d-flex justify-content-between align-items-start">
+                                                <div>
+                                                    <h6 class="card-title mb-1">
+                                                        <i class="bi bi-clock-history"></i> 
+                                                        <?php echo htmlspecialchars($cancel['name']); ?>
+                                                    </h6>
+                                                    <small>Room <?php echo htmlspecialchars($cancel['room_number']); ?> | <?php echo htmlspecialchars($cancel['room_type']); ?></small>
                                                 </div>
+                                                <span class="badge bg-light text-danger"><i class="bi bi-clock"></i> Awaiting Approval</span>
+                                            </div>
+                                        </div>
+                                        <div class="card-body">
+                                            <div class="row g-2 mb-3">
+                                                <div class="col-6">
+                                                    <small class="text-muted">Requested At:</small>
+                                                    <div class="fw-bold"><?php echo date('M d, h:i A', strtotime($cancel['cancelled_at'])); ?></div>
+                                                </div>
+                                                <div class="col-6">
+                                                    <small class="text-muted">Check-in Date:</small>
+                                                    <div class="fw-bold"><?php echo $cancel['checkin_date'] ? date('M d, Y', strtotime($cancel['checkin_date'])) : 'N/A'; ?></div>
+                                                </div>
+                                                <div class="col-6">
+                                                    <small class="text-muted">Email:</small>
+                                                    <div class="fw-bold"><a href="mailto:<?php echo htmlspecialchars($cancel['email']); ?>"><?php echo htmlspecialchars($cancel['email']); ?></a></div>
+                                                </div>
+                                                <div class="col-6">
+                                                    <small class="text-muted">Phone:</small>
+                                                    <div class="fw-bold"><?php echo htmlspecialchars($cancel['phone']); ?></div>
+                                                </div>
+                                                <div class="col-12">
+                                                    <small class="text-muted">Payment Amount:</small>
+                                                    <div class="fw-bold text-danger">₱<?php echo number_format($cancel['payment_amount'], 2); ?></div>
+                                                </div>
+                                            </div>
+
+                                            <?php if ($cancel['reason']): ?>
+                                            <div class="alert alert-light mb-3" style="border-left: 3px solid #ffc107;">
+                                                <small class="text-muted">Cancellation Reason:</small>
+                                                <p class="mb-0 mt-1 text-dark"><?php echo htmlspecialchars($cancel['reason']); ?></p>
+                                            </div>
                                             <?php endif; ?>
 
-                                        </div>
+                                            <!-- Approval Form -->
+                                            <form method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>" class="mb-3">
+                                                <input type="hidden" name="action" value="approve_cancellation_request">
+                                                <input type="hidden" name="cancellation_id" value="<?php echo $cancel['id']; ?>">
+                                                
+                                                <div class="mb-2">
+                                                    <label for="refund_amount_<?php echo $cancel['id']; ?>" class="form-label">Amount</label>
+                                                    <input type="number" class="form-control" id="refund_amount_<?php echo $cancel['id']; ?>" name="refund_amount" step="0.01" value="<?php echo $cancel['payment_amount']; ?>" required>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label for="refund_notes_<?php echo $cancel['id']; ?>" class="form-label">Refund Notes (Optional)</label>
+                                                    <textarea class="form-control form-control-sm" id="refund_notes_<?php echo $cancel['id']; ?>" name="refund_notes" rows="2" placeholder="Add any notes..."></textarea>
+                                                </div>
+                                                
+                                                <div class="d-grid gap-2">
+                                                    <button type="submit" class="btn btn-success btn-sm">
+                                                        <i class="bi bi-check-circle"></i> Approve Cancellation
+                                                    </button>
+                                                </div>
+                                            </form>
 
-                                        <div class="col-md-4">
-                                            <div class="d-flex flex-column gap-2">
-                                                <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" 
-                                                        data-bs-target="#notesModal" 
-                                                        onclick="setNotesData(<?php echo $cancel['id']; ?>, '<?php echo htmlspecialchars($cancel['admin_notes'] ?? ''); ?>')">
-                                                    <i class="bi bi-sticky"></i> Add Note
-                                                </button>
-
-                                                <button class="btn btn-sm btn-warning" data-bs-toggle="modal"
-                                                        data-bs-target="#archiveModal"
-                                                        onclick="setArchiveData(<?php echo $cancel['id']; ?>, '<?php echo htmlspecialchars($cancel['name']); ?>')">
-                                                    <i class="bi bi-archive"></i> Archive
-                                                </button>
-                                            </div>
+                                            <!-- Rejection Form -->
+                                            <form method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>">
+                                                <input type="hidden" name="action" value="reject_cancellation_request">
+                                                <input type="hidden" name="cancellation_id" value="<?php echo $cancel['id']; ?>">
+                                                
+                                                <div class="mb-2">
+                                                    <label for="rejection_reason_<?php echo $cancel['id']; ?>" class="form-label">Rejection Reason (Optional)</label>
+                                                    <textarea class="form-control form-control-sm" id="rejection_reason_<?php echo $cancel['id']; ?>" name="rejection_reason" rows="2" placeholder="Why are you rejecting this cancellation?"></textarea>
+                                                </div>
+                                                
+                                                <div class="d-grid gap-2">
+                                                    <button type="submit" class="btn btn-outline-danger btn-sm" onclick="return confirm('Are you sure you want to reject this cancellation request?');">
+                                                        <i class="bi bi-x-circle"></i> Reject Request
+                                                    </button>
+                                                </div>
+                                            </form>
                                         </div>
                                     </div>
                                 </div>
-                            <?php endforeach; ?>
+                                <?php endforeach; ?>
+                            </div>
                         <?php endif; ?>
+
+                        <!-- APPROVED CANCELLATIONS (RECORDED) -->
+                        <div class="mt-5">
+                            <?php if (empty($approved_cancellations)): ?>
+                                <!-- No approved cancellations yet -->
+                            <?php else: ?>
+                                <h5 class="mb-3"><i class="bi bi-check-circle"></i> Approved Cancellations</h5>
+                                <div class="row">
+                                    <?php foreach ($approved_cancellations as $approved): ?>
+                                    <div class="col-lg-6 mb-4">
+                                        <div class="card border-success shadow-sm h-100">
+                                            <div class="card-header bg-success text-white">
+                                                <div class="d-flex justify-content-between align-items-start">
+                                                    <div>
+                                                        <h6 class="card-title mb-1">
+                                                            <i class="bi bi-check-circle"></i> 
+                                                            <?php echo htmlspecialchars($approved['name']); ?>
+                                                        </h6>
+                                                        <small>Room <?php echo htmlspecialchars($approved['room_number']); ?> | <?php echo htmlspecialchars($approved['room_type']); ?></small>
+                                                    </div>
+                                                    <span class="badge bg-light text-success"><i class="bi bi-check"></i> Approved</span>
+                                                </div>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="row g-2 mb-3">
+                                                    <div class="col-6">
+                                                        <small class="text-muted">Cancelled At:</small>
+                                                        <div class="fw-bold"><?php echo date('M d, h:i A', strtotime($approved['cancelled_at'])); ?></div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <small class="text-muted">Approved On:</small>
+                                                        <div class="fw-bold"><?php echo date('M d, h:i A', strtotime($approved['refund_date'])); ?></div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <small class="text-muted">Email:</small>
+                                                        <div class="fw-bold"><a href="mailto:<?php echo htmlspecialchars($approved['email']); ?>"><?php echo htmlspecialchars($approved['email']); ?></a></div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <small class="text-muted">Phone:</small>
+                                                        <div class="fw-bold"><?php echo htmlspecialchars($approved['phone']); ?></div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <small class="text-muted">Payment Amount:</small>
+                                                        <div class="fw-bold text-danger">₱<?php echo number_format($approved['payment_amount'], 2); ?></div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <small class="text-muted">Amount:</small>
+                                                        <div class="fw-bold text-success">₱<?php echo number_format($approved['refund_amount'], 2); ?></div>
+                                                    </div>
+                                                </div>
+
+                                                <?php if ($approved['refund_notes']): ?>
+                                                <div class="alert alert-light mb-3" style="border-left: 3px solid #28a745;">
+                                                    <small class="text-muted">Refund Notes:</small>
+                                                    <p class="mb-0 mt-1 text-dark"><?php echo htmlspecialchars($approved['refund_notes']); ?></p>
+                                                </div>
+                                                <?php endif; ?>
+
+                                                <?php if ($approved['reason']): ?>
+                                                <div class="alert alert-light mb-3" style="border-left: 3px solid #ffc107;">
+                                                    <small class="text-muted">Customer Reason:</small>
+                                                    <p class="mb-0 mt-1 text-dark"><?php echo htmlspecialchars($approved['reason']); ?></p>
+                                                </div>
+                                                <?php endif; ?>
+
+                                                <!-- Archive Button -->
+                                                <div class="d-grid gap-2">
+                                                    <button type="button" class="btn btn-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#archiveModal" onclick="setArchiveData(<?php echo $approved['id']; ?>, '<?php echo htmlspecialchars(addslashes($approved['name']), ENT_QUOTES); ?>')">
+                                                        <i class="bi bi-archive"></i> Archive Record
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
+                        </div>
                     <?php elseif ($tab === 'room_cancellations'): ?>
                         <!-- Room Cancellations Section -->
                         <?php if (empty($room_cancellations)): ?>
@@ -761,64 +970,66 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                                 <i class="bi bi-info-circle"></i> No archived records found.
                             </div>
                         <?php else: ?>
-                            <?php foreach ($archived_cancellations as $archive): ?>
-                                <div class="cancellation-card" style="border-left-color: #6c757d; opacity: 0.95;">
-                                    <div class="row">
-                                        <div class="col-md-8">
-                                            <div class="customer-name">
-                                                <?php echo htmlspecialchars($archive['name']); ?>
-                                                <span class="badge badge-status" style="background: #6c757d; color: white;">
-                                                    Archived
-                                                </span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-envelope"></i> Email:</span>
-                                                <span class="info-value"><?php echo htmlspecialchars($archive['email'] ?? 'N/A'); ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-telephone"></i> Phone:</span>
-                                                <span class="info-value"><?php echo htmlspecialchars($archive['phone'] ?? 'N/A'); ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-door-open"></i> Room:</span>
-                                                <span class="info-value"><?php echo htmlspecialchars($archive['room_number']); ?> (<?php echo htmlspecialchars($archive['room_type']); ?>)</span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-calendar-check"></i> Check-in:</span>
-                                                <span class="info-value"><?php echo $archive['checkin_date'] ? date('M d, Y', strtotime($archive['checkin_date'])) : 'N/A'; ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-calendar-x"></i> Check-out:</span>
-                                                <span class="info-value"><?php echo $archive['checkout_date'] ? date('M d, Y', strtotime($archive['checkout_date'])) : 'N/A'; ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-cash-coin"></i> Payment Amount:</span>
-                                                <span class="info-value text-danger">₱<?php echo number_format($archive['payment_amount'], 2); ?></span>
-                                            </div>
-
-                                            <div class="info-row">
-                                                <span class="info-label"><i class="bi bi-archive"></i> Archived on:</span>
-                                                <span class="info-value"><?php echo date('M d, Y • H:i A', strtotime($archive['archived_at'])); ?></span>
-                                            </div>
-
-                                            <?php if (!empty($archive['archived_reason'])): ?>
-                                                <div class="info-row" style="background: #e9ecef; padding: 0.75rem; border-radius: 4px; margin-top: 0.5rem; border-left: 3px solid #495057;">
-                                                    <span class="info-label" style="color: #495057;"><i class="bi bi-info-circle"></i> Archive Reason:</span>
-                                                    <span class="info-value" style="color: #495057;"><?php echo htmlspecialchars($archive['archived_reason']); ?></span>
+                            <div class="row g-2">
+                                <?php foreach ($archived_cancellations as $archive): ?>
+                                    <div class="col-xl-2 col-lg-3 col-md-4 col-sm-6">
+                                        <div class="card h-100 shadow-sm" style="border: 1px solid #dee2e6; border-left: 4px solid #6c757d;">
+                                            <div class="card-body p-2">
+                                                <!-- Header with name and archived badge -->
+                                                <div class="d-flex justify-content-between align-items-start mb-2">
+                                                    <h6 class="card-title mb-0" style="font-size: 0.9rem;"><?php echo htmlspecialchars($archive['name']); ?></h6>
+                                                    <span class="badge bg-secondary" style="font-size: 0.7rem;">Archived</span>
                                                 </div>
-                                            <?php endif; ?>
 
-                                        </div>
+                                                <!-- Card content -->
+                                                <div class="text-sm" style="font-size: 0.85rem;">
+                                                    <div class="mb-1">
+                                                        <small class="text-muted d-block"><i class="bi bi-envelope"></i> Email</small>
+                                                        <div style="font-size: 0.8rem;"><?php echo htmlspecialchars($archive['email'] ?? 'N/A'); ?></div>
+                                                    </div>
 
-                                        <div class="col-md-4">
-                                            <div class="d-flex flex-column gap-2">
-                                                <button class="btn btn-sm btn-success" data-bs-toggle="modal"
+                                                    <div class="mb-1">
+                                                        <small class="text-muted d-block"><i class="bi bi-telephone"></i> Phone</small>
+                                                        <div style="font-size: 0.8rem;"><?php echo htmlspecialchars($archive['phone'] ?? 'N/A'); ?></div>
+                                                    </div>
+
+                                                    <div class="mb-1">
+                                                        <small class="text-muted d-block"><i class="bi bi-door-open"></i> Room</small>
+                                                        <div style="font-size: 0.8rem;"><?php echo htmlspecialchars($archive['room_number']); ?> (<?php echo htmlspecialchars($archive['room_type']); ?>)</div>
+                                                    </div>
+
+                                                    <div class="mb-1">
+                                                        <small class="text-muted d-block"><i class="bi bi-calendar-check"></i> Check-in</small>
+                                                        <div style="font-size: 0.8rem;"><?php echo $archive['checkin_date'] ? date('M d, Y', strtotime($archive['checkin_date'])) : 'N/A'; ?></div>
+                                                    </div>
+
+                                                    <div class="mb-1">
+                                                        <small class="text-muted d-block"><i class="bi bi-calendar-x"></i> Check-out</small>
+                                                        <div style="font-size: 0.8rem;"><?php echo $archive['checkout_date'] ? date('M d, Y', strtotime($archive['checkout_date'])) : 'N/A'; ?></div>
+                                                    </div>
+
+                                                    <div class="mb-1">
+                                                        <small class="text-muted d-block"><i class="bi bi-cash-coin"></i> Payment</small>
+                                                        <div class="text-danger fw-bold" style="font-size: 0.8rem;">₱<?php echo number_format($archive['payment_amount'], 2); ?></div>
+                                                    </div>
+
+                                                    <div class="mb-1">
+                                                        <small class="text-muted d-block"><i class="bi bi-archive"></i> Archived</small>
+                                                        <div style="font-size: 0.8rem;"><?php echo date('M d, Y • H:i A', strtotime($archive['archived_at'])); ?></div>
+                                                    </div>
+
+                                                    <?php if (!empty($archive['archived_reason'])): ?>
+                                                        <div class="mt-1 p-1" style="background: #f8f9fa; border-left: 2px solid #6c757d; border-radius: 3px; font-size: 0.75rem;">
+                                                            <small class="text-muted"><i class="bi bi-info-circle"></i> Reason:</small>
+                                                            <div><?php echo htmlspecialchars($archive['archived_reason']); ?></div>
+                                                        </div>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+
+                                            <!-- Card footer with action button -->
+                                            <div class="card-footer bg-white border-top p-1">
+                                                <button class="btn btn-sm btn-success w-100" style="font-size: 0.8rem; padding: 0.25rem 0.5rem;" data-bs-toggle="modal"
                                                         data-bs-target="#restoreModal"
                                                         onclick="setRestoreData(<?php echo $archive['id']; ?>, '<?php echo htmlspecialchars($archive['name']); ?>')">
                                                     <i class="bi bi-arrow-counterclockwise"></i> Restore
@@ -826,12 +1037,69 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                                             </div>
                                         </div>
                                     </div>
-                                </div>
-                            <?php endforeach; ?>
+                                <?php endforeach; ?>
+                            </div>
                         <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </main>
+        </div>
+    </div>
+
+    <!-- Cancellation Approved Modal -->
+    <div class="modal fade" id="cancellationApprovedModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-success">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title"><i class="bi bi-check-circle"></i> Cancellation Approved</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center py-4">
+                    <div style="font-size: 3rem; color: #28a745; margin-bottom: 1rem;">
+                        <i class="bi bi-check-circle-fill"></i>
+                    </div>
+                    <h6>Cancellation Approved Successfully</h6>
+                    <p class="text-muted">The customer's booking cancellation has been approved and recorded.</p>
+                    <p class="mb-0"><strong>Customer Notification:</strong> Sent</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-success" data-bs-dismiss="modal">
+                        <i class="bi bi-check"></i> Done
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Archive Record Modal -->
+    <div class="modal fade" id="archiveModal" tabindex="-1">
+        <div class="modal-dialog">
+            <form method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>" class="modal-content">
+                <div class="modal-header bg-secondary text-white">
+                    <h5 class="modal-title"><i class="bi bi-archive"></i> Archive Record</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" name="action" value="archive_record">
+                    <input type="hidden" name="cancellation_id" id="archiveCancellationId">
+                    
+                    <div class="mb-3">
+                        <p><strong>Customer:</strong> <span id="archiveCustomerName"></span></p>
+                        <p class="text-muted mb-3">Are you sure you want to move this record to Archived Records?</p>
+                    </div>
+                    
+                    <div class="mb-0">
+                        <label for="archiveReason" class="form-label">Archival Reason (Optional)</label>
+                        <textarea class="form-control" id="archiveReason" name="archived_reason" rows="2" placeholder="Why are you archiving this record?"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-warning">
+                        <i class="bi bi-archive"></i> Archive Record
+                    </button>
+                </div>
+            </form>
         </div>
     </div>
 
@@ -858,44 +1126,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                         <button type="submit" class="btn btn-primary">
                             <i class="bi bi-check-circle"></i> Save Note
-                        </button>
-                    </div>
-                </form>
-            </div>
-        </div>
-    </div>
-
-    <!-- Archive Modal -->
-    <div class="modal fade" id="archiveModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title"><i class="bi bi-archive"></i> Archive Record</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <form method="POST">
-                    <div class="modal-body">
-                        <input type="hidden" name="cancellation_id" id="archiveCancellationId">
-                        <input type="hidden" name="action" value="archive_record">
-                        
-                        <p>Are you sure you want to archive this record?</p>
-                        <p><strong id="archiveCustomerName"></strong></p>
-
-                        <div class="mb-3">
-                            <label for="archivedReason" class="form-label">Archive Reason</label>
-                            <select class="form-select" id="archivedReason" name="archived_reason">
-                                <option value="Completed">Completed</option>
-                                <option value="Refund Processed">Refund Processed</option>
-                                <option value="Closed - Customer Inactive">Closed - Customer Inactive</option>
-                                <option value="Admin Archived">Admin Archived</option>
-                                <option value="Other">Other</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                        <button type="submit" class="btn btn-warning">
-                            <i class="bi bi-archive"></i> Archive Record
                         </button>
                     </div>
                 </form>
@@ -932,6 +1162,29 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Show approval modal if success message is present
+        document.addEventListener('DOMContentLoaded', function() {
+            const successAlert = document.querySelector('.alert-success');
+            if (successAlert) {
+                const alertText = successAlert.textContent || '';
+                if (alertText.includes('approved and processed')) {
+                    setTimeout(() => {
+                        try {
+                            const modalElement = document.getElementById('cancellationApprovedModal');
+                            if (modalElement) {
+                                const modal = new bootstrap.Modal(modalElement);
+                                modal.show();
+                            } else {
+                                console.warn('Modal element not found');
+                            }
+                        } catch (error) {
+                            console.error('Error showing modal:', error);
+                        }
+                    }, 500);
+                }
+            }
+        });
+
         function setNotesData(cancellationId, existingNotes) {
             document.getElementById('notesCancellationId').value = cancellationId;
             document.getElementById('reviewNote').value = existingNotes;

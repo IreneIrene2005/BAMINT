@@ -12,6 +12,7 @@ $_SESSION['role'] = 'admin';
 $_SESSION['admin_id'] = 1;
 
 require_once "db/database.php";
+require_once "db_pdo.php";
 require_once "db/notifications.php";
 
 echo "<pre>\n";
@@ -32,7 +33,7 @@ try {
 echo "TEST 2: Create a test notification\n";
 try {
     $notifId = createNotification(
-        $conn,
+        $pdo,
         'admin',
         1,
         'test_notification',
@@ -55,7 +56,7 @@ try {
 // Test 3: Test getUnreadNotificationsCount function
 echo "TEST 3: Get unread notification count for admin\n";
 try {
-    $count = getUnreadNotificationsCount($conn, 'admin', 1);
+    $count = getUnreadNotificationsCount($pdo, 'admin', 1);
     echo "✓ Unread count: $count\n\n";
 } catch (Exception $e) {
     echo "✗ Error: " . $e->getMessage() . "\n\n";
@@ -64,7 +65,7 @@ try {
 // Test 4: Test getNotifications function
 echo "TEST 4: Get all notifications for admin\n";
 try {
-    $notifications = getNotifications($conn, 'admin', 1, 5);
+    $notifications = getNotifications($pdo, 'admin', 1, 5);
     echo "✓ Retrieved " . count($notifications) . " notifications\n";
     
     if (!empty($notifications)) {
@@ -156,13 +157,13 @@ try {
 // Test 8: Check tenant notification count
 echo "TEST 8: Check tenant notification count\n";
 try {
-    $stmt = $conn->query("SELECT DISTINCT recipient_id FROM notifications WHERE recipient_type = 'tenant'");
+    $stmt = $pdo->query("SELECT DISTINCT recipient_id FROM notifications WHERE recipient_type = 'tenant'");
     $tenantNotifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
     if (!empty($tenantNotifications)) {
         echo "✓ Notifications exist for " . count($tenantNotifications) . " tenant(s):\n";
         foreach ($tenantNotifications as $tn) {
-            $count = getUnreadNotificationsCount($conn, 'tenant', $tn['recipient_id']);
+            $count = getUnreadNotificationsCount($pdo, 'tenant', $tn['recipient_id']);
             echo "  - Tenant ID: {$tn['recipient_id']}, Unread count: $count\n";
         }
     } else {

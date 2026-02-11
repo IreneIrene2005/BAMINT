@@ -55,15 +55,15 @@ try {
         exit;
     }
 
-    // Record the cancellation
+    // Record the cancellation - ONLY insert, admin must approve before processing
     $conn->beginTransaction();
 
-    // Insert cancellation record
+    // Insert cancellation record as PENDING (refund_approved = 0)
     $cancel_stmt = $conn->prepare("
         INSERT INTO booking_cancellations 
-        (bill_id, tenant_id, room_id, payment_amount, checkin_date, checkout_date, cancelled_at, reason)
+        (bill_id, tenant_id, room_id, payment_amount, checkin_date, checkout_date, cancelled_at, reason, refund_approved)
         VALUES 
-        (:bill_id, :tenant_id, :room_id, :payment_amount, :checkin_date, :checkout_date, NOW(), :reason)
+        (:bill_id, :tenant_id, :room_id, :payment_amount, :checkin_date, :checkout_date, NOW(), :reason, 0)
     ");
     $cancel_stmt->execute([
         'bill_id' => $booking['bill_id'],
@@ -75,26 +75,14 @@ try {
         'reason' => $cancellation_reason
     ]);
 
-    // Update bill status to cancelled
-    $bill_update = $conn->prepare("UPDATE bills SET status = 'cancelled', updated_at = NOW() WHERE id = :bill_id");
-    $bill_update->execute(['bill_id' => $booking['bill_id']]);
-
-    // Mark room as available again
-    $room_update = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
-    $room_update->execute(['room_id' => $booking['room_id']]);
-
-    // Clear tenant's room assignment
-    $tenant_clear = $conn->prepare("UPDATE tenants SET room_id = NULL WHERE id = :customer_id");
-    $tenant_clear->execute(['customer_id' => $customer_id]);
-
     $conn->commit();
 
-    // Notify all admins about the cancellation
+    // Notify all admins about the PENDING cancellation request
     try {
         $admins = $conn->query("SELECT id FROM admins")->fetchAll(PDO::FETCH_ASSOC);
         foreach ($admins as $admin) {
             // Build notification message with reason if provided
-            $notification_message = 'Customer ' . htmlspecialchars($booking['name']) . ' cancelled their booking for Room ' . htmlspecialchars($booking['room_number']) . '. Check-in was scheduled for ' . ($booking['checkin_date'] ? date('M d, Y', strtotime($booking['checkin_date'])) : 'N/A') . '.';
+            $notification_message = 'Customer ' . htmlspecialchars($booking['name']) . ' has requested to cancel their booking for Room ' . htmlspecialchars($booking['room_number']) . '. Payment: ₱' . number_format($booking['payment_amount'], 2) . '. Check-in was scheduled for ' . ($booking['checkin_date'] ? date('M d, Y', strtotime($booking['checkin_date'])) : 'N/A') . '.';
             
             if ($cancellation_reason && $cancellation_reason !== 'Customer initiated cancellation') {
                 $notification_message .= ' Reason: ' . htmlspecialchars($cancellation_reason);
@@ -104,38 +92,21 @@ try {
                 $conn,
                 'admin',
                 $admin['id'],
-                'booking_cancelled',
-                'Booking Cancellation',
+                'cancellation_request',
+                'Cancellation Request Pending Approval',
                 $notification_message,
                 $booking['bill_id'],
                 'booking',
-                'admin_bookings.php'
+                'admin_bookings.php?tab=pending_cancellations'
             );
         }
     } catch (Exception $e) {
-        error_log('Admin notification on booking cancellation failed: ' . $e->getMessage());
-    }
-
-    // Send confirmation to customer
-    try {
-        createNotification(
-            $conn,
-            'tenant',
-            $customer_id,
-            'booking_cancelled',
-            'Booking Cancelled',
-            'Your booking has been cancelled. Please contact management for any questions regarding your payment.',
-            $booking['bill_id'],
-            'booking',
-            'tenant_dashboard.php'
-        );
-    } catch (Exception $e) {
-        error_log('Tenant notification on booking cancellation failed: ' . $e->getMessage());
+        error_log('Admin notification on cancellation request failed: ' . $e->getMessage());
     }
 
     echo json_encode([
         'success' => true,
-        'message' => 'Booking cancelled successfully. Management will review your request.'
+        'message' => 'Your cancellation request has been submitted and is waiting for admin/front desk approval.'
     ]);
 
 } catch (Exception $e) {
