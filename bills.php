@@ -415,7 +415,7 @@ try {
                     $amount_paid = floatval($sum_stmt->fetchColumn());
                     
                     // Fetch check-in payment method (first/earliest payment)
-                    $pm_checkin_stmt = $conn->prepare("SELECT payment_method FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved') ORDER BY created_at ASC, id ASC LIMIT 1");
+                    $pm_checkin_stmt = $conn->prepare("SELECT COALESCE(checkin_payment_method, payment_method) as pm FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved') ORDER BY created_at ASC, id ASC LIMIT 1");
                     $pm_checkin_stmt->execute(['bill_id' => $row['id']]);
                     $payment_method_checkin = $pm_checkin_stmt->fetchColumn();
                     
@@ -432,7 +432,7 @@ try {
                     // Fetch check-out payment method (only if tenant is inactive/checked out)
                     $payment_method_checkout = null;
                     if ($tenant_status === 'inactive') {
-                        $pm_checkout_stmt = $conn->prepare("SELECT payment_method FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved') ORDER BY created_at DESC, id DESC LIMIT 1");
+                        $pm_checkout_stmt = $conn->prepare("SELECT COALESCE(checkout_payment_method, payment_method) as pm FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved') ORDER BY created_at DESC, id DESC LIMIT 1");
                         $pm_checkout_stmt->execute(['bill_id' => $row['id']]);
                         $payment_method_checkout = $pm_checkout_stmt->fetchColumn();
                     }
@@ -514,33 +514,7 @@ try {
                     ];
                 }
                 ?>
-                <!-- Room Count card removed -->
-                <div class="col-md-6 col-sm-6 mb-3">
-                    <div class="card metric-card bg-warning bg-opacity-10 h-100">
-                        <div class="card-body text-center">
-                            <div class="metric-label">Total Due</div>
-                            <div class="metric-value text-warning">₱<?php echo number_format($grand_total_due_sum, 2); ?></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-6 col-sm-6 mb-3">
-                    <div class="card metric-card bg-info bg-opacity-10 h-100">
-                        <div class="card-body text-center">
-                            <div class="metric-label">Total Paid</div>
-                            <?php
-                            // Compute global paid amount from payment_transactions to keep Total Paid stable across views
-                            try {
-                                $global_paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as total_paid FROM payment_transactions WHERE payment_status IN ('verified','approved')");
-                                $global_paid_stmt->execute();
-                                $global_paid = floatval($global_paid_stmt->fetchColumn());
-                            } catch (Exception $e) {
-                                $global_paid = $grand_total_paid_sum; // fallback
-                            }
-                            ?>
-                            <div class="metric-value text-info">₱<?php echo number_format($global_paid, 2); ?></div>
-                        </div>
-                    </div>
-                </div>
+                <!-- Total Due / Total Paid metric cards removed per request -->
                 
             </div>
 
@@ -1860,7 +1834,7 @@ function switchView(view) {
                     <div class="row">
                         <div class="col-md-6">
                             <label for="checkout_method" class="form-label">Payment Method <span class="text-danger">*</span></label>
-                            <select class="form-select" id="checkout_method" name="payment_method" required>
+                            <select class="form-select" id="checkout_method" name="checkout_payment_method" required>
                                 <option value="">-- Select Payment Method --</option>
                                 <option value="cash">Cash</option>
                                 <option value="gcash">GCash</option>

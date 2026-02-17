@@ -259,6 +259,20 @@ try {
     $stmt->execute(['customer_id' => $customer_id]);
     $cancellation_pending = $stmt->fetch(PDO::FETCH_ASSOC);
 
+    // Check for recent cancellation rejection notification
+    $cancellation_rejected = null;
+    $stmt = $conn->prepare("
+        SELECT * FROM notifications
+        WHERE recipient_type = 'tenant' 
+        AND recipient_id = :customer_id 
+        AND notification_type = 'cancellation_rejected'
+        AND created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+        ORDER BY created_at DESC
+        LIMIT 1
+    ");
+    $stmt->execute(['customer_id' => $customer_id]);
+    $cancellation_rejected = $stmt->fetch(PDO::FETCH_ASSOC);
+
 } catch (Exception $e) {
     $error = "Error loading customer data: " . $e->getMessage();
 }
@@ -390,6 +404,31 @@ try {
 
                 <?php if (isset($error)): ?>
                     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
+                <?php endif; ?>
+
+                <!-- Cancellation Rejection Notification -->
+                <?php if ($cancellation_rejected): ?>
+                    <div class="alert alert-danger alert-dismissible fade show mb-4" role="alert" style="border-left: 5px solid #dc3545;">
+                        <button type="button" class="btn-close" aria-label="Close" onclick="dismissCancellationRejected(<?php echo (int)($cancellation_rejected['id'] ?? 0); ?>)"></button>
+                        <div class="d-flex align-items-start gap-3">
+                            <div class="flex-shrink-0">
+                                <i class="bi bi-x-octagon-fill" style="font-size: 1.5rem; color: #dc3545;"></i>
+                            </div>
+                            <div class="flex-grow-1">
+                                <h5 class="alert-heading mb-3">
+                                    <i class="bi bi-exclamation-circle"></i> Cancellation Request Rejected
+                                </h5>
+                                <p class="mb-3">
+                                    Your cancellation request has been <strong>rejected</strong> by the admin/front desk. You can submit another cancellation request if needed, or proceed with your booking.
+                                </p>
+                                
+                                <div class="bg-light p-3 rounded">
+                                    <small class="text-muted"><strong>Message:</strong></small>
+                                    <p class="mb-0 mt-2"><?php echo htmlspecialchars($cancellation_rejected['message'] ?? 'Your cancellation request was rejected.'); ?></p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 <?php endif; ?>
 
                 <!-- Cancellation Approved Notification -->
@@ -1045,6 +1084,26 @@ try {
                     }
                 })
                 .catch(error => console.error('Error:', error));
+        }
+
+        /**
+         * Dismiss a specific notification (cancellation_rejected)
+         * Marks the notification as read on the server so it won't reappear.
+         */
+        function dismissCancellationRejected(notificationId) {
+            if (!notificationId) return;
+            fetch('api_dismiss_notification.php?action=dismiss_notification&id=' + encodeURIComponent(notificationId), {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    console.log('Cancellation rejection notification dismissed');
+                } else {
+                    console.error('Failed to dismiss notification', data.error);
+                }
+            })
+            .catch(err => console.error('Error dismissing notification', err));
         }
 
         /**

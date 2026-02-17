@@ -290,6 +290,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['approve_checkin'])) {
             if ($rrow && $rrow['room_id']) {
                 $occ = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :id");
                 $occ->execute(['id' => $rrow['room_id']]);
+                
+                // Update room_requests status to 'completed' (booking now approved and checked in)
+                $update_booking = $conn->prepare("UPDATE room_requests SET status = 'completed' WHERE tenant_id = :tenant_id AND room_id = :room_id AND status IN ('approved', 'occupied')");
+                $update_booking->execute(['tenant_id' => $tenant_id, 'room_id' => $rrow['room_id']]);
             }
 
             $conn->commit();

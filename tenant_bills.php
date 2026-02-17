@@ -174,9 +174,6 @@ try {
                             <h1><i class="bi bi-receipt"></i> My Bills</h1>
                             <p class="mb-0">View and manage your billing information</p>
                         </div>
-                        <a href="tenant_make_payment.php" class="btn btn-light btn-lg">
-                            <i class="bi bi-credit-card"></i> Make a Payment
-                        </a>
 					</div>
 				</div>
 

@@ -577,7 +577,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Process customer checkout: record final payment, mark tenant inactive, free room
         $tenant_id = intval($_POST['tenant_id'] ?? 0);
         $final_amount = floatval($_POST['final_amount'] ?? 0);
-        $payment_method = $_POST['payment_method'] ?? 'cash';
+        $payment_method = $_POST['checkout_payment_method'] ?? $_POST['payment_method'] ?? 'cash';
         $checkout_notes = $_POST['checkout_notes'] ?? '';
         
         if (!$tenant_id || $final_amount < 0) {
@@ -634,20 +634,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'id' => $bill['id']
                 ]);
                 
-                // Record payment transaction for this bill
-                $trans_sql = "INSERT INTO payment_transactions 
-                             (bill_id, tenant_id, payment_amount, payment_method, payment_status, payment_date, notes, recorded_by) 
-                             VALUES (:bill_id, :tenant_id, :payment_amount, :payment_method, :payment_status, :payment_date, :notes, :recorded_by)";
+                // Update the check-in payment record to add checkout method and notes
+                $trans_sql = "UPDATE payment_transactions 
+                             SET checkout_payment_method = :checkout_payment_method, 
+                                 notes = CONCAT(COALESCE(notes, ''), '\nCheckout: ', :checkout_notes, ' (',  :checkout_payment_method, ')')
+                             WHERE bill_id = :bill_id AND is_checkout_payment = 0
+                             LIMIT 1";
                 $trans_stmt = $conn->prepare($trans_sql);
                 $trans_stmt->execute([
                     'bill_id' => $bill['id'],
-                    'tenant_id' => $tenant_id,
-                    'payment_amount' => $payment_on_bill,
-                    'payment_method' => $payment_method,
-                    'payment_status' => 'approved',
-                    'payment_date' => date('Y-m-d'),
-                    'notes' => 'Checkout payment. ' . $checkout_notes,
-                    'recorded_by' => $_SESSION['id']
+                    'checkout_payment_method' => $payment_method,
+                    'checkout_notes' => $checkout_notes,
                 ]);
                 
                 $remaining_payment -= $payment_on_bill;
@@ -965,7 +962,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     
                     <div class="invoice">
                         <div class="invoice-header">
-                            <h2>BOARDING HOUSE INVOICE</h2>
+                            <h2>HOTEL INVOICE</h2>
                             <p class="text-muted">Invoice #<?php echo str_pad($bill['id'], 5, '0', STR_PAD_LEFT); ?></p>
                         </div>
                         

@@ -578,7 +578,7 @@ try {
                                             <h6 class="mb-1">
                                                 <i class="bi bi-person"></i> 
                                                 <strong><?php echo htmlspecialchars($request['tenant_info_name'] ?? $request['tenant_name']); ?></strong>
-                                                &nbsp; <a href="#" class="btn btn-link btn-sm" data-bs-toggle="modal" data-bs-target="#editModal<?php echo $request['id']; ?>">Edit</a>
+                                                &nbsp; <!-- Edit modal removed -->
                                             </h6>
                                             <p class="mb-1 text-muted small">
                                                 <i class="bi bi-envelope"></i> 
@@ -754,9 +754,7 @@ try {
                                                         }
                                                     ?>
                                                 </span>
-                                                <a href="#" class="btn btn-link btn-sm p-0 ms-2" data-bs-toggle="modal" data-bs-target="#detailsModal<?php echo $request['id']; ?>">
-                                                    <i class="bi bi-eye"></i> View Details
-                                                </a>
+                                                <!-- Details modal removed -->
                                                 </span>
                                             </div>
 
@@ -779,13 +777,6 @@ try {
                                                             <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
                                                             <button type="submit" class="btn btn-sm btn-success">
                                                                 <i class="bi bi-check-circle"></i> Approve
-                                                            </button>
-                                                        </form>
-                                                        <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to reject this request?');">
-                                                            <input type="hidden" name="action" value="reject">
-                                                            <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
-                                                            <button type="submit" class="btn btn-sm btn-danger">
-                                                                <i class="bi bi-x-circle"></i> Reject
                                                             </button>
                                                         </form>
                                                         <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Archive this request?');">
@@ -847,165 +838,12 @@ try {
                                                 }
                                             }
                                             ?>
-                                        <!-- Modal for Details -->
-                                        <div class="modal fade" id="detailsModal<?php echo $request['id']; ?>" tabindex="-1" aria-labelledby="detailsModalLabel<?php echo $request['id']; ?>" aria-hidden="true">
-                                            <div class="modal-dialog modal-lg">
-                                                <div class="modal-content">
-                                                    <div class="modal-header">
-                                                                                                        <h5 class="modal-title" id="detailsModalLabel<?php echo $request['id']; ?>">Room Request Details</h5>
-                                                                                                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                                                                                                    </div>
-                                                                                                    <div class="modal-body">
-                                                                                                        <?php
-                                                                                                        // Use cached payment info for modal
-                                                                                                        $cache_key = $request['tenant_id'] . '_' . $request['room_id'];
-                                                                                                        $payment_info = isset($request_payment_cache[$cache_key]) ? $request_payment_cache[$cache_key] : [
-                                                                                                            'payment_type' => 'no_payment',
-                                                                                                            'paid_amount' => 0,
-                                                                                                            'amount_due' => 0,
-                                                                                                            'bill_id' => null
-                                                                                                        ];
-                                                                                                        $paid_amount = $payment_info['paid_amount'];
-                                                                                                        $amount_due = $payment_info['amount_due'];
-                                                                                                        $payment_status = 'No Payment Yet';
-                                                                                                        if ($payment_info['payment_type'] === 'full_payment') {
-                                                                                                            $payment_status = 'Full Payment Paid';
-                                                                                                        } elseif ($payment_info['payment_type'] === 'downpayment') {
-                                                                                                            $payment_status = 'Downpayment Paid';
-                                                                                                        }
-                                                                                                        $remaining = max(0, $amount_due - $paid_amount);
-                                                                                                        ?>
-                                                                                                        <dl class="row">
-                                                                                                            <dt class="col-sm-3">Name</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo htmlspecialchars($request['tenant_info_name'] ?? $request['tenant_name']); ?></dd>
-                                                                                                            <dt class="col-sm-3">Email</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo htmlspecialchars($request['tenant_info_email'] ?? $request['tenant_email']); ?></dd>
-                                                                                                            <dt class="col-sm-3">Phone</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo htmlspecialchars($request['tenant_info_phone'] ?? $request['tenant_phone']); ?></dd>
-                                                                                                            <dt class="col-sm-3">Address</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo htmlspecialchars($request['tenant_info_address']); ?></dd>
-                                                                                                            <dt class="col-sm-3">Room</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo htmlspecialchars($request['room_number']); ?> (<?php echo htmlspecialchars($request['room_type']); ?>)</dd>
-                                                                                                            <dt class="col-sm-3">Rate</dt>
-                                                                                                            <dd class="col-sm-9">₱<?php echo number_format($request['rate'], 2); ?></dd>
-                                                                                                            <dt class="col-sm-3">Room Status</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo htmlspecialchars(ucfirst($request['room_status'])); ?></dd>
-                                                                                                            <dt class="col-sm-3">Occupants</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo intval($request['tenant_count']); ?> person(s)</dd>
-                                                                                                            <dt class="col-sm-3">Check-in</dt>
-                                                                                                            <dd class="col-sm-9"><?php
-                                                                                                                if (!empty($request['checkin_date'])) {
-                                                                                                                    $ci = date('M d, Y', strtotime($request['checkin_date']));
-                                                                                                                    if (!empty($request['checkin_time']) && $request['checkin_time'] !== '00:00:00') {
-                                                                                                                        $ci .= ' at ' . date('g:i A', strtotime($request['checkin_time']));
-                                                                                                                    }
-                                                                                                                    echo $ci;
-                                                                                                                } else {
-                                                                                                                    echo '<span class="text-danger">Missing</span>';
-                                                                                                                }
-                                                                                                            ?></dd>
-                                                                                                            <dt class="col-sm-3">Check-out</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo !empty($request['checkout_date']) ? date('M d, Y \a\t h:i A', strtotime($request['checkout_date'])) : '<span class="text-danger">Missing</span>'; ?></dd>
-                                                                                                            <dt class="col-sm-3">Notes</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo htmlspecialchars($request['notes']); ?></dd>
-                                                                                                            <dt class="col-sm-3">Requested</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo date('M d, Y \a\t H:i A', strtotime($request['request_date'])); ?></dd>
-                                                                                                            <dt class="col-sm-3">Status</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo $status_labels[$request['status']] ?? ucfirst($request['status']); ?></dd>
-                                                                                                            <dt class="col-sm-3">Payment Status</dt>
-                                                                                                            <dd class="col-sm-9"><?php echo $payment_status; ?></dd>
-                                                                                                            <dt class="col-sm-3">Amount Paid</dt>
-                                                                                                            <dd class="col-sm-9">₱<?php echo number_format($paid_amount, 2); ?></dd>
-                                                                                                            <dt class="col-sm-3">Remaining Balance</dt>
-                                                                                                            <dd class="col-sm-9">₱<?php echo number_format($remaining, 2); ?></dd>
-                                                                                                        </dl>
-                                                                                                    </div>
-                                                                                                </div>
-                                                                                            </div>
-                                                                                        </div>
-                                        </div>
-                        <!-- Edit Request Modal -->
-                        <div class="modal fade" id="editModal<?php echo $request['id']; ?>" tabindex="-1" aria-labelledby="editModalLabel<?php echo $request['id']; ?>" aria-hidden="true">
-                            <div class="modal-dialog modal-lg modal-dialog-centered">
-                                <div class="modal-content">
-                                    <div class="modal-header">
-                                        <h5 class="modal-title" id="editModalLabel<?php echo $request['id']; ?>">Edit Request - <?php echo htmlspecialchars($request['room_number']); ?></h5>
-                                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                                    </div>
-                                    <div class="modal-body">
-                                        <form method="POST">
-                                            <input type="hidden" name="action" value="update_request">
-                                            <input type="hidden" name="request_id" value="<?php echo (int)$request['id']; ?>">
-                                            <div class="mb-3">
-                                                <label class="form-label">Full Name</label>
-                                                <input type="text" name="tenant_info_name" class="form-control" value="<?php echo htmlspecialchars($request['tenant_info_name'] ?? $request['tenant_name']); ?>">
-                                            </div>
-                                            <div class="mb-3">
-                                                <label class="form-label">Email</label>
-                                                <input type="email" name="tenant_info_email" class="form-control" value="<?php echo htmlspecialchars($request['tenant_info_email'] ?? $request['tenant_email']); ?>">
-                                            </div>
-                                            <div class="mb-3">
-                                                <label class="form-label">Phone</label>
-                                                <input type="tel" name="tenant_info_phone" class="form-control" value="<?php echo htmlspecialchars($request['tenant_info_phone'] ?? $request['tenant_phone']); ?>">
-                                            </div>
-                                            <div class="mb-3">
-                                                <label class="form-label">Address</label>
-                                                <textarea name="tenant_info_address" class="form-control" rows="2"><?php echo htmlspecialchars($request['tenant_info_address']); ?></textarea>
-                                            </div>
-                                            <div class="text-end">
-                                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                                                <button type="submit" class="btn btn-primary">Save Changes</button>
-                                            </div>
-                                        </form>
+                                        <!-- Details modal removed -->
+                        <!-- Edit modal removed -->
                                     </div>
                                 </div>
                             </div>
-                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                                                                <!-- Payment History Modal -->
-                                                                <div class="modal fade" id="paymentHistoryModal<?php echo $request['tenant_id']; ?>" tabindex="-1" aria-labelledby="paymentHistoryModalLabel<?php echo $request['tenant_id']; ?>" aria-hidden="true">
-                                                                    <div class="modal-dialog modal-lg modal-dialog-centered">
-                                                                        <div class="modal-content">
-                                                                            <div class="modal-header">
-                                                                                <h5 class="modal-title" id="paymentHistoryModalLabel<?php echo $request['tenant_id']; ?>">Payment History for <?php echo htmlspecialchars($request['tenant_info_name'] ?? $request['tenant_name']); ?></h5>
-                                                                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                                                                            </div>
-                                                                            <div class="modal-body">
-                                                                                <table class="table table-bordered table-sm">
-                                                                                    <thead>
-                                                                                        <tr>
-                                                                                            <th>Date</th>
-                                                                                            <th>Amount</th>
-                                                                                            <th>Status</th>
-                                                                                            <th>Bill Type</th>
-                                                                                        </tr>
-                                                                                    </thead>
-                                                                                    <tbody>
-                                                                                        <?php
-                                                                                        $ph_stmt = $conn->prepare("SELECT pt.*, b.notes as bill_notes FROM payment_transactions pt LEFT JOIN bills b ON pt.bill_id = b.id WHERE pt.tenant_id = :tenant_id ORDER BY pt.payment_date DESC");
-                                                                                        $ph_stmt->execute(['tenant_id' => $request['tenant_id']]);
-                                                                                        $history = $ph_stmt->fetchAll(PDO::FETCH_ASSOC);
-                                                                                        if ($history) {
-                                                                                                foreach ($history as $row) {
-                                                                                                        echo '<tr>';
-                                                                                                        echo '<td>' . date('M d, Y h:i A', strtotime($row['payment_date'])) . '</td>';
-                                                                                                        echo '<td>₱' . number_format($row['payment_amount'], 2) . '</td>';
-                                                                                                        echo '<td>' . htmlspecialchars(ucfirst($row['payment_status'])) . '</td>';
-                                                                                                        echo '<td>' . htmlspecialchars($row['bill_notes']) . '</td>';
-                                                                                                        echo '</tr>';
-                                                                                                }
-                                                                                        } else {
-                                                                                                echo '<tr><td colspan="4" class="text-center text-muted">No payment history found.</td></tr>';
-                                                                                        }
-                                                                                        ?>
-                                                                                    </tbody>
-                                                                                </table>
-                                                                            </div>
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
+                        <!-- Payment history modal removed -->
                         <?php endforeach; ?>
                     <?php endif; ?>
                 </div>

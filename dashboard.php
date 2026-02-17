@@ -45,20 +45,7 @@ $occupancy_rate = $total_rooms > 0 ? round(($occupied_rooms / $total_rooms) * 10
 $sql_pending_maintenance = "SELECT COUNT(*) FROM maintenance_requests WHERE status = 'pending'";
 $pending_maintenance = $conn->query($sql_pending_maintenance)->fetchColumn();
 
-// ========== REVENUE TRENDS (Last 6 months) ==========
-$revenue_data = [];
-$revenue_labels = [];
-
-for ($i = 5; $i >= 0; $i--) {
-    $month = date('Y-m', strtotime("-$i months"));
-    $sql = "SELECT COALESCE(SUM(amount_paid), 0) FROM bills WHERE billing_month = :month";
-    $stmt = $conn->prepare($sql);
-    $stmt->execute(['month' => $month]);
-    $amount = $stmt->fetchColumn();
-    
-    $revenue_data[] = (int)$amount;
-    $revenue_labels[] = date('M Y', strtotime($month));
-}
+// Revenue chart removed per request
 
 // ========== ROOM OCCUPANCY BY TYPE ==========
 $room_types_data = [];
@@ -166,15 +153,7 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
 
             <!-- CHARTS -->
             <div class="row mb-4">
-                <div class="col-lg-6 mb-3">
-                    <div class="card">
-                        <div class="card-header">Revenue (Last 6 months)</div>
-                        <div class="card-body">
-                            <div class="chart-container"><canvas id="revenueChart"></canvas></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-lg-3 mb-3">
+                <div class="col-lg-4 mb-3">
                     <div class="card">
                         <div class="card-header">Occupancy</div>
                         <div class="card-body">
@@ -182,7 +161,7 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
                         </div>
                     </div>
                 </div>
-                <div class="col-lg-3 mb-3">
+                <div class="col-lg-4 mb-3">
                     <div class="card">
                         <div class="card-header">Rooms by Type</div>
                         <div class="card-body">
@@ -265,49 +244,6 @@ $occupancy_chart_data[] = (int)$vacant_rooms;
 
 <script>
 // ========== CHART CONFIGURATION ==========
-
-// Revenue Trend Chart
-const revenueCtx = document.getElementById('revenueChart').getContext('2d');
-const revenueChart = new Chart(revenueCtx, {
-    type: 'line',
-    data: {
-        labels: <?php echo json_encode($revenue_labels); ?>,
-        datasets: [{
-            label: 'Revenue (₱)',
-            data: <?php echo json_encode($revenue_data); ?>,
-            borderColor: '#0d6efd',
-            backgroundColor: 'rgba(13, 110, 253, 0.1)',
-            borderWidth: 2,
-            fill: true,
-            tension: 0.4,
-            pointBackgroundColor: '#0d6efd',
-            pointBorderColor: '#fff',
-            pointBorderWidth: 2,
-            pointRadius: 5,
-            pointHoverRadius: 7
-        }]
-    },
-    options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-            legend: {
-                display: true,
-                position: 'top'
-            }
-        },
-        scales: {
-            y: {
-                beginAtZero: true,
-                ticks: {
-                    callback: function(value) {
-                        return '₱' + value.toLocaleString();
-                    }
-                }
-            }
-        }
-    }
-});
 
 // Room Occupancy Chart
 const occupancyCtx = document.getElementById('occupancyChart').getContext('2d');
@@ -403,11 +339,6 @@ function refreshDashboard() {
             document.getElementById('pendingMaintenanceValue').textContent = json.pending_maintenance;
             document.getElementById('updateTime').textContent = new Date().toLocaleString();
             // Update charts if data available
-            if (json.revenue_labels && json.revenue_data && typeof revenueChart !== 'undefined') {
-                revenueChart.data.labels = json.revenue_labels;
-                revenueChart.data.datasets[0].data = json.revenue_data;
-                revenueChart.update();
-            }
             if (json.occupancy_labels && json.occupancy_data && typeof occupancyChart !== 'undefined') {
                 occupancyChart.data.labels = json.occupancy_labels;
                 occupancyChart.data.datasets[0].data = json.occupancy_data;

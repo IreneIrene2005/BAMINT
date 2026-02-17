@@ -10,43 +10,65 @@ require_once "db/database.php";
 
 $tenant_id = $_SESSION["tenant_id"];
 
+// Check if tenant has checked in
+$is_checked_in = false;
 try {
-    // Get payment history (excluding $0 transactions used for tracking)
-    $stmt = $conn->prepare("
-        SELECT pt.*, b.billing_month, b.amount_due, b.room_id as bill_room_id
-        FROM payment_transactions pt
-        JOIN bills b ON pt.bill_id = b.id
-        WHERE pt.tenant_id = :tenant_id AND pt.payment_amount > 0
-        ORDER BY pt.payment_date DESC
-    ");
-    $stmt->execute(['tenant_id' => $tenant_id]);
-    $payments = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    // Get payment summary (excluding $0 transactions)
-    $result = $conn->query("
-        SELECT 
-            COUNT(*) as total_payments,
-            SUM(payment_amount) as total_amount
-        FROM payment_transactions
-        WHERE tenant_id = $tenant_id AND payment_amount > 0
-    ");
-    $summary = $result->fetch(PDO::FETCH_ASSOC);
-
-    // Get payment methods breakdown (excluding $0 transactions)
-    $result = $conn->query("
-        SELECT 
-            payment_method,
-            COUNT(*) as count,
-            SUM(payment_amount) as total
-        FROM payment_transactions
-        WHERE tenant_id = $tenant_id AND payment_amount > 0
-        GROUP BY payment_method
-        ORDER BY total DESC
-    ");
-    $methods = $result->fetchAll(PDO::FETCH_ASSOC);
-
+    $checkin_stmt = $conn->prepare("SELECT checkin_time FROM tenants WHERE id = :id");
+    $checkin_stmt->execute(['id' => $tenant_id]);
+    $tenant = $checkin_stmt->fetch(PDO::FETCH_ASSOC);
+    if ($tenant && $tenant['checkin_time'] && $tenant['checkin_time'] !== '0000-00-00 00:00:00') {
+        $is_checked_in = true;
+    }
 } catch (Exception $e) {
-    $error = "Error loading payments: " . $e->getMessage();
+    // If unable to determine, assume not checked in
+    $is_checked_in = false;
+}
+
+// Only fetch payment data if not checked in
+$payments = [];
+$summary = [];
+$methods = [];
+$error = '';
+
+if (!$is_checked_in) {
+    try {
+        // Get payment history (excluding $0 transactions used for tracking)
+        $stmt = $conn->prepare("
+            SELECT pt.*, b.billing_month, b.amount_due, b.room_id as bill_room_id
+            FROM payment_transactions pt
+            JOIN bills b ON pt.bill_id = b.id
+            WHERE pt.tenant_id = :tenant_id AND pt.payment_amount > 0
+            ORDER BY pt.payment_date DESC
+        ");
+        $stmt->execute(['tenant_id' => $tenant_id]);
+        $payments = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Get payment summary (excluding $0 transactions)
+        $result = $conn->query("
+            SELECT 
+                COUNT(*) as total_payments,
+                SUM(payment_amount) as total_amount
+            FROM payment_transactions
+            WHERE tenant_id = $tenant_id AND payment_amount > 0
+        ");
+        $summary = $result->fetch(PDO::FETCH_ASSOC);
+
+        // Get payment methods breakdown (excluding $0 transactions)
+        $result = $conn->query("
+            SELECT 
+                payment_method,
+                COUNT(*) as count,
+                SUM(payment_amount) as total
+            FROM payment_transactions
+            WHERE tenant_id = $tenant_id AND payment_amount > 0
+            GROUP BY payment_method
+            ORDER BY total DESC
+        ");
+        $methods = $result->fetchAll(PDO::FETCH_ASSOC);
+
+    } catch (Exception $e) {
+        $error = "Error loading payments: " . $e->getMessage();
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -135,6 +157,40 @@ try {
 
             <!-- Main Content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
+                
+                <?php if ($is_checked_in): ?>
+                    <!-- Checked-In Message -->
+                    <div class="alert alert-info alert-dismissible fade show" role="alert">
+                        <div class="text-center py-5">
+                            <div style="font-size: 3rem; color: #0d6efd; margin-bottom: 1rem;">
+                                <i class="bi bi-check-circle-fill"></i>
+                            </div>
+                            <h3 class="mb-3">You Are Currently Checked In</h3>
+                            <p class="lead text-muted mb-4">
+                                You are currently staying with us. Any remaining balance will be settled through the front desk at your check-out time.
+                            </p>
+                            <HR>
+                            <p class="text-muted mt-4">
+                                <i class="bi bi-info-circle"></i> If you have any questions about your bill, please contact our front desk.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header bg-secondary bg-opacity-10">
+                            <h6 class="mb-0"><i class="bi bi-clock"></i> Check-Out Payment</h6>
+                        </div>
+                        <div class="card-body">
+                            <p class="text-muted mb-3">
+                                Your remaining balance will be calculated and due at check-out. Please ensure all items are accounted for and settle the balance with the front desk staff.
+                            </p>
+                            <div class="alert alert-warning equal-height-alert" role="alert">
+                                <i class="bi bi-exclamation-triangle"></i> <strong>Important:</strong> Make sure to complete check-out procedures with the front desk before leaving the premises.
+                            </div>
+                        </div>
+                    </div>
+                <?php else: ?>
+                
                 <!-- Header -->
                 <div class="header-banner">
                     <div class="d-flex justify-content-between align-items-start">
@@ -319,6 +375,8 @@ try {
                         <?php endif; ?>
                     </div>
                 </div>
+                
+                <?php endif; ?>
             </main>
         </div>
     </div>

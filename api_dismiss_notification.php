@@ -43,6 +43,29 @@ switch ($action) {
             echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
         }
         break;
+    case 'dismiss_notification':
+        // Mark a specific notification as read for this tenant
+        $notif_id = intval($_REQUEST['id'] ?? 0);
+        if (!$notif_id) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Missing notification id']);
+            exit;
+        }
+
+        try {
+            $stmt = $conn->prepare("UPDATE notifications SET is_read = 1, read_at = NOW() WHERE id = :id AND recipient_type = 'tenant' AND recipient_id = :tenant_id");
+            $stmt->execute(['id' => $notif_id, 'tenant_id' => $tenant_id]);
+            if ($stmt->rowCount() > 0) {
+                echo json_encode(['success' => true]);
+            } else {
+                http_response_code(404);
+                echo json_encode(['error' => 'Notification not found or not owned by tenant']);
+            }
+        } catch (PDOException $e) {
+            http_response_code(500);
+            echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
+        }
+        break;
     
     default:
         http_response_code(400);

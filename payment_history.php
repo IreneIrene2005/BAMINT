@@ -124,14 +124,7 @@ $summary = $conn->query($sql_summary)->fetch(PDO::FETCH_ASSOC);
                         </div>
                     </div>
                 </div>
-                <div class="col-md-4">
-                    <div class="card text-white bg-info">
-                        <div class="card-body">
-                            <h5 class="card-title">Average Payment</h5>
-                            <p class="card-text display-6">₱<?php echo number_format($summary['avg_amount'] ?? 0, 2); ?></p>
-                        </div>
-                    </div>
-                </div>
+                <!-- Average Payment card removed per request -->
             </div>
 
             <!-- Search and Filter Section -->

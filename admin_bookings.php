@@ -222,12 +222,26 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                         VALUES (:bill_id, :tenant_id, :payment_amount, 'refunded', CURDATE(), :notes)
                     ");
                     $refund_notes_full = 'Cancellation Refund - ' . ($refund_notes ?: 'Customer requested cancellation');
-                    $refund_stmt->execute([
-                        'bill_id' => $bill_id,
-                        'tenant_id' => $tenant_id,
-                        'payment_amount' => -$refund_amount, // negative to represent refund
-                        'notes' => $refund_notes_full
-                    ]);
+                    try {
+                        $refund_stmt->execute([
+                            'bill_id' => $bill_id,
+                            'tenant_id' => $tenant_id,
+                            'payment_amount' => -$refund_amount, // negative to represent refund
+                            'notes' => $refund_notes_full
+                        ]);
+                    } catch (PDOException $e) {
+                        // If duplicate-key occurs on unique (bill_id, is_checkout_payment), update existing row instead
+                        if ($e->getCode() === '23000') {
+                            $update_exist = $conn->prepare("UPDATE payment_transactions SET payment_amount = payment_amount + :payment_amount, payment_status = 'refunded', notes = CONCAT(COALESCE(notes,''), ' | ', :notes) WHERE bill_id = :bill_id AND is_checkout_payment = 0 LIMIT 1");
+                            $update_exist->execute([
+                                'payment_amount' => -$refund_amount,
+                                'notes' => $refund_notes_full,
+                                'bill_id' => $bill_id
+                            ]);
+                        } else {
+                            throw $e;
+                        }
+                    }
                 }
 
                 // Now process the actual cancellation
@@ -246,6 +260,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                 // Update room_request status to cancelled
                 $room_request_update = $conn->prepare("UPDATE room_requests SET status = 'cancelled' WHERE tenant_id = :tenant_id AND room_id = :room_id AND status NOT IN ('archived', 'deleted', 'rejected', 'cancelled')");
                 $room_request_update->execute(['tenant_id' => $tenant_id, 'room_id' => $room_id]);
+
+                // Disable tenant account immediately after approved cancellation
+                $tenant_disable = $conn->prepare("UPDATE tenants SET status = 'inactive', updated_at = NOW() WHERE id = :tenant_id");
+                $tenant_disable->execute(['tenant_id' => $tenant_id]);
 
                 $conn->commit();
 
@@ -341,12 +359,25 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                     VALUES (:bill_id, :tenant_id, :payment_amount, 'refunded', CURDATE(), :notes)
                 ");
                 $refund_notes_full = 'Cancellation Refund - ' . ($refund_notes ?: 'Customer requested cancellation');
-                $refund_stmt->execute([
-                    'bill_id' => $bill_id,
-                    'tenant_id' => $tenant_id,
-                    'payment_amount' => -$refund_amount, // negative to represent refund
-                    'notes' => $refund_notes_full
-                ]);
+                try {
+                    $refund_stmt->execute([
+                        'bill_id' => $bill_id,
+                        'tenant_id' => $tenant_id,
+                        'payment_amount' => -$refund_amount, // negative to represent refund
+                        'notes' => $refund_notes_full
+                    ]);
+                } catch (PDOException $e) {
+                    if ($e->getCode() === '23000') {
+                        $update_exist = $conn->prepare("UPDATE payment_transactions SET payment_amount = payment_amount + :payment_amount, payment_status = 'refunded', notes = CONCAT(COALESCE(notes,''), ' | ', :notes) WHERE bill_id = :bill_id AND is_checkout_payment = 0 LIMIT 1");
+                        $update_exist->execute([
+                            'payment_amount' => -$refund_amount,
+                            'notes' => $refund_notes_full,
+                            'bill_id' => $bill_id
+                        ]);
+                    } else {
+                        throw $e;
+                    }
+                }
             }
 
             $conn->commit();
@@ -654,21 +685,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
 
                 <!-- Statistics -->
                 <?php if ($tab === 'active'): ?>
-                <div class="row mb-4">
-                    <div class="col-md-3">
-                        <div class="metric-card">
-                            <div class="metric-value" style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"><?php echo $stats['total_cancellations'] ?? 0; ?></div>
-                            <div class="metric-label">Total Cancellations</div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="metric-card">
-                            <div class="metric-value" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">₱<?php echo number_format($stats['total_cancelled_payment'] ?? 0, 0); ?></div>
-                            <div class="metric-label">Total Cancelled Payment</div>
-                        </div>
-                    </div>
-                    <!-- 'Cancelled Today' and 'Customers Cancelled' metrics removed per request -->
-                </div>
+                <!-- Cancellation summary metrics removed per request -->
                 <?php elseif ($tab === 'room_cancellations'): ?>
                 <div class="row mb-4">
                     <div class="col-md-6">

@@ -606,15 +606,8 @@ try {
                                         <label for="payment_option" class="form-label">Payment Option <span class="text-danger">*</span></label>
                                         <select class="form-control" id="payment_option" name="payment_option" required onchange="updatePaymentOption()">
                                             <?php
-                                            // Set this variable to true when the customer is checking out
-                                            $is_checkout = false; // <-- Set to true for checkout scenario
-                                            if ($is_checkout) {
-                                                echo '<option value="full" selected>Full Payment</option>';
-                                            } else {
-                                                echo '<option value="">-- Select option --</option>';
-                                                echo '<option value="downpayment">Downpayment (e.g. 50%)</option>';
-                                                echo '<option value="full">Full Payment</option>';
-                                            }
+                                            // Downpayment only - no full payment option
+                                            echo '<option value="downpayment" selected>Downpayment (e.g. 50%)</option>';
                                             ?>
                                         </select>
                                     </div>
@@ -623,7 +616,7 @@ try {
                                         <div class="input-group">
                                             <span class="input-group-text">₱</span>
                                             <input type="number" class="form-control" id="payment_amount" name="payment_amount" 
-                                                   placeholder="0.00" step="0.01" min="0" required>
+                                                   placeholder="0.00" step="0.01" min="0" required readonly>
                                         </div>
                                         <small class="text-muted" id="amount_hint"></small>
                                     </div>
@@ -821,9 +814,19 @@ try {
             document.getElementById('submit_btn').disabled = !canSubmit;
         }
 
+        // Initialize payment form on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Auto-select online payment method and trigger update
+            const onlineCard = document.querySelector('[data-method="online"]');
+            if (onlineCard) {
+                selectMethod(onlineCard);
+            }
+            // Calculate downpayment amount
+            updatePaymentOption();
+        });
+
         // Add event listeners
         document.getElementById('proof_of_payment').addEventListener('change', enableSubmitButton);
-        document.getElementById('payment_amount').addEventListener('input', enableSubmitButton);
         document.getElementById('payment_option').addEventListener('change', updatePaymentOption);
         document.getElementById('bill_id').addEventListener('change', updateBillAmount);
 

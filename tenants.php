@@ -280,11 +280,11 @@ $available_rooms = $conn->query($sql_available_rooms);
                             <td><?php echo htmlspecialchars($row['address'] ?? '-'); ?></td>
                             <td>
                                 <?php
-                                    // Show room for pending_payment (paid), approved, or occupied bookings
+                                    // Show room for pending_payment (paid), approved, occupied, or completed bookings
                                     $room_req_stmt = $conn->prepare("SELECT status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                                     $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
                                     $room_req = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                    if ($room_req && in_array($room_req['status'], ['pending_payment', 'approved', 'occupied'])) {
+                                    if ($room_req && in_array($room_req['status'], ['pending_payment', 'approved', 'occupied', 'completed'])) {
                                         echo htmlspecialchars($row['room_number']);
                                     } else {
                                         echo '-';
@@ -293,11 +293,11 @@ $available_rooms = $conn->query($sql_available_rooms);
                             </td>
                             <td>
                                 <?php
-                                // Show stay duration for active/paid bookings
+                                // Show stay duration for active/paid/completed bookings
                                 $room_req_stmt = $conn->prepare("SELECT checkin_date, checkout_date, checkin_time, checkout_time, status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
                                 $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
                                 $dates = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                if ($dates && in_array($dates['status'], ['pending_payment', 'approved', 'occupied'])) {
+                                if ($dates && in_array($dates['status'], ['pending_payment', 'approved', 'occupied', 'completed'])) {
                                     if (!empty($dates['checkin_date']) && !empty($dates['checkout_date'])) {
                                         $ci_fmt = date('M d, Y', strtotime($dates['checkin_date']));
                                         $co_fmt = date('M d, Y', strtotime($dates['checkout_date']));

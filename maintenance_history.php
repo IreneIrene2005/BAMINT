@@ -151,14 +151,6 @@ $stats = $stats_stmt->fetch(PDO::FETCH_ASSOC);
                         </div>
                     </div>
                 </div>
-                <div class="col-md-2">
-                    <div class="card border-danger">
-                        <div class="card-body">
-                            <h6 class="card-title text-danger">Cancelled</h6>
-                            <p class="card-text display-6 text-danger"><?php echo htmlspecialchars($stats['cancelled_count']); ?></p>
-                        </div>
-                    </div>
-                </div>
                 
                 <div class="col-md-2">
                     <div class="card">
@@ -168,14 +160,7 @@ $stats = $stats_stmt->fetch(PDO::FETCH_ASSOC);
                         </div>
                     </div>
                 </div>
-                <div class="col-md-2">
-                    <div class="card">
-                        <div class="card-body">
-                            <h6 class="card-title">Avg Cost</h6>
-                            <p class="card-text display-6">₱<?php echo number_format($stats['avg_cost'], 0); ?></p>
-                        </div>
-                    </div>
-                </div>
+                <!-- Cancelled and Avg Cost cards removed per request -->
                 <div class="col-md-2">
                     <div class="card">
                         <div class="card-body">
