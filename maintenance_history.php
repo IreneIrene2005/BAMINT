@@ -6,7 +6,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 // Search and filter variables
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
@@ -140,36 +143,6 @@ $stats = $stats_stmt->fetch(PDO::FETCH_ASSOC);
                 </div>
                 <?php unset($_SESSION['message']); ?>
             <?php endif; ?>
-
-            <!-- Statistics Cards -->
-            <div class="row mb-4">
-                <div class="col-md-2">
-                    <div class="card">
-                        <div class="card-body">
-                            <h6 class="card-title">Total Completed</h6>
-                            <p class="card-text display-6"><?php echo htmlspecialchars($stats['completed_count']); ?></p>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="col-md-2">
-                    <div class="card">
-                        <div class="card-body">
-                            <h6 class="card-title">Total Cost</h6>
-                            <p class="card-text display-6">₱<?php echo number_format($stats['total_cost'], 0); ?></p>
-                        </div>
-                    </div>
-                </div>
-                <!-- Cancelled and Avg Cost cards removed per request -->
-                <div class="col-md-2">
-                    <div class="card">
-                        <div class="card-body">
-                            <h6 class="card-title">Total Records</h6>
-                            <p class="card-text display-6"><?php echo htmlspecialchars($stats['total_completed']); ?></p>
-                        </div>
-                    </div>
-                </div>
-            </div>
 
             <!-- Search and Filter Section -->
             <div class="row mb-3">

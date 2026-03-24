@@ -1,3 +1,55 @@
+<?php
+if (!isset($pdo)) {
+    require_once __DIR__ . "/../db_pdo.php";
+}
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
+
+$pending_bookings_count = 0;
+try {
+    $query = "
+        SELECT COUNT(DISTINCT rr.id) as count
+        FROM room_requests rr
+        WHERE rr.status IN ('pending_payment', 'approved')
+        AND EXISTS (
+            SELECT 1 FROM bills b
+            WHERE b.tenant_id = rr.tenant_id
+              AND b.room_id = rr.room_id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM payment_transactions pt
+            JOIN bills b ON pt.bill_id = b.id
+            WHERE pt.payment_status IN ('verified', 'approved')
+              AND b.tenant_id = rr.tenant_id
+              AND b.room_id = rr.room_id
+        )
+    ";
+    $stmt = $conn->prepare($query);
+    $stmt->execute();
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    $pending_bookings_count = intval($result['count'] ?? 0);
+} catch (Exception $e) {
+    error_log("Sidebar booking count error: " . $e->getMessage());
+    $pending_bookings_count = 0;
+}
+
+$pending_maintenance_count = 0;
+try {
+    $query = "
+        SELECT COUNT(*) as count
+        FROM maintenance_requests
+        WHERE LOWER(TRIM(REPLACE(status, ' ', '_'))) = 'pending'
+    ";
+    $stmt = $conn->prepare($query);
+    $stmt->execute();
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    $pending_maintenance_count = intval($result['count'] ?? 0);
+} catch (Exception $e) {
+    error_log("Sidebar maintenance count error: " . $e->getMessage());
+    $pending_maintenance_count = 0;
+}
+?>
 <nav id="sidebarMenu" class="col-md-3 col-lg-2 d-md-block bg-light sidebar">
     <div class="position-sticky pt-3">
         <ul class="nav flex-column">
@@ -17,6 +69,12 @@
                 <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'tenants.php') ? 'active' : ''; ?>" href="tenants.php">
                     <i class="bi bi-people"></i>
                     Customers
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_bookings_verification.php') ? 'active' : ''; ?>" href="admin_bookings_verification.php">
+                    <i class="bi bi-calendar-check"></i>
+                    Bookings <?php if ($pending_bookings_count > 0) echo '<span class="badge bg-danger ms-1">' . intval($pending_bookings_count) . '</span>'; ?>
                 </a>
             </li>
             <li class="nav-item">
@@ -49,6 +107,7 @@
                 <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'admin_maintenance_queue.php') ? 'active' : ''; ?>" href="admin_maintenance_queue.php">
                     <i class="bi bi-tools"></i>
                     <?php echo (isset($_SESSION['role']) && $_SESSION['role'] === 'front_desk') ? 'Amenities Queue' : 'Amenities Request Queue'; ?>
+                    <?php if ($pending_maintenance_count > 0) echo '<span class="badge bg-danger ms-1">' . intval($pending_maintenance_count) . '</span>'; ?>
                 </a>
             </li>
             <li class="nav-item">

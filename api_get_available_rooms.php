@@ -15,7 +15,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 try {
     // Fetch all rooms with current availability status

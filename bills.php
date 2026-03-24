@@ -6,7 +6,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 // Admin/Front Desk role check
 if (!in_array($_SESSION['role'], ['admin', 'front_desk'])) {
@@ -331,14 +334,21 @@ try {
     $walk_in_customers = [];
 }
 
-// Fetch active tenants for checkout
+// Fetch active tenants for checkout (with all assigned rooms from their active bills)
 $checkout_tenants = [];
 try {
     $stmt = $conn->prepare("
-        SELECT t.id, t.name, t.email, t.phone, r.room_number, r.rate, t.start_date
+        SELECT t.id,
+               t.name,
+               t.email,
+               t.phone,
+               GROUP_CONCAT(DISTINCT r.room_number ORDER BY r.room_number SEPARATOR ', ') AS room_numbers,
+               t.start_date
         FROM tenants t
-        LEFT JOIN rooms r ON t.room_id = r.id
-        WHERE t.status = 'active' AND t.room_id IS NOT NULL
+        LEFT JOIN bills b ON b.tenant_id = t.id AND b.status IN ('pending', 'partial', 'unpaid', 'overdue', 'paid')
+        LEFT JOIN rooms r ON b.room_id = r.id
+        WHERE t.status = 'active'
+        GROUP BY t.id
         ORDER BY t.name ASC
     ");
     $stmt->execute();
@@ -383,12 +393,23 @@ try {
             <div class="row mb-4">
                 <?php
                 // Cache table rows and sum Grand Total Due for summary card
-                $table_rows = [];
+                // Group by tenant_id to handle multiple room bookings
+                $table_rows_by_tenant = [];
+                $room_numbers_by_tenant = [];
                 $grand_total_due_sum = 0.0;
                 $grand_total_paid_sum = 0.0;
 
                 $bills->execute();
                 while($row = $bills->fetch(PDO::FETCH_ASSOC)) {
+                    // Track room numbers for each tenant, includes those bills that may be skipped for advance payment review.
+                    $tenant_id = $row['tenant_id'];
+                    if (!isset($room_numbers_by_tenant[$tenant_id])) {
+                        $room_numbers_by_tenant[$tenant_id] = [];
+                    }
+                    if (!empty($row['room_number'])) {
+                        $room_numbers_by_tenant[$tenant_id][] = $row['room_number'];
+                    }
+
                     // If this is an advance payment bill with no verified/admin-approved payments yet,
                     // do not include it in the main table so the customer is not recorded before admin approval.
                     $is_advance = false;
@@ -419,7 +440,7 @@ try {
                     $pm_checkin_stmt->execute(['bill_id' => $row['id']]);
                     $payment_method_checkin = $pm_checkin_stmt->fetchColumn();
                     
-                    $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
+                    $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND cost > 0 AND (status = 'completed' OR description LIKE 'Amenity order%')");
                     $charges_stmt->execute(['tenant_id' => $row['tenant_id']]);
                     $total_charges = $charges_stmt->fetchColumn();
                     $total_charges = $total_charges ? floatval($total_charges) : 0.0;
@@ -470,48 +491,70 @@ try {
                     // Grand Total Due calculation:
                     // If bill is cancelled, Grand Total Due = 0 (cancellation recorded)
                     // If tenant is inactive (checked out), Grand Total Due = 0 (already paid)
-                    // If tenant is active:
-                    //   - If customer paid full room amount, Grand Total Due = only additional charges
-                    //   - If customer paid partial, Grand Total Due = remaining room balance + additional charges
-                    if ($bill_status_from_db === 'cancelled') {
-                        // Bill has been cancelled - Grand Total Due = 0
-                        $grand_total_due = 0;
-                    } elseif ($tenant_status === 'inactive') {
-                        // Customer has checked out - they paid, so Grand Total Due = 0
+                    // Otherwise, for active bills, match the 'collected' model:
+                    // - bill total collected so far = amount_paid
+                    // - add any additional charges to show full amount (as in row summary)
+                    if ($bill_status_from_db === 'cancelled' || $tenant_status === 'inactive') {
                         $grand_total_due = 0;
                     } else {
-                        // Customer is still active - calculate remaining balance
-                        $remaining_balance = max(0, $bill_amount - $amount_paid);
-                        // If remaining balance is 0 and there are additional charges, show those as GTD
-                        // Otherwise, show remaining balance only (TAC shown separately)
-                        if ($remaining_balance == 0 && $total_charges > 0) {
-                            $grand_total_due = $total_charges;
-                        } else {
-                            $grand_total_due = $remaining_balance;
+                        $grand_total_due = max(0, $amount_paid);
+
+                        if ($total_charges > 0) {
+                            $grand_total_due += floatval($total_charges);
                         }
                     }
                     
-                        // Always add grand_total_due for the active listing
-                        $grand_total_due_sum += $grand_total_due;
-                        // We'll compute total paid globally (independent of active/archive view)
-                        $grand_total_paid_sum += $amount_paid; // temporary accumulation; will be replaced by global sum below
-                    $table_rows[] = [
-                        'checkin' => $checkin,
-                        'checkout' => $checkout,
-                        'name' => $row['name'],
-                        'room_number' => $row['room_number'],
-                        'checkin_date' => $row['checkin_date'],
-                        'amount_due' => $bill_amount,
-                        'grand_total_due' => $grand_total_due,
-                        'amount_paid' => $amount_paid,
-                        'total_charges' => $total_charges,
-                        'payment_method_checkin' => $payment_method_checkin,
-                        'payment_method_checkout' => $payment_method_checkout,
-                        'status' => $row['status'],
-                        'tenant_status' => $tenant_status,
-                        'bill_id' => $row['id'],
-                        'tenant_id' => $row['tenant_id']
-                    ];
+                    $tenant_id = $row['tenant_id'];
+                    
+                    // Group bills by tenant_id
+                    if (!isset($table_rows_by_tenant[$tenant_id])) {
+                        $table_rows_by_tenant[$tenant_id] = [
+                            'tenant_id' => $tenant_id,
+                            'name' => $row['name'],
+                            'room_numbers' => [],
+                            'checkin' => $checkin,
+                            'checkout' => $checkout,
+                            'checkin_date' => $row['checkin_date'],
+                            'amount_due' => 0,
+                            'grand_total_due' => 0,
+                            'amount_paid' => 0,
+                            'total_charges' => $total_charges,
+                            'payment_method_checkin' => $payment_method_checkin,
+                            'payment_method_checkout' => $payment_method_checkout,
+                            'status' => $row['status'],
+                            'tenant_status' => $tenant_status,
+                            'bill_ids' => []
+                        ];
+                    }
+                    
+                    // Aggregate data for this tenant
+                    $table_rows_by_tenant[$tenant_id]['room_numbers'][] = $row['room_number'];
+                    $table_rows_by_tenant[$tenant_id]['amount_due'] += $bill_amount;
+                    $table_rows_by_tenant[$tenant_id]['grand_total_due'] += $grand_total_due;
+                    $table_rows_by_tenant[$tenant_id]['amount_paid'] += $amount_paid;
+                    $table_rows_by_tenant[$tenant_id]['bill_ids'][] = $row['id'];
+                    
+                    // Track totals for summary card
+                    $grand_total_due_sum += $grand_total_due;
+                    $grand_total_paid_sum += $amount_paid;
+                }
+                
+                // Merge in all room numbers per tenant (including bills skipped in the loop due to pending advance payments)
+                foreach ($table_rows_by_tenant as $tid => &$tenant_row) {
+                    if (isset($room_numbers_by_tenant[$tid])) {
+                        $tenant_row['room_numbers'] = array_unique(array_merge($tenant_row['room_numbers'], $room_numbers_by_tenant[$tid]));
+                    }
+                    // Keep ordered room numbers and avoid empty values
+                    $tenant_row['room_numbers'] = array_filter($tenant_row['room_numbers'], fn($v) => !empty($v));
+                }
+                unset($tenant_row);
+
+                // Convert to indexed array and format room numbers
+                $table_rows = [];
+                foreach ($table_rows_by_tenant as $row) {
+                    $room_list = implode(', ', $row['room_numbers']);
+                    $row['room_number'] = $room_list;
+                    $table_rows[] = $row;
                 }
                 ?>
                 <!-- Total Due / Total Paid metric cards removed per request -->
@@ -808,7 +851,15 @@ try {
                                         </div>
                                         <div class="col-md-6">
                                             <h6 class="text-muted">Payment Details</h6>
-                                            <p><strong>Amount:</strong> ₱<?php echo number_format($payment['payment_amount'], 2); ?><br>
+                                            <?php
+                                            // Get bill count for this tenant to determine if multi-room
+                                            $tenant_id = isset($payment['tenant_id']) ? intval($payment['tenant_id']) : 0;
+                                            $bill_count_check = $conn->prepare("SELECT COUNT(*) as bill_count FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending', 'active')");
+                                            $bill_count_check->execute(['tenant_id' => $tenant_id]);
+                                            $bill_count = intval($bill_count_check->fetchColumn());
+                                            ?>
+                                            <p><strong>Amount:</strong> ₱<?php echo number_format($payment['payment_amount'], 2); ?><?php if ($bill_count > 1): ?><br>
+                                            <small class="text-muted">Part of multi-room payment</small><?php endif; ?><br>
                                             <strong>Method:</strong> <?php
                                             $pm = $payment['payment_method'] ?? '';
                                             $pm_norm = strtolower(trim((string)$pm));
@@ -828,11 +879,38 @@ try {
                                             <?php
                                             // Compute live billing info to ensure accuracy
                                             $bill_id = isset($payment['bill_id']) ? intval($payment['bill_id']) : 0;
-                                            $bill_amount_due = isset($payment['amount_due']) ? floatval($payment['amount_due']) : 0.0;
-                                            // Recompute already paid including submitted (pending) payments so admin sees real-time totals
-                                            $paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status != 'rejected'");
-                                            $paid_stmt->execute(['bill_id' => $bill_id]);
-                                            $already_paid = floatval($paid_stmt->fetchColumn());
+                                            $tenant_id = isset($payment['tenant_id']) ? intval($payment['tenant_id']) : 0;
+
+                                            // For multi-room bookings, aggregate amounts across all bills for this tenant
+                                            // Check if tenant has multiple active bills (multi-room booking)
+                                            $multi_room_check = $conn->prepare("SELECT COUNT(*) as bill_count FROM bills WHERE tenant_id = :tenant_id AND status IN ('pending', 'active')");
+                                            $multi_room_check->execute(['tenant_id' => $tenant_id]);
+                                            $bill_count = intval($multi_room_check->fetchColumn());
+
+                                            if ($bill_count > 1) {
+                                                // Multi-room booking: aggregate all bills for this tenant
+                                                $agg_stmt = $conn->prepare("
+                                                    SELECT
+                                                        COALESCE(SUM(b.amount_due), 0) as total_amount_due,
+                                                        COALESCE(SUM(pt.payment_amount), 0) as total_already_paid
+                                                    FROM bills b
+                                                    LEFT JOIN payment_transactions pt ON b.id = pt.bill_id AND pt.payment_status != 'rejected'
+                                                    WHERE b.tenant_id = :tenant_id AND b.status IN ('pending', 'active')
+                                                ");
+                                                $agg_stmt->execute(['tenant_id' => $tenant_id]);
+                                                $agg_data = $agg_stmt->fetch(PDO::FETCH_ASSOC);
+
+                                                $bill_amount_due = floatval($agg_data['total_amount_due']);
+                                                $already_paid = floatval($agg_data['total_already_paid']);
+                                            } else {
+                                                // Single room booking: use individual bill amounts
+                                                $bill_amount_due = isset($payment['amount_due']) ? floatval($payment['amount_due']) : 0.0;
+                                                // Recompute already paid including submitted (pending) payments so admin sees real-time totals
+                                                $paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status != 'rejected'");
+                                                $paid_stmt->execute(['bill_id' => $bill_id]);
+                                                $already_paid = floatval($paid_stmt->fetchColumn());
+                                            }
+
                                             $balance_now = $bill_amount_due - $already_paid;
 
                                             // Determine billing month display: prefer checkin_date if valid, else derive from room request or bill created_at
@@ -865,7 +943,8 @@ try {
                                             }
                                             ?>
                                             <p>
-                                                <strong>Billing Month:</strong> <?php echo htmlspecialchars($billing_display); ?><br>
+                                                <strong>Billing Month:</strong> <?php echo htmlspecialchars($billing_display); ?><?php if ($bill_count > 1): ?><br>
+                                                <small class="text-muted">Multi-room booking (<?php echo $bill_count; ?> rooms)</small><?php endif; ?><br>
                                                 <strong>Amount Due:</strong> ₱<?php echo number_format($bill_amount_due, 2); ?><br>
                                                 <strong>Already Paid:</strong> ₱<?php echo number_format($already_paid, 2); ?><br>
                                                 <strong>Balance:</strong> ₱<?php echo number_format($balance_now, 2); ?>
@@ -999,7 +1078,7 @@ try {
                                     <span class="text-muted">N/A</span>
                                 <?php endif; ?>
                             </td>
-                            <td><?php echo htmlspecialchars($row['name']); ?></td>
+                            <td><strong><?php echo htmlspecialchars($row['name']); ?></strong></td>
                             <td><?php echo htmlspecialchars($row['room_number']); ?></td>
                             <td><?php echo $row['checkin_date'] && $row['checkin_date'] !== '0000-00-00' && $row['checkin_date'] !== null ? date('M d, Y', strtotime($row['checkin_date'])) : '<span class="text-muted">N/A</span>'; ?></td>
                             <td><?php echo htmlspecialchars(number_format($row['grand_total_due'], 2)); ?></td>
@@ -1055,10 +1134,9 @@ try {
                                 </span>
                             </td>
                             <td>
-                                <a href="bill_actions.php?action=edit&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-primary" title="Edit"><i class="bi bi-pencil-square"></i></a>
-                                <a href="bill_actions.php?action=view&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-info" title="View Details"><i class="bi bi-eye"></i></a>
-                                <a href="bill_actions.php?action=archive&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-warning" title="Archive" onclick="return confirm('Archive this bill?');"><i class="bi bi-archive"></i></a>
-                                <a href="bill_actions.php?action=delete&id=<?php echo $row['bill_id']; ?>" class="btn btn-sm btn-outline-danger" title="Delete" onclick="return confirm('Are you sure?');"><i class="bi bi-trash"></i></a>
+                                <a href="bill_actions.php?action=edit&id=<?php echo $row['bill_ids'][0]; ?>" class="btn btn-sm btn-outline-primary" title="Edit"><i class="bi bi-pencil-square"></i></a>
+                                <a href="bill_actions.php?action=view&id=<?php echo $row['bill_ids'][0]; ?>" class="btn btn-sm btn-outline-info" title="View Details"><i class="bi bi-eye"></i></a>
+                                <a href="bill_actions.php?action=archive&id=<?php echo $row['bill_ids'][0]; ?>" class="btn btn-sm btn-outline-warning" title="Archive" onclick="return confirm('Archive this bill?');"><i class="bi bi-archive"></i></a>
                             </td>
                         </tr>
                         <?php endforeach; ?>
@@ -1117,8 +1195,35 @@ try {
                         </thead>
                         <tbody>
                             <?php 
+                            // Group archive bills by tenant_id (similar to active bills)
+                            $archive_rows_by_tenant = [];
                             $archive_bills->execute();
-                            while($row = $archive_bills->fetch(PDO::FETCH_ASSOC)) : ?>
+                            while($row = $archive_bills->fetch(PDO::FETCH_ASSOC)) {
+                                $tenant_id = $row['tenant_id'];
+                                if (!isset($archive_rows_by_tenant[$tenant_id])) {
+                                    $archive_rows_by_tenant[$tenant_id] = [
+                                        'tenant_id' => $tenant_id,
+                                        'name' => $row['name'],
+                                        'room_numbers' => [],
+                                        'checkin_date' => $row['checkin_date'],
+                                        'amount_due' => 0,
+                                        'amount_paid' => 0,
+                                        'status' => $row['status'],
+                                        'paid_date' => $row['paid_date'] ?? null,
+                                        'updated_at' => $row['updated_at'],
+                                        'bill_ids' => []
+                                    ];
+                                }
+                                $archive_rows_by_tenant[$tenant_id]['room_numbers'][] = $row['room_number'];
+                                $archive_rows_by_tenant[$tenant_id]['amount_due'] += floatval($row['amount_due']);
+                                $archive_rows_by_tenant[$tenant_id]['amount_paid'] += floatval($row['amount_paid']);
+                                $archive_rows_by_tenant[$tenant_id]['bill_ids'][] = $row['id'];
+                            }
+                            
+                            $archive_rows = array_values($archive_rows_by_tenant);
+                            foreach($archive_rows as $row) : 
+                                $row['room_number'] = implode(', ', $row['room_numbers']);
+                            ?>
                             <tr>
                                 <td><?php 
                                     // If simulation flag is set, force month display to October 2025
@@ -1160,7 +1265,7 @@ try {
                                     }
                                 ?></td>
                                 <td><?php echo $row['checkin_date'] && $row['checkin_date'] !== '0000-00-00' && $row['checkin_date'] !== null ? date('M d, Y', strtotime($row['checkin_date'])) : '<span class="text-muted">N/A</span>'; ?></td>
-                                <td><?php echo htmlspecialchars($row['name']); ?></td>
+                                <td><strong><?php echo htmlspecialchars($row['name']); ?></strong></td>
                                 <td><?php echo htmlspecialchars($row['room_number']); ?></td>
                                 <td><?php echo htmlspecialchars(number_format($row['amount_due'], 2)); ?></td>
                                 <td><?php echo htmlspecialchars(number_format($row['amount_paid'], 2)); ?></td>
@@ -1188,11 +1293,11 @@ try {
                                     }
                                 ?></td>
                                 <td>
-                                    <a href="bill_actions.php?action=view&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-info" title="View Details"><i class="bi bi-eye"></i></a>
-                                    <a href="bill_actions.php?action=restore&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Restore"><i class="bi bi-arrow-counterclockwise"></i></a>
+                                    <a href="bill_actions.php?action=view&id=<?php echo $row['bill_ids'][0]; ?>" class="btn btn-sm btn-outline-info" title="View Details"><i class="bi bi-eye"></i></a>
+                                    <a href="bill_actions.php?action=restore&id=<?php echo $row['bill_ids'][0]; ?>" class="btn btn-sm btn-outline-success" title="Restore"><i class="bi bi-arrow-counterclockwise"></i></a>
                                 </td>
                             </tr>
-                            <?php endwhile; ?>
+                            <?php endforeach; ?>
                         </tbody>
                     </table>
                 </div>
@@ -1784,8 +1889,9 @@ function switchView(view) {
                         <select class="form-select" id="checkout_tenant" name="tenant_id" required onchange="loadCheckoutDetails()">
                             <option value="">-- Choose a Customer --</option>
                             <?php foreach ($checkout_tenants as $tenant): ?>
-                                <option value="<?php echo $tenant['id']; ?>">
-                                    <?php echo htmlspecialchars($tenant['name']); ?>
+                                <?php $roomList = !empty($tenant['room_numbers']) ? $tenant['room_numbers'] : 'N/A'; ?>
+                                <option value="<?php echo $tenant['id']; ?>" data-room-numbers="<?php echo htmlspecialchars($roomList); ?>">
+                                    <?php echo htmlspecialchars($tenant['name'] . ' (' . $roomList . ')'); ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
@@ -1888,7 +1994,13 @@ async function loadCheckoutDetails() {
             document.getElementById('co_name').textContent = data.tenant_name;
             document.getElementById('co_email').textContent = data.email;
             document.getElementById('co_phone').textContent = data.phone;
-            document.getElementById('co_room').textContent = data.room_number || 'N/A';
+            // prefer explicit room(s) list from the selected option first, then fallback to API room_number
+            const selectedOption = document.querySelector('#checkout_tenant option:checked');
+            let roomText = (selectedOption && selectedOption.dataset.roomNumbers) ? selectedOption.dataset.roomNumbers : '';
+            if (!roomText) {
+                roomText = data.room_number || 'N/A';
+            }
+            document.getElementById('co_room').textContent = roomText;
             document.getElementById('co_amount_paid').textContent = '₱' + parseFloat(data.amount_paid).toFixed(2);
             document.getElementById('co_charges').textContent = '₱' + parseFloat(data.charges_total).toFixed(2);
             document.getElementById('co_grand_total_due').textContent = '₱' + parseFloat(data.grand_total_due).toFixed(2);

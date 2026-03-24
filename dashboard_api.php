@@ -5,7 +5,11 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
     echo json_encode(['success' => false, 'error' => 'Unauthorized']);
     exit;
 }
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
+
 header('Content-Type: application/json');
 try {
     // Total tenants

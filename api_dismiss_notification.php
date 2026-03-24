@@ -19,7 +19,10 @@ if (!isset($_SESSION["tenant_id"])) {
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 header('Content-Type: application/json');
 

@@ -1,6 +1,9 @@
 <?php
 session_start();
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
     echo "Not logged in";

@@ -7,8 +7,11 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
 require_once "db/notifications.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 header('Content-Type: application/json');
 
@@ -47,8 +50,16 @@ try {
     $conn->beginTransaction();
 
     // Archive the tenant account (set status to inactive)
-    $archive_stmt = $conn->prepare("UPDATE tenants SET status = 'inactive', updated_at = NOW() WHERE id = :tenant_id");
+    $archive_stmt = $conn->prepare("UPDATE tenants SET status = 'inactive', room_id = NULL, updated_at = NOW() WHERE id = :tenant_id");
     $archive_stmt->execute(['tenant_id' => $tenant_id]);
+
+    // Free the room if the tenant had one
+    $room_stmt = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+    $room_stmt->execute(['room_id' => $cancellation['room_id']]);
+
+    // Archive the tenant's bills by setting updated_at to 8 days ago
+    $archive_bills_stmt = $conn->prepare("UPDATE bills SET updated_at = DATE_SUB(NOW(), INTERVAL 8 DAY) WHERE tenant_id = :tenant_id");
+    $archive_bills_stmt->execute(['tenant_id' => $tenant_id]);
 
     // Commit transaction
     $conn->commit();

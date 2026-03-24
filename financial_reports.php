@@ -6,7 +6,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 // Date range filters
 $start_date = isset($_GET['start_date']) ? $_GET['start_date'] : date('Y-01-01');

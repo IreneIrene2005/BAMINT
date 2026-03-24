@@ -8,12 +8,6 @@
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'tenant_bills.php') ? 'active' : ''; ?>" href="tenant_bills.php">
-                    <i class="bi bi-receipt"></i>
-                    My Bills
-                </a>
-            </li>
-            <li class="nav-item">
                 <a class="nav-link <?php echo (basename($_SERVER['PHP_SELF']) === 'tenant_payments.php') ? 'active' : ''; ?>" href="tenant_payments.php">
                     <i class="bi bi-coin"></i>
                     Payments

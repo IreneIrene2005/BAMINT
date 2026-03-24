@@ -6,19 +6,43 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 // Handle archive action
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'archive') {
     $tenant_id = intval($_POST['tenant_id'] ?? 0);
     if ($tenant_id > 0) {
         try {
-            $stmt = $conn->prepare("UPDATE tenants SET status = 'inactive' WHERE id = :id");
-            $stmt->execute(['id' => $tenant_id]);
-            $_SESSION['flash_message'] = 'Customer archived successfully.';
+            $conn->beginTransaction();
+            
+            // Get the tenant's room before archiving
+            $get_room = $conn->prepare("SELECT room_id FROM tenants WHERE id = :id");
+            $get_room->execute(['id' => $tenant_id]);
+            $tenant_data = $get_room->fetch(PDO::FETCH_ASSOC);
+            
+            // Archive the tenant
+            $archive_stmt = $conn->prepare("UPDATE tenants SET status = 'inactive', room_id = NULL WHERE id = :id");
+            $archive_stmt->execute(['id' => $tenant_id]);
+            
+            // Free the room if the tenant had one
+            if (!empty($tenant_data['room_id'])) {
+                $free_room = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+                $free_room->execute(['room_id' => $tenant_data['room_id']]);
+            }
+
+            // Archive the tenant's bills by setting updated_at to 8 days ago
+            $archive_bills = $conn->prepare("UPDATE bills SET updated_at = DATE_SUB(NOW(), INTERVAL 8 DAY) WHERE tenant_id = :tenant_id");
+            $archive_bills->execute(['tenant_id' => $tenant_id]);
+            
+            $conn->commit();
+            $_SESSION['flash_message'] = 'Customer archived successfully. Room is now available.';
             header("location: tenants.php?view=active");
             exit;
         } catch (Exception $e) {
+            $conn->rollBack();
             $_SESSION['flash_error'] = 'Error archiving customer: ' . $e->getMessage();
         }
     }
@@ -44,7 +68,8 @@ $sql = "SELECT DISTINCT tenants.*, COALESCE(rooms.room_number, (
         )) as room_number, COALESCE(
             (SELECT tenant_info_address FROM room_requests WHERE tenant_id = tenants.id AND status IN ('pending_payment', 'approved', 'occupied') ORDER BY id DESC LIMIT 1),
             tenants.address
-        ) as address FROM tenants 
+        ) as address,
+        (SELECT COUNT(DISTINCT room_id) FROM room_requests WHERE tenant_id = tenants.id AND status IN ('pending_payment', 'approved', 'occupied')) as total_rooms_booked FROM tenants 
         LEFT JOIN rooms ON tenants.room_id = rooms.id
         WHERE tenants.status != 'inactive'
         AND (
@@ -105,7 +130,8 @@ $archive_sql = "SELECT DISTINCT tenants.*, COALESCE(rooms.room_number, (
         )) as room_number, COALESCE(
             (SELECT tenant_info_address FROM room_requests WHERE tenant_id = tenants.id ORDER BY id DESC LIMIT 1),
             tenants.address
-        ) as address FROM tenants 
+        ) as address,
+        (SELECT COUNT(DISTINCT room_id) FROM room_requests WHERE tenant_id = tenants.id AND status IN ('pending_payment', 'approved', 'occupied')) as total_rooms_booked FROM tenants 
         LEFT JOIN rooms ON tenants.room_id = rooms.id
         WHERE tenants.status = 'inactive'";
 
@@ -265,29 +291,75 @@ $available_rooms = $conn->query($sql_available_rooms);
                             $roommate_stmt = $conn->prepare("SELECT COUNT(*) as roommate_count FROM co_tenants WHERE primary_tenant_id = :tenant_id");
                             $roommate_stmt->execute(['tenant_id' => $row['id']]);
                             $roommate_count = intval($roommate_stmt->fetchColumn());
+                            
+                            // Get all additional rooms for this tenant (if multiple bookings)
+                            // Count all unique rooms this tenant has booked (any status)
+                            $count_stmt = $conn->prepare("
+                                SELECT COUNT(DISTINCT room_id) as total_rooms
+                                FROM room_requests
+                                WHERE tenant_id = :tenant_id
+                            ");
+                            $count_stmt->execute(['tenant_id' => $row['id']]);
+                            $count_result = $count_stmt->fetch(PDO::FETCH_ASSOC);
+                            $total_rooms = intval($count_result['total_rooms'] ?? 0);
+                            
+                            $additional_rooms = [];
+                            if ($total_rooms > 1) {
+                                $all_rooms_stmt = $conn->prepare("
+                                    SELECT DISTINCT r.room_number, rr.status, rr.checkin_date, rr.checkout_date, rr.checkin_time, rr.checkout_time
+                                    FROM room_requests rr
+                                    JOIN rooms r ON rr.room_id = r.id
+                                    WHERE rr.tenant_id = :tenant_id
+                                    ORDER BY r.room_number ASC
+                                ");
+                                $all_rooms_stmt->execute(['tenant_id' => $row['id']]);
+                                $additional_rooms = $all_rooms_stmt->fetchAll(PDO::FETCH_ASSOC);
+                            }
                         ?>
                         <tr>
                             <td>
-                                <?php echo htmlspecialchars($row['name']); ?>
-                                <?php if ($roommate_count > 0): ?>
-                                    <span class="badge bg-info ms-2" title="Click View Details to see roommates">
-                                        <i class="bi bi-plus-circle"></i> <?php echo $roommate_count; ?> roommate<?php echo $roommate_count > 1 ? 's' : ''; ?>
-                                    </span>
-                                <?php endif; ?>
+                                <div class="d-flex align-items-center">
+                                    <?php echo htmlspecialchars($row['name']); ?>
+                                    <?php if ($total_rooms > 1): ?>
+                                        <button class="btn btn-sm btn-outline-primary ms-2" type="button" data-bs-toggle="collapse" data-bs-target="#rooms-<?php echo $row['id']; ?>" aria-expanded="false" aria-controls="rooms-<?php echo $row['id']; ?>" title="Click to see all rooms">
+                                            <i class="bi bi-plus"></i>
+                                        </button>
+                                    <?php endif; ?>
+                                    <?php if ($roommate_count > 0): ?>
+                                        <span class="badge bg-info ms-2" title="This customer has roommates">
+                                            <i class="bi bi-people"></i> <?php echo $roommate_count; ?> roommate<?php echo $roommate_count > 1 ? 's' : ''; ?>
+                                        </span>
+                                    <?php endif; ?>
+                                </div>
                             </td>
                             <td><?php echo htmlspecialchars($row['email']); ?></td>
                             <td><?php echo htmlspecialchars($row['phone']); ?></td>
                             <td><?php echo htmlspecialchars($row['address'] ?? '-'); ?></td>
                             <td>
                                 <?php
-                                    // Show room for pending_payment (paid), approved, occupied, or completed bookings
-                                    $room_req_stmt = $conn->prepare("SELECT status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
-                                    $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
-                                    $room_req = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
-                                    if ($room_req && in_array($room_req['status'], ['pending_payment', 'approved', 'occupied', 'completed'])) {
-                                        echo htmlspecialchars($row['room_number']);
+                                    // Show all rooms for multi-room tenants
+                                    $all_rooms_stmt = $conn->prepare("
+                                        SELECT DISTINCT r.room_number 
+                                        FROM room_requests rr 
+                                        JOIN rooms r ON rr.room_id = r.id 
+                                        WHERE rr.tenant_id = :tenant_id AND rr.status IN ('approved', 'occupied', 'pending_payment')
+                                        ORDER BY r.room_number
+                                    ");
+                                    $all_rooms_stmt->execute(['tenant_id' => $row['id']]);
+                                    $all_rooms = $all_rooms_stmt->fetchAll(PDO::FETCH_COLUMN);
+                                    
+                                    if (!empty($all_rooms)) {
+                                        echo 'Rooms: ' . implode(', ', $all_rooms);
                                     } else {
-                                        echo '-';
+                                        // Fallback to single room display
+                                        $room_req_stmt = $conn->prepare("SELECT status FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                        $room_req_stmt->execute(['tenant_id' => $row['id'], 'room_id' => $row['room_id']]);
+                                        $room_req = $room_req_stmt->fetch(PDO::FETCH_ASSOC);
+                                        if ($room_req && in_array($room_req['status'], ['pending_payment', 'approved', 'occupied', 'completed'])) {
+                                            echo htmlspecialchars($row['room_number']);
+                                        } else {
+                                            echo '-';
+                                        }
                                     }
                                 ?>
                             </td>
@@ -350,7 +422,7 @@ $available_rooms = $conn->query($sql_available_rooms);
                                     $booking = $booking_stmt->fetch(PDO::FETCH_ASSOC);
                                     if ($booking) {
                                         if ($booking['status'] === 'approved' || $booking['status'] === 'occupied') {
-                                            echo '<span class="badge bg-success"><i class="bi bi-check-circle"></i> Approved</span>';
+                                        echo '<span class="badge bg-success"><i class="bi bi-check-circle"></i> Completed</span>';
                                         } elseif ($booking['status'] === 'pending_payment') {
                                             echo '<span class="badge bg-warning"><i class="bi bi-clock"></i> Awaiting Approval</span>';
                                         } else {
@@ -375,9 +447,51 @@ $available_rooms = $conn->query($sql_available_rooms);
                                         <a href="tenant_actions.php?action=activate&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-success" title="Activate"><i class="bi bi-play-circle"></i></a>
                                     <?php endif; ?>
                                 <?php endif; ?>
-                                <a href="tenant_actions.php?action=delete&id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-danger" title="Delete" onclick="return confirm('Are you sure you want to delete this customer?');"><i class="bi bi-trash"></i></a>
+                                </td>
+                            </tr>
+                        <!-- Additional Rooms Row (Collapsible) -->
+                        <?php if ($total_rooms > 1): ?>
+                        <tr class="collapse" id="rooms-<?php echo $row['id']; ?>">
+                            <td colspan="7">
+                                <div class="card card-body bg-light">
+                                    <h6 class="mb-3"><i class="bi bi-door-closed"></i> Additional Rooms</h6>
+                                    <div class="table-responsive">
+                                        <table class="table table-sm table-borderless mb-0">
+                                            <thead class="table-light">
+                                                <tr>
+                                                    <th>Room</th>
+                                                    <th>Status</th>
+                                                    <th>Check-In</th>
+                                                    <th>Check-Out</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <?php foreach ($additional_rooms as $room): ?>
+                                                <tr>
+                                                    <td><strong><?php echo htmlspecialchars($room['room_number']); ?></strong></td>
+                                                    <td>
+                                                        <?php 
+                                                            if (in_array($room['status'], ['approved', 'occupied', 'completed'])) {
+                                                                echo '<span class="badge bg-success">Completed</span>';
+                                                            } elseif ($room['status'] === 'pending_payment') {
+                                                                echo '<span class="badge bg-warning">Awaiting Approval</span>';
+                                                            } else {
+                                                                echo '<span class="badge bg-secondary">' . ucfirst($room['status']) . '</span>';
+                                                            }
+                                                        ?>
+                                                    </td>
+                                                    <td><?php echo $room['checkin_date'] ? date('M d, Y', strtotime($room['checkin_date'])) : '-'; ?></td>
+                                                    <td><?php echo $room['checkout_date'] ? date('M d, Y', strtotime($room['checkout_date'])) : '-'; ?></td>
+                                                </tr>
+                                                <?php endforeach; ?>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
                             </td>
                         </tr>
+                        <?php endif; ?>
+                        
                         <?php endwhile; ?>
                     </tbody>
                 </table>

@@ -6,7 +6,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 // Get room types filter
 $filter_type = isset($_GET['type']) ? $_GET['type'] : '';

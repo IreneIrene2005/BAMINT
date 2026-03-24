@@ -6,7 +6,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 $filter_status = $_GET['status'] ?? 'all';
 $search_query = $_GET['search'] ?? '';
@@ -100,10 +103,27 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
     } elseif ($_POST['action'] === 'reject') {
         // Reject tenant
         try {
+            $conn->beginTransaction();
+            
+            // Get tenant's room before deleting
+            $get_room = $conn->prepare("SELECT room_id FROM tenants WHERE id = :tenant_id");
+            $get_room->execute(['tenant_id' => $tenant_id]);
+            $tenant_data = $get_room->fetch(PDO::FETCH_ASSOC);
+            
+            // Delete the tenant
             $stmt = $conn->prepare("DELETE FROM tenants WHERE id = :tenant_id");
             $stmt->execute(['tenant_id' => $tenant_id]);
+            
+            // Free the room if the tenant had one
+            if (!empty($tenant_data['room_id'])) {
+                $free_room = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+                $free_room->execute(['room_id' => $tenant_data['room_id']]);
+            }
+            
+            $conn->commit();
             $success_msg = "Tenant rejected and removed!";
         } catch (Exception $e) {
+            $conn->rollBack();
             $error_msg = "Error rejecting tenant: " . $e->getMessage();
         }
     } elseif ($_POST['action'] === 'verify') {
@@ -293,7 +313,36 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && isset($_P
 
                                         <div class="mb-3">
                                             <small class="text-muted"><i class="bi bi-door-open"></i> Room</small>
-                                            <p class="mb-0"><?php echo ($tenant['status'] === 'active' && ($tenant['room_id'] ?? null)) ? htmlspecialchars($tenant['room_number']) . ' - ' . htmlspecialchars($tenant['room_type']) : '-'; ?></p>
+                                            <p class="mb-0">
+                                                <?php
+                                                if ($tenant['status'] === 'active') {
+                                                    // Check for multiple rooms
+                                                    $all_rooms_stmt = $conn->prepare("
+                                                        SELECT DISTINCT r.room_number, r.room_type
+                                                        FROM room_requests rr 
+                                                        JOIN rooms r ON rr.room_id = r.id 
+                                                        WHERE rr.tenant_id = :tenant_id AND rr.status IN ('approved', 'occupied', 'pending_payment')
+                                                        ORDER BY r.room_number
+                                                    ");
+                                                    $all_rooms_stmt->execute(['tenant_id' => $tenant['id']]);
+                                                    $all_rooms = $all_rooms_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                                    
+                                                    if (!empty($all_rooms)) {
+                                                        $room_strings = [];
+                                                        foreach ($all_rooms as $room) {
+                                                            $room_strings[] = htmlspecialchars($room['room_number']) . ' - ' . htmlspecialchars($room['room_type']);
+                                                        }
+                                                        echo implode('<br>', $room_strings);
+                                                    } elseif ($tenant['room_id'] ?? null) {
+                                                        echo htmlspecialchars($tenant['room_number']) . ' - ' . htmlspecialchars($tenant['room_type']);
+                                                    } else {
+                                                        echo '-';
+                                                    }
+                                                } else {
+                                                    echo '-';
+                                                }
+                                                ?>
+                                            </p>
                                         </div>
 
                                         <?php if ($tenant['status'] === 'active' && $tenant['start_date']): ?>

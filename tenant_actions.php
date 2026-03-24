@@ -379,10 +379,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id = $_GET['id'];
 
         try {
-            $sql = "UPDATE tenants SET status = 'inactive' WHERE id = :id";
+            $conn->beginTransaction();
+            
+            // Get the tenant's room before deactivating
+            $get_room = $conn->prepare("SELECT room_id FROM tenants WHERE id = :id");
+            $get_room->execute(['id' => $id]);
+            $tenant_data = $get_room->fetch(PDO::FETCH_ASSOC);
+            
+            // Deactivate the tenant
+            $sql = "UPDATE tenants SET status = 'inactive', room_id = NULL WHERE id = :id";
             $stmt = $conn->prepare($sql);
             $stmt->execute(['id' => $id]);
+            
+            // Free the room if the tenant had one
+            if (!empty($tenant_data['room_id'])) {
+                $free_room = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+                $free_room->execute(['room_id' => $tenant_data['room_id']]);
+            }
+
+            // Archive the tenant's bills by setting updated_at to 8 days ago
+            $archive_bills = $conn->prepare("UPDATE bills SET updated_at = DATE_SUB(NOW(), INTERVAL 8 DAY) WHERE tenant_id = :tenant_id");
+            $archive_bills->execute(['tenant_id' => $id]);
+            
+            $conn->commit();
         } catch (Exception $e) {
+            $conn->rollBack();
             echo "Failed: " . $e->getMessage();
             exit;
         }
@@ -406,12 +427,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'archive') {
         $id = $_GET['id'];
         try {
+            $conn->beginTransaction();
+            
+            // Get the tenant's room before archiving
+            $get_room = $conn->prepare("SELECT room_id FROM tenants WHERE id = :id");
+            $get_room->execute(['id' => $id]);
+            $tenant_data = $get_room->fetch(PDO::FETCH_ASSOC);
+            
             // backdate end_date so tenant appears in archive immediately and mark inactive
-            $sql = "UPDATE tenants SET end_date = DATE_SUB(NOW(), INTERVAL 8 DAY), status = 'inactive' WHERE id = :id";
+            $sql = "UPDATE tenants SET end_date = DATE_SUB(NOW(), INTERVAL 8 DAY), status = 'inactive', room_id = NULL WHERE id = :id";
             $stmt = $conn->prepare($sql);
             $stmt->execute(['id' => $id]);
+            
+            // Free the room if the tenant had one
+            if (!empty($tenant_data['room_id'])) {
+                $free_room = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+                $free_room->execute(['room_id' => $tenant_data['room_id']]);
+            }
+
+            // Archive the tenant's bills by setting updated_at to 8 days ago
+            $archive_bills = $conn->prepare("UPDATE bills SET updated_at = DATE_SUB(NOW(), INTERVAL 8 DAY) WHERE tenant_id = :tenant_id");
+            $archive_bills->execute(['tenant_id' => $id]);
+            
+            $conn->commit();
             $_SESSION['message'] = "Tenant archived successfully!";
         } catch (Exception $e) {
+            $conn->rollBack();
             $_SESSION['error'] = "Error archiving tenant: " . $e->getMessage();
         }
         header("location: tenants.php");

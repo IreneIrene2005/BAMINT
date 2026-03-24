@@ -6,7 +6,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 // Get customer information
 $customer_id = isset($_SESSION["customer_id"]) ? $_SESSION["customer_id"] : (isset($_SESSION["tenant_id"]) ? $_SESSION["tenant_id"] : null);
@@ -14,6 +17,38 @@ if (!$customer_id) {
     // Not logged in properly, force logout
     session_destroy();
     header("location: index.php?role=tenant");
+    exit;
+}
+
+// Keep default values for multi-room support
+$booked_rooms = [];
+$booked_rooms_count = 0;
+
+// Ajax endpoint: refresh list of booked rooms (for tenants with multiple rooms)
+if (isset($_GET['action']) && $_GET['action'] === 'get_booked_rooms') {
+    header('Content-Type: application/json');
+    try {
+        $rooms_stmt = $conn->prepare("
+            SELECT rr.room_id, r.room_number, rr.status, rr.checkin_date, rr.checkout_date, rr.checkin_time, rr.checkout_time
+            FROM room_requests rr
+            JOIN rooms r ON rr.room_id = r.id
+            JOIN (
+                SELECT room_id, MAX(id) AS max_id
+                FROM room_requests
+                WHERE tenant_id = :customer_id
+                  AND status NOT IN ('cancelled', 'rejected')
+                GROUP BY room_id
+            ) latest ON rr.room_id = latest.room_id AND rr.id = latest.max_id
+            WHERE rr.tenant_id = :customer_id
+              AND rr.status NOT IN ('cancelled', 'rejected')
+            ORDER BY rr.id ASC
+        ");
+        $rooms_stmt->execute(['customer_id' => $customer_id]);
+        $rooms = $rooms_stmt->fetchAll(PDO::FETCH_ASSOC);
+        echo json_encode(['success' => true, 'rooms' => $rooms]);
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
     exit;
 }
 
@@ -87,7 +122,7 @@ try {
         $stmt->execute(['customer_id' => $customer_id]);
         $total_due = floatval($stmt->fetchColumn());
 
-        $stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as total_paid FROM payment_transactions WHERE tenant_id = :customer_id AND payment_status IN ('verified','approved')");
+        $stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as total_paid FROM payment_transactions WHERE tenant_id = :customer_id AND payment_status != 'rejected'");
         $stmt->execute(['customer_id' => $customer_id]);
         $total_paid = floatval($stmt->fetchColumn());
 
@@ -231,6 +266,96 @@ try {
         ");
         $stmt->execute(['customer_id' => $customer_id]);
         $advance_payment = $stmt->fetch(PDO::FETCH_ASSOC);
+    }
+
+    // Get all booked rooms for this tenant (for multi-room view)
+    $booked_rooms = [];
+    $booked_rooms_count = 0;
+    try {
+        $rooms_stmt = $conn->prepare("
+            SELECT rr.room_id, r.room_number, rr.status, rr.checkin_date, rr.checkout_date, rr.checkin_time, rr.checkout_time
+            FROM room_requests rr
+            JOIN rooms r ON rr.room_id = r.id
+            JOIN (
+                SELECT room_id, MAX(id) AS max_id
+                FROM room_requests
+                WHERE tenant_id = :customer_id
+                  AND status NOT IN ('cancelled', 'rejected')
+                GROUP BY room_id
+            ) latest ON rr.room_id = latest.room_id AND rr.id = latest.max_id
+            WHERE rr.tenant_id = :customer_id
+              AND rr.status NOT IN ('cancelled', 'rejected')
+            ORDER BY rr.id ASC
+        ");
+        $rooms_stmt->execute(['customer_id' => $customer_id]);
+        $booked_rooms = $rooms_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Ensure we also include rooms that have bills/payments but may not have a room_request record (legacy/missed booking entries)
+        $room_ids_seen = [];
+        foreach ($booked_rooms as $r) {
+            if (!empty($r['room_id'])) {
+                $room_ids_seen[$r['room_id']] = true;
+            }
+        }
+
+        $bill_rooms_stmt = $conn->prepare("SELECT DISTINCT b.room_id, r.room_number
+            FROM bills b
+            LEFT JOIN rooms r ON b.room_id = r.id
+            WHERE b.tenant_id = :customer_id
+              AND b.room_id IS NOT NULL
+              AND b.status NOT IN ('cancelled', 'deleted')
+              AND (b.amount_paid > 0 OR EXISTS (SELECT 1 FROM payment_transactions pt WHERE pt.bill_id = b.id AND pt.payment_status IN ('verified','approved')) OR b.status IN ('paid','partial'))");
+        $bill_rooms_stmt->execute(['customer_id' => $customer_id]);
+        $bill_rooms = $bill_rooms_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($bill_rooms as $br) {
+            if (empty($br['room_id']) || isset($room_ids_seen[$br['room_id']])) {
+                continue;
+            }
+            $room_ids_seen[$br['room_id']] = true;
+            $booked_rooms[] = [
+                'room_id' => $br['room_id'],
+                'room_number' => $br['room_number'],
+                'status' => 'paid',
+                'checkin_date' => null,
+                'checkout_date' => null,
+                'checkin_time' => null,
+                'checkout_time' => null,
+            ];
+        }
+
+        // Ensure the tenant's current assigned room is included (in case it only exists in tenants.room_id)
+        if (!empty($customer['room_id']) && !isset($room_ids_seen[$customer['room_id']])) {
+            $stmtRoom = $conn->prepare("SELECT room_number FROM rooms WHERE id = :room_id LIMIT 1");
+            $stmtRoom->execute(['room_id' => $customer['room_id']]);
+            $roomNum = $stmtRoom->fetchColumn();
+            if ($roomNum) {
+                $room_ids_seen[$customer['room_id']] = true;
+                $booked_rooms[] = [
+                    'room_id' => $customer['room_id'],
+                    'room_number' => $roomNum,
+                    'status' => 'assigned',
+                    'checkin_date' => null,
+                    'checkout_date' => null,
+                    'checkin_time' => null,
+                    'checkout_time' => null,
+                ];
+            }
+        }
+
+        // Use unique room numbers to avoid duplicates when showing count and comma-list
+        $room_numbers = array_filter(array_column($booked_rooms, 'room_number'));
+        $unique_room_numbers = array_values(array_unique($room_numbers));
+        $booked_rooms_count = count($unique_room_numbers);
+        $default_booked_room_id = $booked_rooms_count > 0 ? $booked_rooms[0]['room_id'] : null;
+        $default_booked_room_number = $booked_rooms_count > 0 ? $booked_rooms[0]['room_number'] : null;
+        $booked_room_numbers_csv = $booked_rooms_count > 0 ? implode(', ', $unique_room_numbers) : '';
+    } catch (Exception $e) {
+        $booked_rooms = [];
+        $booked_rooms_count = 0;
+        $default_booked_room_id = null;
+        $default_booked_room_number = null;
+        $booked_room_numbers_csv = '';
     }
 
     // Check for approved cancellation
@@ -497,6 +622,14 @@ try {
                                         Your cancellation has been approved. Refund information: <strong><?php echo htmlspecialchars($cancellation_approved['refund_amount'] ?? 'Pending'); ?></strong>
                                     <?php elseif ($customer['checkin_time'] && $customer['checkin_time'] !== '0000-00-00 00:00:00'): ?>
                                         Your check-in was approved at <strong><?php echo date('M d, Y \a\t h:i A', strtotime($customer['checkin_time'])); ?></strong>. Welcome to our hotel!
+                                        <?php if (!empty($booked_room_numbers_csv) && $booked_rooms_count > 1): ?>
+                                            <p class="mb-2"><small class="text-muted">Rooms: <?php echo htmlspecialchars($booked_room_numbers_csv); ?></small></p>
+                                            <div class="mb-3">
+                                                <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#additionalRoomsModal">
+                                                    <i class="bi bi-door-open"></i> View other rooms (<?php echo $booked_rooms_count - 1; ?>)
+                                                </button>
+                                            </div>
+                                        <?php endif; ?>
                                     <?php else: ?>
                                         Your payment of <strong>₱<?php echo number_format($advance_payment['payment_amount'] ?? $advance_payment['amount_due'], 2); ?></strong> has been verified and approved.
                                     <?php endif; ?>
@@ -508,7 +641,7 @@ try {
                                             <div style="padding: 1rem; background: white; border-radius: 8px; border: 1px solid #dee2e6;">
                                                 <i class="bi bi-door-open" style="font-size: 1.8rem; color: #667eea; margin-bottom: 0.5rem; display: block;"></i>
                                                 <small class="text-muted d-block mb-2">Room Number</small>
-                                                <strong class="text-dark" style="font-size: 1.5rem;"><?php echo htmlspecialchars($advance_payment['room_number']); ?></strong>
+                                                <strong class="text-dark" style="font-size: 1.5rem;"><?php echo htmlspecialchars($default_booked_room_number ?? $advance_payment['room_number'] ?? 'N/A'); ?></strong>
                                             </div>
                                         </div>
                                         <div class="col-md-6 col-lg-3 text-center">
@@ -654,7 +787,7 @@ try {
                                                     <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
                                                         <i class="bi bi-door-open" style="font-size: 1.5rem; color: #667eea; margin-bottom: 0.5rem; display: block;"></i>
                                                         <small class="text-muted d-block mb-2">Room Number</small>
-                                                        <strong style="font-size: 1.3rem;"><?php echo htmlspecialchars($advance_payment['room_number']); ?></strong>
+                                                        <strong style="font-size: 1.3rem;"><?php echo htmlspecialchars($default_booked_room_number ?? $advance_payment['room_number'] ?? 'N/A'); ?></strong>
                                                     </div>
                                                 </div>
                                                 <div class="col-md-6 col-lg-3 text-center">
@@ -776,8 +909,8 @@ try {
                                     <h6 class="mb-3">Booking Details:</h6>
                                     <div class="row g-2 mb-3">
                                         <div class="col-6">
-                                            <small class="text-muted">Room:</small>
-                                            <div class="fw-bold"><?php echo htmlspecialchars($advance_payment['room_number']); ?></div>
+                                            <small class="text-muted"><?php echo $booked_rooms_count > 1 ? 'Rooms:' : 'Room:'; ?></small>
+                                            <div class="fw-bold"><?php echo htmlspecialchars($booked_rooms_count > 1 ? $booked_room_numbers_csv : ($default_booked_room_number ?? $advance_payment['room_number'] ?? 'N/A')); ?></div>
                                         </div>
                                         <div class="col-6">
                                             <small class="text-muted">Check-in:</small>
@@ -813,6 +946,70 @@ try {
                     </div>
                 <?php endif; ?>
 
+                <!-- Additional Rooms Modal -->
+                <div class="modal fade" id="additionalRoomsModal" tabindex="-1" aria-labelledby="additionalRoomsModalLabel" aria-hidden="true">
+                    <div class="modal-dialog modal-lg modal-dialog-centered">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title" id="additionalRoomsModalLabel">Booked Rooms</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div id="additionalRoomsList">
+                                    <?php if (!empty($booked_rooms) && count($booked_rooms) > 0): ?>
+                                        <?php $room_numbers = array_column($booked_rooms, 'room_number'); ?>
+                                        <div class="mb-3">
+                                            <small class="text-muted">Rooms:</small>
+                                            <div>
+                                                <?php foreach ($room_numbers as $rn): ?>
+                                                    <span class="badge bg-secondary bg-opacity-10 text-dark me-1"><?php echo htmlspecialchars($rn); ?></span>
+                                                <?php endforeach; ?>
+                                            </div>
+                                        </div>
+                                        <div class="list-group">
+                                            <?php foreach ($booked_rooms as $idx => $room): ?>
+                                                <?php
+                                                    $is_default_room = isset($default_booked_room_id) && $default_booked_room_id == $room['room_id'];
+                                                ?>
+                                                <div class="list-group-item<?php echo $is_default_room ? ' active' : ''; ?>">
+                                                    <div class="d-flex justify-content-between align-items-start">
+                                                        <div>
+                                                            <h6 class="mb-1">Room <?php echo htmlspecialchars($room['room_number']); ?><?php echo $is_default_room ? ' (Default)' : ''; ?></h6>
+                                                            <small class="text-muted">Status: <?php echo htmlspecialchars(ucfirst(str_replace('_', ' ', $room['status'] ?? ''))); ?></small>
+                                                        </div>
+                                                        <?php if ($is_default_room): ?>
+                                                            <span class="badge bg-primary ms-2">Default</span>
+                                                        <?php endif; ?>
+                                                    </div>
+                                                    <div class="mt-2">
+                                                        <div class="row">
+                                                            <div class="col-sm-6">
+                                                                <small class="text-muted">Check-in</small><br>
+                                                                <?php echo $room['checkin_date'] ? date('M d, Y', strtotime($room['checkin_date'])) : 'TBD'; ?>
+                                                                <?php echo $room['checkin_time'] ? ' ' . date('g:i A', strtotime($room['checkin_time'])) : ''; ?>
+                                                            </div>
+                                                            <div class="col-sm-6">
+                                                                <small class="text-muted">Check-out</small><br>
+                                                                <?php echo $room['checkout_date'] ? date('M d, Y', strtotime($room['checkout_date'])) : 'TBD'; ?>
+                                                                <?php echo $room['checkout_time'] ? ' ' . date('g:i A', strtotime($room['checkout_time'])) : ''; ?>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    <?php else: ?>
+                                        <p class="text-muted mb-0">No other rooms booked yet.</p>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Overdue notification removed per request -->
 
                 <!-- Key Metrics -->
@@ -821,8 +1018,8 @@ try {
                         <div class="card metric-card">
                             <div class="card-body">
                                 <p class="text-muted mb-2"><i class="bi bi-door-open"></i> Room Number</p>
-                                <p class="metric-value text-primary"><?php echo htmlspecialchars($customer['room_number'] ?? 'N/A'); ?></p>
-                                <small class="text-muted"><?php echo htmlspecialchars($customer['room_type'] ?? 'Not assigned'); ?></small>
+                                <p class="metric-value text-primary"><?php echo htmlspecialchars($booked_rooms_count > 1 ? $booked_room_numbers_csv : ($customer['room_number'] ?? 'N/A')); ?></p>
+                                <small class="text-muted"><?php echo htmlspecialchars($booked_rooms_count > 1 ? 'Multiple rooms' : ($customer['room_type'] ?? 'Not assigned')); ?></small>
                             </div>
                         </div>
                     </div>
@@ -874,6 +1071,12 @@ try {
                     </div>
                     <div class="card-body">
                         <?php if (!empty($bills)): ?>
+                            <?php
+                            // Tenant-wide total room rate from all active room requests, joined with rooms rate (multi-room calculation)
+                            $multi_room_rate_stmt = $conn->prepare("SELECT COALESCE(SUM(r.rate),0) as total_rate FROM room_requests rr JOIN rooms r ON rr.room_id = r.id WHERE rr.tenant_id = :tenant_id AND rr.status NOT IN ('cancelled','rejected')");
+                            $multi_room_rate_stmt->execute(['tenant_id' => $customer['id']]);
+                            $multi_room_rate_total = floatval($multi_room_rate_stmt->fetchColumn());
+                            ?>
                             <div class="table-responsive">
                                 <table class="table table-striped table-sm">
                                     <thead>
@@ -881,7 +1084,6 @@ try {
                                             <th>Stay Duration</th>
                                             <th class="text-end">Total Cost (₱)</th>
                                             <th class="text-end">Amount Paid (₱)</th>
-                                            <th class="text-end">Balance (₱)</th>
                                             <th>Status</th>
                                         </tr>
                                     </thead>
@@ -956,35 +1158,48 @@ try {
                                                 $due_ts = null;
                                             }
 
-                                            // Show only the room cost as Total Cost Room (room rate x nights, or bill amount if dates unavailable)
-                                            // Fetch the room rate for the bill's room
-                                            $room_rate_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id LIMIT 1");
-                                            $room_rate_stmt->execute(['room_id' => $bill['room_id']]);
-                                            $rate_row = $room_rate_stmt->fetch(PDO::FETCH_ASSOC);
-                                            $room_rate = $rate_row ? floatval($rate_row['rate']) : (isset($customer['rate']) ? floatval($customer['rate']) : 0.0);
-                                            
+                                            // Calculate room-based totals using tenant-wide room requests to support multi-room stays
                                             $nights = 1;
                                             if ($checkin && $checkout && strtotime($checkin) > 0 && strtotime($checkout) > 0) {
                                                 $dt1 = new DateTime($checkin);
                                                 $dt2 = new DateTime($checkout);
                                                 $interval = $dt1->diff($dt2);
                                                 $nights = max(1, (int)$interval->format('%a'));
-                                                $room_total = $room_rate * $nights;
-                                            } else {
-                                                // Fall back to bill's amount_due if dates are unavailable
-                                                $room_total = floatval($bill['amount_due']);
                                             }
+
+                                            // If tenant has no valid room requests, fall back to bill room or tenant rate
+                                            if ($multi_room_rate_total > 0) {
+                                                $room_total = $multi_room_rate_total * $nights;
+                                            } else {
+                                                $room_rate_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id LIMIT 1");
+                                                $room_rate_stmt->execute(['room_id' => $bill['room_id']]);
+                                                $rate_row = $room_rate_stmt->fetch(PDO::FETCH_ASSOC);
+                                                $room_rate = $rate_row ? floatval($rate_row['rate']) : (isset($customer['rate']) ? floatval($customer['rate']) : 0.0);
+                                                $room_total = $room_rate * $nights;
+                                            }
+
                                             $display_amount_due = $room_total;
-                                            // Paid and balance should be based on room only (not amenities)
-                                            // If payments exceed room_total, cap paid at room_total for display
-                                            $paid_on_base = min($live_paid, $room_total);
-                                            $base_balance = $room_total - $paid_on_base;
+                                            // Required 50% prepayment assumptions: half as paid and half as balance for display
+                                            $paid_on_base = $display_amount_due * 0.5;
+                                            $base_balance = $display_amount_due - $paid_on_base;
 
                                             // Recompute status based on full bill totals (keeps status accurate for overall bill)
                                             $overall_balance = floatval($bill['amount_due']) - $live_paid;
+                                            $is_checked_out = false;
+                                            if (!empty($checkout) && strtotime($checkout) > 0) {
+                                                $is_checked_out = (strtotime($checkout) <= time());
+                                            } elseif (!empty($actual_checkout) && strtotime($actual_checkout) > 0) {
+                                                $is_checked_out = (strtotime($actual_checkout) <= time());
+                                            }
+
                                             if ($overall_balance <= 0) {
-                                                $display_status = 'paid';
-                                                $status_class = 'success';
+                                                if ($is_checked_out) {
+                                                    $display_status = 'paid';
+                                                    $status_class = 'success';
+                                                } else {
+                                                    $display_status = 'partial';
+                                                    $status_class = 'info';
+                                                }
                                             } elseif ($live_paid > 0) {
                                                 $display_status = 'partial';
                                                 $status_class = 'info';
@@ -1000,14 +1215,12 @@ try {
                                                 <td><small><?php echo $month_display; ?></small></td>
                                                 <td class="text-end">₱<?php echo number_format($display_amount_due, 2); ?></td>
                                                 <td class="text-end">₱<?php echo number_format($paid_on_base, 2); ?></td>
-                                                <td class="text-end">₱<?php echo number_format($base_balance, 2); ?></td>
                                                 <td><span class="badge bg-<?php echo $status_class; ?>"><?php echo ucfirst($display_status); ?></span></td>
                                             </tr>
                                         <?php endforeach; ?>
                                     </tbody>
                                 </table>
                             </div>
-                            <a href="tenant_bills.php" class="btn btn-sm btn-primary mt-2">View All Bills</a>
                         <?php else: ?>
                             <p class="text-muted">No bills yet.</p>
                         <?php endif; ?>
@@ -1141,6 +1354,82 @@ try {
                 console.error('Error:', error);
                 alert('Error processing cancellation. Please try again.');
             });
+        }
+
+        /**
+         * Handle showing additional booked rooms (for tenants with multiple bookings).
+         * We fetch the latest list each time the modal is opened to keep it accurate.
+         */
+        const tenantBookedRoomsCount = <?php echo json_encode($booked_rooms_count ?? 0); ?>;
+
+        function renderBookedRooms(rooms) {
+            const container = document.getElementById('additionalRoomsList');
+            if (!container) return;
+
+            if (!rooms || rooms.length === 0) {
+                container.innerHTML = '<p class="text-muted mb-0">No other rooms booked yet.</p>';
+                return;
+            }
+
+            rooms.sort((a, b) => (a.first_request_id || 0) - (b.first_request_id || 0));
+            const defaultRoomId = rooms[0] ? rooms[0].room_id : null;
+            const allRoomNumbers = rooms.map(r => r.room_number).filter(Boolean);
+
+            let html = '';
+            if (allRoomNumbers.length) {
+                html += '<div class="mb-3"><small class="text-muted">Rooms:</small><div>';
+                allRoomNumbers.forEach(rn => {
+                    html += '<span class="badge bg-secondary bg-opacity-10 text-dark me-1">' + rn + '</span>';
+                });
+                html += '</div></div>';
+            }
+
+            html += '<div class="list-group">';
+            rooms.forEach(room => {
+                const isDefault = defaultRoomId && room.room_id == defaultRoomId;
+                const status = room.status ? room.status.replace(/_/g, ' ') : 'Unknown';
+                const checkinDate = room.checkin_date ? new Date(room.checkin_date).toLocaleDateString('en-US', {month:'short', day:'2-digit', year:'numeric'}) : 'TBD';
+                const checkinTime = room.checkin_time ? ' ' + new Date('1970-01-01T' + room.checkin_time).toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'}) : '';
+                const checkoutDate = room.checkout_date ? new Date(room.checkout_date).toLocaleDateString('en-US', {month:'short', day:'2-digit', year:'numeric'}) : 'TBD';
+                const checkoutTime = room.checkout_time ? ' ' + new Date('1970-01-01T' + room.checkout_time).toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'}) : '';
+
+                html += '<div class="list-group-item' + (isDefault ? ' active' : '') + '">';
+                html += '<div class="d-flex justify-content-between align-items-start">';
+                html += '<div><h6 class="mb-1">Room ' + room.room_number + (isDefault ? ' (Default)' : '') + '</h6>';
+                html += '<small class="text-muted">Status: ' + status + '</small></div>';
+                if (isDefault) {
+                    html += '<span class="badge bg-primary ms-2">Default</span>';
+                }
+                html += '</div>';
+                html += '<div class="mt-2 row">';
+                html += '<div class="col-sm-6"><small class="text-muted">Check-in</small><br>' + checkinDate + checkinTime + '</div>';
+                html += '<div class="col-sm-6"><small class="text-muted">Check-out</small><br>' + checkoutDate + checkoutTime + '</div>';
+                html += '</div>';
+                html += '</div>';
+            });
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        function loadBookedRooms() {
+            if (tenantBookedRoomsCount <= 1) return;
+            fetch('tenant_dashboard.php?action=get_booked_rooms')
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) {
+                        console.error('Failed to load rooms:', data.error);
+                        return;
+                    }
+                    renderBookedRooms(data.rooms || []);
+                })
+                .catch(err => {
+                    console.error('Failed to load rooms:', err);
+                });
+        }
+
+        const additionalRoomsModal = document.getElementById('additionalRoomsModal');
+        if (additionalRoomsModal) {
+            additionalRoomsModal.addEventListener('show.bs.modal', loadBookedRooms);
         }
     </script>
 </body>

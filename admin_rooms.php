@@ -6,16 +6,51 @@ if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true || !in_array
     exit;
 }
 
-require_once 'db_connect.php';
+require_once 'db_pdo.php';
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 // Room status filter from query string (optional)
 $room_status_filter = isset($_GET['status']) ? trim($_GET['status']) : '';
 
-// Prepare metrics
-$total_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms")->fetch_row()[0];
-$occupied_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'occupied'")->fetch_row()[0];
-$vacant_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'available'")->fetch_row()[0];
-$maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status = 'under maintenance'")->fetch_row()[0];
+// First, sync room statuses with actual tenant occupancy
+// Set rooms to available if they have no active tenants
+try {
+    $sync_query = "
+        UPDATE rooms r
+        SET r.status = 'available'
+        WHERE r.status IN ('booked', 'occupied')
+        AND r.id NOT IN (
+            SELECT DISTINCT t.room_id
+            FROM tenants t
+            WHERE t.status = 'active'
+            AND t.room_id IS NOT NULL
+        )
+    ";
+    $conn->prepare($sync_query)->execute();
+} catch (Exception $e) {
+    error_log("Room status sync error: " . $e->getMessage());
+}
+
+// Prepare metrics - calculate based on actual occupancy
+try {
+    $metrics = $conn->prepare("
+        SELECT 
+            (SELECT COUNT(*) FROM rooms) as total_rooms,
+            (SELECT COUNT(*) FROM rooms WHERE status IN ('occupied', 'booked')) as occupied_rooms,
+            (SELECT COUNT(*) FROM rooms WHERE status = 'available') as vacant_rooms,
+            (SELECT COUNT(*) FROM rooms WHERE status = 'under maintenance') as maintenance_rooms
+    ");
+    $metrics->execute();
+    $metric_row = $metrics->fetch(PDO::FETCH_ASSOC);
+    $total_rooms = intval($metric_row['total_rooms']);
+    $occupied_rooms = intval($metric_row['occupied_rooms']);
+    $vacant_rooms = intval($metric_row['vacant_rooms']);
+    $maintenance_rooms = intval($metric_row['maintenance_rooms']);
+} catch (Exception $e) {
+    $total_rooms = $occupied_rooms = $vacant_rooms = $maintenance_rooms = 0;
+}
 
 ?>
 <!DOCTYPE html>
@@ -131,12 +166,14 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
                 <?php
                 // Fetch rooms, optionally filter by status
                 if ($room_status_filter) {
-                    $status_esc = $conn->real_escape_string($room_status_filter);
-                    $res = $conn->query("SELECT * FROM rooms WHERE status = '".$status_esc."' ORDER BY id DESC");
+                    $stmt = $conn->prepare("SELECT * FROM rooms WHERE status = :status ORDER BY id DESC");
+                    $stmt->execute(['status' => $room_status_filter]);
                 } else {
-                    $res = $conn->query("SELECT * FROM rooms ORDER BY id DESC");
+                    $stmt = $conn->prepare("SELECT * FROM rooms ORDER BY id DESC");
+                    $stmt->execute();
                 }
-                while ($r = $res->fetch_assoc()):
+                $rooms = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($rooms as $r):
                   $status = htmlspecialchars(ucfirst($r['status']));
                   $badge = ($r['status'] === 'available') ? 'success' : (($r['status'] === 'booked') ? 'warning text-dark' : 'secondary');
                 ?>
@@ -157,7 +194,7 @@ $maintenance_rooms = (int)$conn->query("SELECT COUNT(*) FROM rooms WHERE status 
                     <?php endif; ?>
                   </td>
                 </tr>
-                <?php endwhile; ?>
+                <?php endforeach; ?>
               </tbody>
             </table>
           </div>

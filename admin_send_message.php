@@ -6,8 +6,11 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
 require_once "db/notifications.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 $admin_id = $_SESSION["admin_id"];
 $message_sent = '';

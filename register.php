@@ -11,8 +11,11 @@ if (isset($_SESSION["loggedin"]) && $_SESSION["loggedin"] === true) {
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
 require_once "db/notifications.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 $username = $email = $name = $password = $confirm_password = $phone = $address = "";
 $username_err = $email_err = $name_err = $password_err = $confirm_password_err = $phone_err = "";

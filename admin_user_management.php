@@ -6,7 +6,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 // Check if role column exists, if not create it
 try {
@@ -95,19 +98,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     } elseif ($action === 'delete_user') {
         $user_id = intval($_POST['user_id'] ?? 0);
         
-        if ($user_id > 0 && $user_id != $_SESSION['id']) {
+        if ($user_id > 0) {
             try {
                 $stmt = $conn->prepare("DELETE FROM admins WHERE id = :id");
                 $stmt->execute(['id' => $user_id]);
-                $message = "User deleted successfully.";
-                $message_type = "success";
+                
+                if ($user_id == $_SESSION['id']) {
+                    // User is deleting their own account - logout and redirect
+                    session_destroy();
+                    header("location: index.php?message=Account deleted successfully");
+                    exit;
+                } else {
+                    $message = "User deleted successfully.";
+                    $message_type = "success";
+                }
             } catch (Exception $e) {
                 $message = "Error deleting user: " . $e->getMessage();
                 $message_type = "danger";
             }
-        } else if ($user_id == $_SESSION['id']) {
-            $message = "You cannot delete your own account.";
-            $message_type = "danger";
         }
     }
 }
@@ -196,11 +204,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         
         if ($customer_id > 0) {
             try {
-                $stmt = $conn->prepare("UPDATE tenants SET status = 'inactive' WHERE id = :id");
+                $conn->beginTransaction();
+                
+                // Get the customer's room before archiving
+                $get_room = $conn->prepare("SELECT room_id FROM tenants WHERE id = :id");
+                $get_room->execute(['id' => $customer_id]);
+                $tenant_data = $get_room->fetch(PDO::FETCH_ASSOC);
+                
+                // Archive the customer
+                $stmt = $conn->prepare("UPDATE tenants SET status = 'inactive', room_id = NULL WHERE id = :id");
                 $stmt->execute(['id' => $customer_id]);
+                
+                // Free the room if the customer had one
+                if (!empty($tenant_data['room_id'])) {
+                    $free_room = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+                    $free_room->execute(['room_id' => $tenant_data['room_id']]);
+                }
+
+                // Archive the customer's bills by setting updated_at to 8 days ago
+                $archive_bills = $conn->prepare("UPDATE bills SET updated_at = DATE_SUB(NOW(), INTERVAL 8 DAY) WHERE tenant_id = :tenant_id");
+                $archive_bills->execute(['tenant_id' => $customer_id]);
+                
+                $conn->commit();
                 $message = "Customer archived successfully.";
                 $message_type = "success";
             } catch (Exception $e) {
+                $conn->rollBack();
                 $message = "Error archiving customer: " . $e->getMessage();
                 $message_type = "danger";
             }
@@ -210,6 +239,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         
         if ($customer_id > 0) {
             try {
+                $conn->beginTransaction();
+                
+                // Get the customer's room before deleting
+                $get_room = $conn->prepare("SELECT room_id FROM tenants WHERE id = :id");
+                $get_room->execute(['id' => $customer_id]);
+                $tenant_data = $get_room->fetch(PDO::FETCH_ASSOC);
+                
                 // First, delete any co-tenants associated with this customer
                 $stmt = $conn->prepare("DELETE FROM co_tenants WHERE primary_tenant_id = :id");
                 $stmt->execute(['id' => $customer_id]);
@@ -218,9 +254,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $stmt = $conn->prepare("DELETE FROM tenants WHERE id = :id");
                 $stmt->execute(['id' => $customer_id]);
                 
+                // Free the room if the customer had one
+                if (!empty($tenant_data['room_id'])) {
+                    $free_room = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+                    $free_room->execute(['room_id' => $tenant_data['room_id']]);
+                }
+                
+                $conn->commit();
                 $message = "Customer deleted successfully.";
                 $message_type = "success";
             } catch (Exception $e) {
+                $conn->rollBack();
                 $message = "Error deleting customer: " . $e->getMessage();
                 $message_type = "danger";
             }
@@ -351,7 +395,8 @@ try {
                             </div>
                         <?php else: ?>
                             <?php foreach ($users as $user): ?>
-                                <?php if (!isset($user['id']) || empty($user['id'])): ?>
+                                <?php $user_id = intval($user['id'] ?? 0); ?>
+                                <?php if ($user_id <= 0): ?>
                                     <?php continue; ?>
                                 <?php endif; ?>
                                 <div class="col-md-6 col-lg-4">
@@ -368,20 +413,22 @@ try {
                                             </p>
                                             
                                             <div class="d-grid gap-2">
-                                                <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#editUserModal" onclick="setEditUser(<?php echo isset($user['id']) ? $user['id'] : 0; ?>, '<?php echo htmlspecialchars($user['username'] ?? ''); ?>', '<?php echo ($user['role'] ?? 'user'); ?>')">
+                                                <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#editUserModal" onclick="setEditUser(<?php echo $user_id; ?>, '<?php echo htmlspecialchars($user['username'] ?? ''); ?>', '<?php echo ($user['role'] ?? 'user'); ?>')">
                                                     <i class="bi bi-pencil-square"></i> Edit Role
                                                 </button>
-                                                <?php if (isset($user['id']) && isset($_SESSION['id']) && $user['id'] != $_SESSION['id']): ?>
-                                                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="if(confirm('Delete this user?')) { document.getElementById('deleteForm<?php echo $user['id']; ?>').submit(); }">
-                                                        <i class="bi bi-trash"></i> Delete
-                                                    </button>
-                                                    <form id="deleteForm<?php echo $user['id']; ?>" method="POST" style="display: none;">
-                                                        <input type="hidden" name="action" value="delete_user">
-                                                        <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                                                    </form>
-                                                <?php else: ?>
-                                                    <small class="text-muted d-block text-center mt-2">(Your account)</small>
-                                                <?php endif; ?>
+                                                <?php $logoutWarning = ($user_id === intval($_SESSION['id'] ?? 0) ? ' You will be logged out.' : ''); ?>
+                                                <button type="button" class="btn btn-sm btn-outline-danger" onclick="{
+                                                    var msg = 'Delete this user?' + <?php echo json_encode($logoutWarning); ?>;
+                                                    if (confirm(msg)) {
+                                                        document.getElementById('deleteForm<?php echo $user_id; ?>').submit();
+                                                    }
+                                                }">
+                                                    <i class="bi bi-trash"></i> Delete
+                                                </button>
+                                                <form id="deleteForm<?php echo $user_id; ?>" method="POST" style="display: none;">
+                                                    <input type="hidden" name="action" value="delete_user">
+                                                    <input type="hidden" name="user_id" value="<?php echo $user_id; ?>">
+                                                </form>
                                             </div>
                                         </div>
                                     </div>

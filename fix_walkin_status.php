@@ -11,7 +11,10 @@ if ($_SESSION['role'] !== 'admin') {
     die('Unauthorized');
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fix_walkin'])) {
     try {

@@ -6,8 +6,11 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
 require_once "db/notifications.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 $action = $_GET['action'] ?? '';
 
@@ -653,7 +656,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Mark tenant as inactive with end_date
             $update_tenant = $conn->prepare("
                 UPDATE tenants 
-                SET status = 'inactive', end_date = :end_date
+                SET status = 'inactive', end_date = :end_date, room_id = NULL
                 WHERE id = :id
             ");
             $update_tenant->execute([
@@ -683,16 +686,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'room_id' => $room_id
                 ]);
             }
+
+            // Archive the tenant's bills by setting updated_at to 8 days ago
+            $archive_bills = $conn->prepare("UPDATE bills SET updated_at = DATE_SUB(NOW(), INTERVAL 8 DAY) WHERE tenant_id = :tenant_id");
+            $archive_bills->execute(['tenant_id' => $tenant_id]);
             
             $conn->commit();
             $_SESSION['message'] = "Customer {$tenant['name']} checked out successfully! Payment of ₱" . number_format($final_amount, 2) . " recorded.";
+            
+            // After successful checkout, show the checkout invoice
+            $checkout_invoice_data = [
+                'tenant' => $tenant,
+                'final_amount' => $final_amount,
+                'payment_method' => $payment_method,
+                'checkout_notes' => $checkout_notes,
+                'checkout_date' => date('Y-m-d H:i:s')
+            ];
+            
+            // Get all bills for this tenant to show in invoice
+            $all_bills_stmt = $conn->prepare("
+                SELECT * FROM bills 
+                WHERE tenant_id = :tenant_id 
+                ORDER BY billing_month ASC
+            ");
+            $all_bills_stmt->execute(['tenant_id' => $tenant_id]);
+            $all_bills = $all_bills_stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            $checkout_invoice_data['bills'] = $all_bills;
+            
+            // Show checkout invoice
+            showCheckoutInvoice($checkout_invoice_data);
+            exit;
+            
         } catch (Exception $e) {
             $conn->rollBack();
             $_SESSION['error'] = "Error processing checkout: " . $e->getMessage();
+            header('location: bills.php');
+            exit;
         }
-        
-        header("location: bills.php");
-        exit;
     } elseif ($action === 'cancel_walk_in') {
         // Cancel walk-in customer registration
         $tenant_id = intval($_POST['tenant_id'] ?? $_GET['tenant_id'] ?? 0);
@@ -734,6 +765,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Delete the tenant
             $delete_tenant = $conn->prepare("DELETE FROM tenants WHERE id = :id");
             $delete_tenant->execute(['id' => $tenant_id]);
+            
+            // Free the room if the tenant had one assigned
+            if (!empty($tenant['room_id'])) {
+                $free_room = $conn->prepare("UPDATE rooms SET status = 'available' WHERE id = :room_id");
+                $free_room->execute(['room_id' => $tenant['room_id']]);
+            }
             
             $conn->commit();
             $_SESSION['message'] = "Walk-in customer registration cancelled successfully.";
@@ -971,7 +1008,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 <h6>Bill To:</h6>
                                 <p>
                                     <strong><?php echo htmlspecialchars($bill['name']); ?></strong><br>
-                                    Room <?php echo htmlspecialchars($bill['room_number']); ?><br>
+                                    <?php
+                                    // Get all rooms for this tenant during this bill's specific period
+                                    $rooms_stmt = $conn->prepare("
+                                        SELECT DISTINCT r.room_number 
+                                        FROM room_requests rr 
+                                        JOIN rooms r ON rr.room_id = r.id 
+                                        WHERE rr.tenant_id = :tenant_id 
+                                        AND rr.checkin_date = :checkin_date 
+                                        AND rr.checkout_date = :checkout_date
+                                        AND rr.status IN ('approved', 'occupied', 'pending_payment', 'completed')
+                                        ORDER BY r.room_number
+                                    ");
+                                    $rooms_stmt->execute([
+                                        'tenant_id' => $bill['tenant_id'],
+                                        'checkin_date' => $bill['checkin_date'],
+                                        'checkout_date' => $bill['checkout_date']
+                                    ]);
+                                    $rooms = $rooms_stmt->fetchAll(PDO::FETCH_COLUMN);
+                                    if (!empty($rooms)) {
+                                        echo 'Rooms: ' . implode(', ', $rooms) . '<br>';
+                                    } else {
+                                        echo 'Room ' . htmlspecialchars($bill['room_number']) . '<br>';
+                                    }
+                                    ?>
                                     Email: <?php echo htmlspecialchars($bill['email']); ?><br>
                                     Phone: <?php echo htmlspecialchars($bill['phone']); ?>
                                 </p>
@@ -981,24 +1041,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     <strong>Billing Period:</strong> <?php echo date('F Y', strtotime($bill['billing_month'])); ?><br>
                                     <strong>Invoice Date:</strong> <?php echo date('M d, Y'); ?><br>
                                     <strong>Stay Duration:</strong> <?php
-                                        // Fetch stay duration, room rate, and calculate total cost
-                                        $stay_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
-                                        $stay_stmt->execute(['tenant_id' => $bill['tenant_id'], 'room_id' => $bill['room_id']]);
-                                        $stay = $stay_stmt->fetch(PDO::FETCH_ASSOC);
-                                        $room_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
-                                        $room_stmt->execute(['room_id' => $bill['room_id']]);
-                                        $room = $room_stmt->fetch(PDO::FETCH_ASSOC);
-                                        $room_rate = $room ? floatval($room['rate']) : 0;
-                                        $total_cost = null;
-                                        $nights = null;
-                                        if ($stay && $stay['checkin_date'] && $stay['checkout_date']) {
-                                            echo date('M d, Y', strtotime($stay['checkin_date'])) . ' - ' . date('M d, Y', strtotime($stay['checkout_date']));
-                                            $checkin = new DateTime($stay['checkin_date']);
-                                            $checkout = new DateTime($stay['checkout_date']);
-                                            $nights = $checkin->diff($checkout)->days;
-                                            $total_cost = $nights * $room_rate;
-                                        } else {
-                                            echo 'N/A';
+                                        // Calculate total cost for all rooms related to this bill's billing period
+                                        $total_cost = 0;
+                                        $stay_info = [];
+                                        
+                                        // Get bill's period
+                                        $bill_checkin = $bill['checkin_date'];
+                                        $bill_checkout = $bill['checkout_date'];
+                                        
+                                        // Get all room bookings for this tenant during this bill's period
+                                        if ($bill_checkin && $bill_checkout) {
+                                            $bookings_stmt = $conn->prepare("
+                                                SELECT DISTINCT rr.room_id, r.room_number, r.rate, rr.checkin_date, rr.checkout_date
+                                                FROM room_requests rr 
+                                                JOIN rooms r ON rr.room_id = r.id 
+                                                WHERE rr.tenant_id = :tenant_id 
+                                                AND rr.checkin_date = :checkin_date 
+                                                AND rr.checkout_date = :checkout_date
+                                                AND rr.status IN ('approved', 'occupied', 'pending_payment', 'completed')
+                                                ORDER BY r.room_number
+                                            ");
+                                            $bookings_stmt->execute([
+                                                'tenant_id' => $bill['tenant_id'],
+                                                'checkin_date' => $bill_checkin,
+                                                'checkout_date' => $bill_checkout
+                                            ]);
+                                            $bookings = $bookings_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                            
+                                            if (!empty($bookings)) {
+                                                foreach ($bookings as $booking) {
+                                                    $checkin = new DateTime($booking['checkin_date']);
+                                                    $checkout = new DateTime($booking['checkout_date']);
+                                                    $nights = $checkin->diff($checkout)->days;
+                                                    $room_cost = $nights * floatval($booking['rate']);
+                                                    $total_cost += $room_cost;
+                                                    
+                                                    $stay_info[] = date('M d, Y', strtotime($booking['checkin_date'])) . ' - ' . date('M d, Y', strtotime($booking['checkout_date'])) . ' (Room ' . $booking['room_number'] . ')';
+                                                }
+                                                echo implode('<br>', $stay_info);
+                                            }
+                                        }
+                                        
+                                        // Fallback if no bookings found in the period
+                                        if (empty($stay_info) && $bill_checkin && $bill_checkout) {
+                                            $stay_stmt = $conn->prepare("SELECT checkin_date, checkout_date FROM room_requests WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+                                            $stay_stmt->execute(['tenant_id' => $bill['tenant_id'], 'room_id' => $bill['room_id']]);
+                                            $stay = $stay_stmt->fetch(PDO::FETCH_ASSOC);
+                                            $room_stmt = $conn->prepare("SELECT rate FROM rooms WHERE id = :room_id");
+                                            $room_stmt->execute(['room_id' => $bill['room_id']]);
+                                            $room = $room_stmt->fetch(PDO::FETCH_ASSOC);
+                                            $room_rate = $room ? floatval($room['rate']) : 0;
+                                            
+                                            if ($stay && $stay['checkin_date'] && $stay['checkout_date']) {
+                                                echo date('M d, Y', strtotime($stay['checkin_date'])) . ' - ' . date('M d, Y', strtotime($stay['checkout_date']));
+                                                $checkin = new DateTime($stay['checkin_date']);
+                                                $checkout = new DateTime($stay['checkout_date']);
+                                                $nights = $checkin->diff($checkout)->days;
+                                                $total_cost = $nights * $room_rate;
+                                            }
                                         }
                                     ?><br>
                                     <strong>Status:</strong> <span class="badge bg-<?php 
@@ -1016,7 +1116,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     <td><strong>Total Cost (Room Only)</strong></td>
                                     <td class="text-end">
                                         <?php
-                                        if ($total_cost !== null) {
+                                        if ($total_cost > 0) {
                                             echo '<strong>₱' . number_format($total_cost, 2) . '</strong>';
                                         } else {
                                             echo 'N/A';
@@ -1041,8 +1141,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     <td><strong>Total Amount Paid</strong></td>
                                     <td class="text-end">
                                         <?php
-                                        // Calculate total paid from all verified/approved payments
-                                        $total_paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as total_paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified', 'approved')");
+                                        // Calculate total paid from all non-rejected payments (including pending)
+                                        $total_paid_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount),0) as total_paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_status != 'rejected'");
                                         $total_paid_stmt->execute(['bill_id' => $bill['id']]);
                                         $total_paid = floatval($total_paid_stmt->fetchColumn());
                                         echo '<strong>₱' . number_format($total_paid, 2) . '</strong>';
@@ -1062,7 +1162,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     <td><strong>Total Additional Charges</strong></td>
                                     <td class="text-end">
                                         <?php
-                                        $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND status = 'completed' AND cost > 0");
+                                        $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND cost > 0 AND (status = 'completed' OR description LIKE 'Amenity order%')");
                                         $charges_stmt->execute(['tenant_id' => $bill['tenant_id']]);
                                         $total_charges = $charges_stmt->fetchColumn();
                                         $total_charges = $total_charges ? floatval($total_charges) : 0.0;
@@ -1125,4 +1225,183 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php
     }
 }
-?>
+
+// Function to display checkout invoice
+function showCheckoutInvoice($data) {
+    global $conn, $pdo;
+    global $conn;
+    $tenant = $data['tenant'];
+    $final_amount = $data['final_amount'];
+    $payment_method = $data['payment_method'];
+    $checkout_notes = $data['checkout_notes'];
+    $checkout_date = $data['checkout_date'];
+    $bills = $data['bills'];
+    
+    // Get tenant details
+    $tenant_stmt = $conn->prepare("SELECT name, email, phone FROM tenants WHERE id = :id");
+    $tenant_stmt->execute(['id' => $tenant['id']]);
+    $tenant_details = $tenant_stmt->fetch(PDO::FETCH_ASSOC);
+    
+    // Get room details
+    $room_stmt = $conn->prepare("SELECT room_number FROM rooms WHERE id = :id");
+    $room_stmt->execute(['id' => $tenant['room_id']]);
+    $room = $room_stmt->fetch(PDO::FETCH_ASSOC);
+    
+    // Calculate totals from all bills and additional charges
+    $total_room_cost = 0;
+    $total_paid = 0;
+    
+    foreach ($bills as $bill) {
+        $total_room_cost += $bill['amount_due'];
+        $total_paid += $bill['amount_paid'];
+    }
+    
+    // Get additional charges (amenities) - same logic as bill view
+    $charges_stmt = $conn->prepare("SELECT SUM(cost) as total_charges FROM maintenance_requests WHERE tenant_id = :tenant_id AND cost > 0 AND (status = 'completed' OR description LIKE 'Amenity order%')");
+    $charges_stmt->execute(['tenant_id' => $tenant['id']]);
+    $total_additional_charges = floatval($charges_stmt->fetchColumn());
+    
+    $grand_total = $total_room_cost + $total_additional_charges;
+    $remaining_balance = $grand_total - $total_paid;
+    
+    ?>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Checkout Invoice</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="public/css/style.css">
+        <style>
+            .invoice { max-width: 800px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; }
+            .invoice-header { border-bottom: 2px solid #333; margin-bottom: 20px; padding-bottom: 10px; }
+            .invoice-footer { border-top: 1px solid #ddd; margin-top: 20px; padding-top: 10px; }
+            @media print {
+                .no-print { display: none; }
+                .invoice { border: none; }
+            }
+        </style>
+    </head>
+    <body>
+    <?php include 'templates/header.php'; ?>
+    <div class="container-fluid">
+        <div class="row">
+            <?php include 'templates/sidebar.php'; ?>
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2">Checkout Invoice</h1>
+                    <div class="no-print">
+                        <a href="admin_checkin_checkout.php" class="btn btn-secondary">Back to Check-in/Checkout</a>
+                    </div>
+                </div>
+                
+                <div class="invoice">
+                    <div class="invoice-header">
+                        <h2>HOTEL CHECKOUT INVOICE</h2>
+                        <p class="text-muted">Checkout Date: <?php echo date('M d, Y H:i', strtotime($checkout_date)); ?></p>
+                    </div>
+                    
+                    <div class="row mb-4">
+                        <div class="col-md-6">
+                            <h6>Guest Information:</h6>
+                            <p>
+                                <strong><?php echo htmlspecialchars($tenant_details['name']); ?></strong><br>
+                                Room: <?php echo htmlspecialchars($room['room_number']); ?><br>
+                                Email: <?php echo htmlspecialchars($tenant_details['email']); ?><br>
+                                Phone: <?php echo htmlspecialchars($tenant_details['phone']); ?>
+                            </p>
+                        </div>
+                        <div class="col-md-6 text-end">
+                            <p>
+                                <strong>Checkout Date:</strong> <?php echo date('M d, Y', strtotime($checkout_date)); ?><br>
+                                <strong>Payment Method:</strong> <?php echo ucfirst($payment_method); ?><br>
+                                <?php if ($checkout_notes): ?>
+                                <strong>Notes:</strong> <?php echo htmlspecialchars($checkout_notes); ?><br>
+                                <?php endif; ?>
+                            </p>
+                        </div>
+                    </div>
+                    
+                    <table class="table">
+                        <tbody>
+                            <tr>
+                                <td><strong>Total Room Charges</strong></td>
+                                <td class="text-end">₱<?php echo number_format($total_room_cost, 2); ?></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Total Additional Charges</strong></td>
+                                <td class="text-end">₱<?php echo number_format($total_additional_charges, 2); ?></td>
+                            </tr>
+                            <tr class="table-active">
+                                <td><strong>Grand Total</strong></td>
+                                <td class="text-end"><strong>₱<?php echo number_format($grand_total, 2); ?></strong></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Total Amount Paid</strong></td>
+                                <td class="text-end">₱<?php echo number_format($total_paid, 2); ?></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Final Payment</strong></td>
+                                <td class="text-end">₱<?php echo number_format($final_amount, 2); ?></td>
+                            </tr>
+                            <tr class="table-active">
+                                <td><strong>Balance Due</strong></td>
+                                <td class="text-end">
+                                    <strong>₱<?php echo number_format(max(0, $remaining_balance - $final_amount), 2); ?></strong>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    
+                    <?php if (!empty($bills)): ?>
+                    <h6>Billing Details:</h6>
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Period</th>
+                                <th>Amount Due</th>
+                                <th>Amount Paid</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($bills as $bill): ?>
+                            <tr>
+                                <td><?php echo date('F Y', strtotime($bill['billing_month'])); ?></td>
+                                <td>₱<?php echo number_format($bill['amount_due'], 2); ?></td>
+                                <td>₱<?php echo number_format($bill['amount_paid'], 2); ?></td>
+                                <td>
+                                    <span class="badge bg-<?php 
+                                        echo $bill['status'] == 'paid' ? 'success' : 
+                                             ($bill['status'] == 'partial' ? 'warning' : 'secondary');
+                                    ?>">
+                                        <?php echo ucfirst($bill['status']); ?>
+                                    </span>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                    <?php endif; ?>
+                    
+                    <div class="invoice-footer text-muted" style="font-size: 0.9em;">
+                        <p>Thank you for staying with us. We hope to see you again soon!</p>
+                        <p>Checkout completed on: <?php echo date('M d, Y H:i', strtotime($checkout_date)); ?></p>
+                    </div>
+                </div>
+                
+                <div class="mt-3 no-print">
+                    <button class="btn btn-primary" onclick="window.print()">Print Invoice</button>
+                    <a href="admin_checkin_checkout.php" class="btn btn-secondary">Back to Check-in/Checkout</a>
+                </div>
+            </main>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    </body>
+    </html>
+    <?php
+}
+
+?> 

@@ -6,7 +6,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 $customer_id = $_SESSION["customer_id"];
 $success_msg = "";
@@ -282,7 +285,66 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_profile'])) {
                                 <h6 class="mb-0"><i class="bi bi-door-open"></i> Room & Lease Information</h6>
                             </div>
                             <div class="card-body">
-                                <?php if ($customer['room_id']): ?>
+                                <?php
+                                // Get all rooms for this tenant
+                                $rooms_stmt = $conn->prepare("
+                                    SELECT DISTINCT r.room_number, r.room_type, r.rate
+                                    FROM room_requests rr 
+                                    JOIN rooms r ON rr.room_id = r.id 
+                                    WHERE rr.tenant_id = :tenant_id AND rr.status IN ('approved', 'occupied', 'pending_payment')
+                                    ORDER BY r.room_number
+                                ");
+                                $rooms_stmt->execute(['tenant_id' => $customer_id]);
+                                $all_rooms = $rooms_stmt->fetchAll(PDO::FETCH_ASSOC);
+                                
+                                if (!empty($all_rooms)):
+                                    foreach ($all_rooms as $index => $room):
+                                ?>
+                                    <?php if ($index > 0): ?><hr><?php endif; ?>
+                                    <div class="info-section">
+                                        <div class="info-label">Room Number</div>
+                                        <div class="info-value"><?php echo htmlspecialchars($room['room_number']); ?></div>
+                                    </div>
+
+                                    <div class="info-section">
+                                        <div class="info-label">Room Type</div>
+                                        <div class="info-value"><?php echo htmlspecialchars($room['room_type'] ?? 'N/A'); ?></div>
+                                    </div>
+
+                                    <div class="info-section">
+                                        <div class="info-label">Monthly Rent</div>
+                                        <div class="info-value text-success">₱<?php echo number_format($room['rate'] ?? 0, 2); ?></div>
+                                    </div>
+                                <?php 
+                                    endforeach;
+                                    
+                                    // Show move-in date and status for the primary tenant record
+                                    if ($customer['start_date']):
+                                ?>
+                                    <div class="info-section">
+                                        <div class="info-label">Move-in Date</div>
+                                        <div class="info-value"><?php echo date('F d, Y', strtotime($customer['start_date'])); ?></div>
+                                    </div>
+
+                                    <div class="info-section">
+                                        <div class="info-label">Status</div>
+                                        <div class="info-value">
+                                            <span class="badge bg-<?php echo $customer['status'] === 'active' ? 'success' : 'secondary'; ?>">
+                                                <?php echo ucfirst($customer['status']); ?>
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    <?php if ($customer['end_date']): ?>
+                                        <div class="info-section">
+                                            <div class="info-label">Move-out Date</div>
+                                            <div class="info-value"><?php echo date('F d, Y', strtotime($customer['end_date'])); ?></div>
+                                        </div>
+                                    <?php endif; ?>
+                                <?php 
+                                    endif;
+                                elseif ($customer['room_id']):
+                                ?>
                                     <div class="info-section">
                                         <div class="info-label">Room Number</div>
                                         <div class="info-value"><?php echo htmlspecialchars($customer['room_number']); ?></div>

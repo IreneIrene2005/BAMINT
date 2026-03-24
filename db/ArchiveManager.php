@@ -4,7 +4,10 @@
  * Archives old records (payments and maintenance requests) after 1 month
  */
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 class ArchiveManager {
     private $conn;

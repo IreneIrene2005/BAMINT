@@ -2,7 +2,10 @@
 /**
  * Migration: Convert room_requests checkin_date and checkout_date to DATETIME
  */
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 try {
     echo "Converting room_requests dates to DATETIME...\n";

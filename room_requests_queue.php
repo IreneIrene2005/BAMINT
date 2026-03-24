@@ -12,8 +12,42 @@ if (!in_array($_SESSION['role'], ['admin', 'front_desk'])) {
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
 require_once "db/notifications.php";
+
+// Rename $pdo to $conn for compatibility
+$conn = $pdo;
+
+function getRequestPaymentInfo($conn, $tenant_id, $room_id) {
+    $advance_stmt = $conn->prepare("SELECT id, amount_due FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+    $advance_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $room_id]);
+    $advance_bill = $advance_stmt->fetch(PDO::FETCH_ASSOC);
+
+    $paid_amount = 0;
+    $amount_due = 0;
+    $payment_type = 'no_payment';
+
+    if ($advance_bill) {
+        $amount_due = floatval($advance_bill['amount_due']);
+        $pay_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount), 0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_amount > 0 AND payment_status IN ('verified', 'approved')");
+        $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
+        $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
+        $paid_amount = $pay && $pay['paid'] ? floatval($pay['paid']) : 0;
+
+        if ($paid_amount >= $amount_due && $amount_due > 0) {
+            $payment_type = 'full_payment';
+        } elseif ($paid_amount > 0) {
+            $payment_type = 'downpayment';
+        }
+    }
+
+    return [
+        'payment_type' => $payment_type,
+        'paid_amount' => $paid_amount,
+        'amount_due' => $amount_due,
+        'bill_id' => $advance_bill['id'] ?? null
+    ];
+}
 
 $message = '';
 $message_type = '';
@@ -50,6 +84,85 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
         }
     }
+
+    // Group approval for same-tenant concurrent bookings
+    if ($_POST['action'] === 'approve_group') {
+        $tenant_id = intval($_POST['tenant_id'] ?? 0);
+        $request_ids_raw = trim($_POST['request_ids'] ?? '');
+        $request_ids = $request_ids_raw !== '' ? array_filter(array_map('intval', explode(',', $request_ids_raw))) : [];
+
+        if ($tenant_id > 0) {
+            try {
+                $conn->beginTransaction();
+
+                // Fetch eligible requests for this tenant
+                $sql = "SELECT id, room_id, status FROM room_requests WHERE tenant_id = ? AND status = 'pending_payment'";
+                $params = [$tenant_id];
+                if (!empty($request_ids)) {
+                    $in = implode(',', array_fill(0, count($request_ids), '?'));
+                    $sql .= " AND id IN ($in)";
+                    $params = array_merge($params, $request_ids);
+                }
+
+                $stmt = $conn->prepare($sql);
+                $stmt->execute($params);
+                $requests_to_approve = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                if (empty($requests_to_approve)) {
+                    throw new Exception('No eligible requests found for group approval.');
+                }
+
+                $eligible_requests = [];
+                $unpaid_requests = [];
+
+                foreach ($requests_to_approve as $req) {
+                    $payment_info = getRequestPaymentInfo($conn, $tenant_id, $req['room_id']);
+                    if ($payment_info['payment_type'] === 'no_payment') {
+                        $unpaid_requests[] = $req;
+                    }
+                    $eligible_requests[] = $req; // group approval must allow all in selected set
+                }
+
+                if (empty($eligible_requests)) {
+                    throw new Exception('No eligible requests found for approval.');
+                }
+
+                foreach ($eligible_requests as $req) {
+                    $room_stmt = $conn->prepare("UPDATE rooms SET status = 'occupied' WHERE id = :room_id");
+                    $room_stmt->execute(['room_id' => $req['room_id']]);
+
+                    $update_rr = $conn->prepare("UPDATE room_requests SET status = 'approved' WHERE id = :id");
+                    $update_rr->execute(['id' => $req['id']]);
+                }
+
+                // Activate tenant account and keep room reference
+                $first_room_id = $eligible_requests[0]['room_id'] ?? null;
+                $activate = $conn->prepare("UPDATE tenants SET status = 'active', start_date = COALESCE(start_date, CURDATE()), room_id = COALESCE(room_id, :room_id) WHERE id = :id");
+                $activate->execute(['id' => $tenant_id, 'room_id' => $first_room_id]);
+
+                $conn->commit();
+
+                // Notify tenant for each request approved
+                foreach ($requests_to_approve as $req) {
+                    notifyTenantBookingApproved($conn, $tenant_id, $req['id']);
+                }
+
+                if (!empty($unpaid_requests)) {
+                    $message = 'Group approval completed. ' . count($eligible_requests) . ' room(s) approved and occupied (including ' . count($unpaid_requests) . ' unpaid request(s) forced to approved).';
+                } else {
+                    $message = 'Group approval successful. All related rooms are now occupied.';
+                }
+                $message_type = 'success';
+            } catch (Exception $e) {
+                if ($conn->inTransaction()) {
+                    $conn->rollBack();
+                }
+                $message = 'Group approval failed: ' . $e->getMessage();
+                $message_type = 'danger';
+            }
+        }
+    }
+
     $request_id = intval($_POST['request_id'] ?? 0);
     $action = $_POST['action'];
 
@@ -384,6 +497,92 @@ try {
 } catch (Exception $e) {
     $total_count = $pending_count = $pending_payment_count = $approved_count = $rejected_count = $cancelled_count = $archived_count = 0;
 }
+
+// Group requests by tenant and request date (minute precision) to merge same-time bookings
+$grouped_requests = [];
+$request_payment_cache = [];
+
+foreach ($requests as $request) {
+    $group_key = $request['tenant_id'] . '_' . date('Y-m-d_H-i', strtotime($request['request_date']));
+
+    // Compute payment status for each room request
+    $payment_cache_key = $request['tenant_id'] . '_' . $request['room_id'];
+    if (!isset($request_payment_cache[$payment_cache_key])) {
+        $advance_stmt = $conn->prepare("SELECT id, amount_due FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
+        $advance_stmt->execute(['tenant_id' => $request['tenant_id'], 'room_id' => $request['room_id']]);
+        $advance_bill = $advance_stmt->fetch(PDO::FETCH_ASSOC);
+
+        $paid_amount = 0;
+        $amount_due = 0;
+        $payment_type = 'no_payment';
+
+        if ($advance_bill) {
+            $amount_due = floatval($advance_bill['amount_due']);
+            $pay_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount), 0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_amount > 0 AND payment_status IN ('verified', 'approved')");
+            $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
+            $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
+            $paid_amount = $pay && $pay['paid'] ? floatval($pay['paid']) : 0;
+
+            if ($paid_amount >= $amount_due && $amount_due > 0) {
+                $payment_type = 'full_payment';
+            } elseif ($paid_amount > 0) {
+                $payment_type = 'downpayment';
+            }
+        }
+
+        $request_payment_cache[$payment_cache_key] = [
+            'payment_type' => $payment_type,
+            'paid_amount' => $paid_amount,
+            'amount_due' => $amount_due,
+            'bill_id' => $advance_bill['id'] ?? null
+        ];
+    }
+
+    $request['payment_info'] = $request_payment_cache[$payment_cache_key];
+
+    if (!isset($grouped_requests[$group_key])) {
+        $grouped_requests[$group_key] = [
+            'tenant_id' => $request['tenant_id'],
+            'tenant_name' => $request['tenant_info_name'] ?: $request['tenant_name'],
+            'tenant_email' => $request['tenant_info_email'] ?: $request['tenant_email'],
+            'tenant_phone' => $request['tenant_info_phone'] ?: $request['tenant_phone'],
+            'tenant_address' => $request['tenant_info_address'] ?: '',
+            'request_date' => $request['request_date'],
+            'status' => $request['status'],
+            'rooms' => [],
+            'can_approve_all' => false,
+            'request_ids' => []
+        ];
+    }
+
+    $grouped_requests[$group_key]['rooms'][] = $request;
+    $grouped_requests[$group_key]['request_ids'][] = $request['id'];
+
+    if (in_array($request['status'], ['pending_payment', 'pending'], true)) {
+        // Allow group approval when any room in the group is still pending payment/booking
+        $grouped_requests[$group_key]['can_approve_all'] = true;
+    }
+}
+
+// Reindex grouped requests for rendering ease (preserve insertion order)
+$grouped_requests = array_values($grouped_requests);
+
+// Adjust group status: only 'approved' when all requests are approved, otherwise pending_group if any not approved
+foreach ($grouped_requests as $idx => $group) {
+    $statuses = array_column($group['rooms'], 'status');
+    if (!empty($statuses) && count(array_unique($statuses)) === 1 && $statuses[0] === 'approved') {
+        $grouped_requests[$idx]['status'] = 'approved';
+        $grouped_requests[$idx]['can_approve_all'] = false;
+    } elseif (in_array('pending', $statuses, true) || in_array('pending_payment', $statuses, true)) {
+        $grouped_requests[$idx]['status'] = 'pending_group';
+    } elseif (in_array('approved', $statuses, true)) {
+        $grouped_requests[$idx]['status'] = 'approved';
+    } else {
+        $grouped_requests[$idx]['status'] = $group['status'];
+    }
+}
+
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -496,40 +695,7 @@ try {
                 </div>
             <?php endif; ?>
 
-            <!-- Statistics Cards -->
-            <div class="row mb-4">
-                <div class="col-md-2">
-                    <div class="stat-card bg-white">
-                        <div class="stat-value text-primary"><?php echo intval($total_count); ?></div>
-                        <div class="stat-label">Total Requests</div>
-                    </div>
-                </div>
-                <div class="col-md-2">
-                    <div class="stat-card bg-white">
-                        <div class="stat-value text-warning"><?php echo intval($pending_count); ?></div>
-                        <div class="stat-label">Pending</div>
-                    </div>
-                </div>
-                
-                <div class="col-md-2">
-                    <div class="stat-card bg-white">
-                        <div class="stat-value text-success"><?php echo intval($approved_count); ?></div>
-                        <div class="stat-label">Approved</div>
-                    </div>
-                </div>
-                <div class="col-md-2">
-                    <div class="stat-card bg-white">
-                        <div class="stat-value text-danger"><?php echo intval($rejected_count); ?></div>
-                        <div class="stat-label">Rejected</div>
-                    </div>
-                </div>
-                <div class="col-md-2">
-                    <div class="stat-card bg-white">
-                        <div class="stat-value text-secondary"><?php echo intval($archived_count); ?></div>
-                        <div class="stat-label">Archived</div>
-                    </div>
-                </div>
-            </div>
+
 
             <!-- View Toggle (Active vs Archive) -->
             <div class="mb-3 d-flex gap-2">
@@ -546,304 +712,133 @@ try {
                 <a href="room_requests_queue.php" class="btn btn-sm btn-outline-secondary filter-btn <?php echo !isset($_GET['status']) ? 'active' : ''; ?>">
                     <i class="bi bi-funnel"></i> All Requests
                 </a>
-                <a href="room_requests_queue.php?status=pending" class="btn btn-sm btn-outline-warning filter-btn <?php echo (isset($_GET['status']) && $_GET['status'] === 'pending') ? 'active' : ''; ?>">
-                    <i class="bi bi-clock"></i> Pending
-                </a>
-                <a href="room_requests_queue.php?status=approved" class="btn btn-sm btn-outline-success filter-btn <?php echo (isset($_GET['status']) && $_GET['status'] === 'approved') ? 'active' : ''; ?>">
-                    <i class="bi bi-check-circle"></i> Approved
-                </a>
-                <a href="room_requests_queue.php?status=rejected" class="btn btn-sm btn-outline-danger filter-btn <?php echo (isset($_GET['status']) && $_GET['status'] === 'rejected') ? 'active' : ''; ?>">
-                    <i class="bi bi-x-circle"></i> Rejected
-                </a>
             </div>
 
             <!-- Requests List -->
             <div class="card">
                 <div class="card-body">
-                    <?php if (empty($requests)): ?>
+                    <?php if (empty($grouped_requests)): ?>
                         <div class="alert alert-info mb-0">
                             <i class="bi bi-info-circle"></i> No room requests found.
                         </div>
                     <?php else: ?>
-                        <?php
-                        // Initialize payment cache for all requests
-                        $request_payment_cache = [];
-                        foreach ($requests as $request): 
-                        ?>
+                        <?php foreach ($grouped_requests as $group): ?>
                             <div class="request-row">
                                 <div class="row align-items-center">
-                                    <!-- Request Info -->
                                     <div class="col-md-6">
                                         <div class="mb-2">
                                             <h6 class="mb-1">
-                                                <i class="bi bi-person"></i> 
-                                                <strong><?php echo htmlspecialchars($request['tenant_info_name'] ?? $request['tenant_name']); ?></strong>
-                                                &nbsp; <!-- Edit modal removed -->
+                                                <i class="bi bi-person"></i>
+                                                <strong><?php echo htmlspecialchars($group['tenant_name']); ?></strong>
                                             </h6>
                                             <p class="mb-1 text-muted small">
-                                                <i class="bi bi-envelope"></i> 
-                                                <?php echo htmlspecialchars($request['tenant_info_email'] ?? $request['tenant_email']); ?> | 
-                                                <i class="bi bi-telephone"></i> 
-                                                <?php echo htmlspecialchars($request['tenant_info_phone'] ?? $request['tenant_phone']); ?>
+                                                <i class="bi bi-envelope"></i> <?php echo htmlspecialchars($group['tenant_email']); ?> | 
+                                                <i class="bi bi-telephone"></i> <?php echo htmlspecialchars($group['tenant_phone']); ?>
                                             </p>
-                                            <?php if ($request['tenant_info_address']): ?>
+                                            <?php if (!empty($group['tenant_address'])): ?>
                                                 <p class="mb-1 text-muted small">
-                                                    <i class="bi bi-geo-alt"></i> 
-                                                    <?php echo htmlspecialchars($request['tenant_info_address']); ?>
+                                                    <i class="bi bi-geo-alt"></i> <?php echo htmlspecialchars($group['tenant_address']); ?>
                                                 </p>
                                             <?php endif; ?>
                                         </div>
-                                        <div class="room-info">
-                                            <span class="room-number">
-                                                <i class="bi bi-door-closed"></i> 
-                                                <?php echo htmlspecialchars($request['room_number']); ?>
-                                            </span>
-                                            <?php if ($request['room_type']): ?>
-                                                <span class="ms-2 text-muted">
-                                                    (<?php echo htmlspecialchars($request['room_type']); ?>)
-                                                </span>
-                                            <?php endif; ?>
-                                            <div class="mt-1 text-muted small">
-                                                <strong>Rate:</strong> ₱<?php echo number_format($request['rate'], 2); ?> | 
-                                                <strong>Total Cost:</strong> ₱<?php 
-                                                    $total_cost = 0;
-                                                    if (!empty($request['checkin_date']) && !empty($request['checkout_date'])) {
-                                                        $checkin_dt = new DateTime($request['checkin_date']);
-                                                        $checkout_dt = new DateTime($request['checkout_date']);
-                                                        $interval = $checkin_dt->diff($checkout_dt);
-                                                        $nights = (int)$interval->days;
-                                                        $total_cost = $nights * floatval($request['rate']);
-                                                    }
-                                                    echo number_format($total_cost, 2);
-                                                ?> |
-                                                <strong>Room Status:</strong> 
-                                                <span class="badge bg-<?php 
-                                                    if ($request['status'] === 'approved') { 
-                                                        echo 'danger';
-                                                    } elseif ($request['status'] === 'cancelled') {
-                                                        echo 'dark';
-                                                    } else {
-                                                        echo 'info';
-                                                    }
-                                                ?>">
-                                                    <?php 
-                                                        if ($request['status'] === 'approved') {
-                                                            echo 'Occupied';
-                                                        } elseif ($request['status'] === 'cancelled') {
-                                                            echo 'Cancelled';
-                                                        } else {
-                                                            echo 'Booked';
-                                                        }
-                                                    ?>
-                                                </span>
-                                            </div>
-                                            <div class="mt-1 text-muted small">
-                                                <strong>Occupants:</strong> <?php echo intval($request['tenant_count']); ?> person(s)
-                                            </div>
-                                            <div class="mt-1 text-muted small">
-                                                <strong>Check-in:</strong> <?php
-                                                    if (!empty($request['checkin_date'])) {
-                                                        $ci = date('M d, Y', strtotime($request['checkin_date']));
-                                                        if (!empty($request['checkin_time']) && $request['checkin_time'] !== '00:00:00') {
-                                                            $ci .= ' at ' . date('g:i A', strtotime($request['checkin_time']));
-                                                        }
-                                                        echo $ci;
-                                                    } else {
-                                                        echo '<span class="text-danger">Missing</span>';
-                                                    }
-                                                ?>
-                                                <strong>Check-out:</strong> <?php
-                                                    if (!empty($request['checkout_date'])) {
-                                                        $co = date('M d, Y', strtotime($request['checkout_date']));
-                                                        if (!empty($request['checkout_time']) && $request['checkout_time'] !== '00:00:00') {
-                                                            $co .= ' at ' . date('g:i A', strtotime($request['checkout_time']));
-                                                        }
-                                                        echo $co;
-                                                    } else {
-                                                        echo '<span class="text-danger">Missing</span>';
-                                                    }
-                                                ?>
-                                            </div>
-                                            <?php if ($request['notes']): ?>
-                                                <div class="mt-2">
-                                                    <p class="mb-0 text-muted small"><strong>Notes:</strong> <?php echo htmlspecialchars($request['notes']); ?></p>
-                                                </div>
-                                            <?php endif; ?>
-                                            <div class="mt-1 text-muted small">
-                                                <i class="bi bi-calendar"></i> 
-                                                Requested: <?php echo date('M d, Y \a\t H:i A', strtotime($request['request_date'])); ?>
-                                            </div>
+                                        <?php foreach ($group['rooms'] as $request): ?>
                                             <?php
-                                            // Calculate payment status once for reuse - works for both advance payments and walk-in
-                                            $cache_key = $request['tenant_id'] . '_' . $request['room_id'];
-                                            
-                                            if (!isset($request_payment_cache[$cache_key])) {
-                                                $advance_bill = null;
-                                                $advance_stmt = $conn->prepare("SELECT id, amount_due FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id ORDER BY id DESC LIMIT 1");
-                                                $advance_stmt->execute(['tenant_id' => $request['tenant_id'], 'room_id' => $request['room_id']]);
-                                                $advance_bill = $advance_stmt->fetch(PDO::FETCH_ASSOC);
-                                                
-                                                $paid_amount = 0;
-                                                $amount_due = 0;
-                                                $payment_type = 'no_payment'; // no_payment, downpayment, full_payment
-                                                
-                                                if ($advance_bill) {
-                                                    $amount_due = floatval($advance_bill['amount_due']);
-                                                    $pay_stmt = $conn->prepare("SELECT COALESCE(SUM(payment_amount), 0) as paid FROM payment_transactions WHERE bill_id = :bill_id AND payment_amount > 0 AND payment_status IN ('verified', 'approved')");
-                                                    $pay_stmt->execute(['bill_id' => $advance_bill['id']]);
-                                                    $pay = $pay_stmt->fetch(PDO::FETCH_ASSOC);
-                                                    $paid_amount = $pay && $pay['paid'] ? floatval($pay['paid']) : 0;
-                                                    
-                                                    // Determine payment type with proper comparison
-                                                    if ($paid_amount >= $amount_due && $amount_due > 0) {
-                                                        $payment_type = 'full_payment';
-                                                    } elseif ($paid_amount > 0) {
-                                                        $payment_type = 'downpayment';
-                                                    }
+                                                $total_cost = 0;
+                                                if (!empty($request['checkin_date']) && !empty($request['checkout_date'])) {
+                                                    $checkin_dt = new DateTime($request['checkin_date']);
+                                                    $checkout_dt = new DateTime($request['checkout_date']);
+                                                    $interval = $checkin_dt->diff($checkout_dt);
+                                                    $nights = (int)$interval->days;
+                                                    $total_cost = $nights * floatval($request['rate']);
                                                 }
-                                                
-                                                $request_payment_cache[$cache_key] = [
-                                                    'payment_type' => $payment_type,
-                                                    'paid_amount' => $paid_amount,
-                                                    'amount_due' => $amount_due,
-                                                    'bill_id' => $advance_bill['id'] ?? null
-                                                ];
-                                            }
-                                            
-                                            $payment_info = $request_payment_cache[$cache_key];
-                                            $payment_type = $payment_info['payment_type'];
-                                            $paid_amount = $payment_info['paid_amount'];
-                                            $amount_due = $payment_info['amount_due'];
-                                            
-                                            // Display payment type badge
-                                            if ($payment_type === 'full_payment') {
-                                                echo '<div class="mt-1 text-muted small"><strong>Payment Type:</strong> <span class="badge bg-success">Full Payment</span></div>';
-                                            } elseif ($payment_type === 'downpayment') {
-                                                echo '<div class="mt-1 text-muted small"><strong>Payment Type:</strong> <span class="badge bg-info">Downpayment</span></div>';
-                                            } else {
-                                                echo '<div class="mt-2"><span class="badge bg-warning text-dark">No Payment Yet</span></div>';
-                                            }
+                                                $status_label = 'Booked';
+                                                $status_badge = 'info';
+                                                if ($request['status'] === 'approved') {
+                                                    $status_label = 'Occupied';
+                                                    $status_badge = 'danger';
+                                                } elseif ($request['status'] === 'cancelled') {
+                                                    $status_label = 'Cancelled';
+                                                    $status_badge = 'dark';
+                                                }
                                             ?>
-                                        </div>
+                                            <div class="room-info border rounded p-2 mb-2">
+                                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                                    <div>
+                                                        <strong class="room-number"><?php echo htmlspecialchars($request['room_number']); ?></strong>
+                                                        <?php if ($request['room_type']): ?>
+                                                            <span class="text-muted">(<?php echo htmlspecialchars($request['room_type']); ?>)</span>
+                                                        <?php endif; ?>
+                                                    </div>
+                                                    <span class="badge bg-<?php echo $status_badge; ?>"><?php echo $status_label; ?></span>
+                                                </div>
+                                                <div class="small text-muted">
+                                                    Rate: ₱<?php echo number_format($request['rate'], 2); ?> | Total Cost: ₱<?php echo number_format($total_cost, 2); ?> | Occupants: <?php echo intval($request['tenant_count']); ?>
+                                                </div>
+                                                <div class="small text-muted">
+                                                    Check-in: <?php echo !empty($request['checkin_date']) ? date('M d, Y', strtotime($request['checkin_date'])) . ( !empty($request['checkin_time']) && $request['checkin_time'] !== '00:00:00' ? ' at '.date('g:i A', strtotime($request['checkin_time'])) : '' ) : '<span class="text-danger">Missing</span>'; ?>
+                                                    <br>
+                                                    Check-out: <?php echo !empty($request['checkout_date']) ? date('M d, Y', strtotime($request['checkout_date'])) . ( !empty($request['checkout_time']) && $request['checkout_time'] !== '00:00:00' ? ' at '.date('g:i A', strtotime($request['checkout_time'])) : '' ) : '<span class="text-danger">Missing</span>'; ?>
+                                                </div>
+                                                <?php if (!empty($request['notes'])): ?>
+                                                    <div class="small text-muted mt-1"><strong>Notes:</strong> <?php echo htmlspecialchars($request['notes']); ?></div>
+                                                <?php endif; ?>
+                                                <div class="small text-muted mt-1">Requested: <?php echo date('M d, Y \a\t H:i A', strtotime($request['request_date'])); ?></div>
+                                                <div class="small mt-1">
+                                                    <?php $payment_info = $request['payment_info']; ?>
+                                                    <?php if ($payment_info['payment_type'] === 'full_payment'): ?>
+                                                        <span class="badge bg-success">Full Payment</span>
+                                                    <?php elseif ($payment_info['payment_type'] === 'downpayment'): ?>
+                                                        <span class="badge bg-info">Downpayment</span>
+                                                    <?php else: ?>
+                                                        <span class="badge bg-warning text-dark">No Payment Yet</span>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+                                        <?php endforeach; ?>
                                     </div>
 
-                                    <!-- Status and Actions -->
                                     <div class="col-md-6">
                                         <div class="d-flex flex-column align-items-end h-100">
                                             <div class="mb-3">
-                                                <span class="status-badge status-<?php echo htmlspecialchars(strtolower($request['status'])); ?>">
+                                                <span class="status-badge status-<?php echo htmlspecialchars(strtolower($group['status'] === 'pending_group' ? 'pending' : $group['status'])); ?>">
                                                     <i class="bi bi-info-circle"></i>
-                                                    <?php 
-                                                        $status_labels = [
-                                                            'pending' => 'Pending Review',
-                                                            'pending_payment' => 'Awaiting Payment',
-                                                            'approved' => 'Approved',
-                                                            'rejected' => 'Rejected'
-                                                        ];
-                                                        // Show status based on cached payment info
-                                                        if ($request['status'] === 'pending_payment') {
-                                                            $cache_key = $request['tenant_id'] . '_' . $request['room_id'];
-                                                            if (isset($request_payment_cache[$cache_key]) && $request_payment_cache[$cache_key]['payment_type'] !== 'no_payment') {
-                                                                // Payment made, no status shown (admin action buttons will show)
-                                                                echo '';
-                                                            } else {
-                                                                echo $status_labels[$request['status']];
-                                                            }
+                                                    <?php
+                                                        if ($group['status'] === 'approved') {
+                                                            echo 'Approved';
+                                                        } elseif ($group['status'] === 'pending_group') {
+                                                            echo 'Pending Booking Group';
                                                         } else {
-                                                            echo $status_labels[$request['status']] ?? ucfirst($request['status']);
+                                                            echo ucfirst($group['status']);
                                                         }
                                                     ?>
                                                 </span>
-                                                <!-- Details modal removed -->
-                                                </span>
                                             </div>
 
-                                            <?php
-                                            // Show approve/reject buttons if payment is made and status is still pending_payment
-                                            $show_approve = false;
-                                            if ($request['status'] === 'pending_payment') {
-                                                $cache_key = $request['tenant_id'] . '_' . $request['room_id'];
-                                                if (isset($request_payment_cache[$cache_key]) && $request_payment_cache[$cache_key]['payment_type'] !== 'no_payment') {
-                                                    $show_approve = true;
-                                                }
-                                            }
-                                            if ($show_approve) {
-                                                // Show to admin and front_desk
-                                                if (isset($_SESSION['role']) && in_array($_SESSION['role'], ['admin', 'front_desk'])) {
-                                                    ?>
-                                                    <div class="action-buttons">
-                                                        <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to approve this request?');">
-                                                            <input type="hidden" name="action" value="approve">
-                                                            <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
-                                                            <button type="submit" class="btn btn-sm btn-success">
-                                                                <i class="bi bi-check-circle"></i> Approve
-                                                            </button>
-                                                        </form>
-                                                        <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Archive this request?');">
-                                                            <input type="hidden" name="action" value="archive_request">
-                                                            <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
-                                                            <button type="submit" class="btn btn-sm btn-outline-secondary">
-                                                                <i class="bi bi-archive"></i> Archive
-                                                            </button>
-                                                        </form>
-                                                        <form method="POST" style="display: inline; margin-left:4px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
-                                                            <input type="hidden" name="action" value="delete_request">
-                                                            <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
-                                                            <button type="submit" class="btn btn-sm btn-outline-danger">
-                                                                <i class="bi bi-trash"></i> Delete
-                                                            </button>
-                                                        </form>
-                                                    </div>
-                                                    <?php
-                                                }
-                                            } elseif ($request['status'] === 'approved') {
-                                                echo '<span class="badge bg-success">Approved</span>';
-                                                if (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') {
-                                                    ?>
-                                                    <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Archive this request?');">
-                                                        <input type="hidden" name="action" value="archive_request">
-                                                        <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
-                                                        <button type="submit" class="btn btn-sm btn-outline-secondary">
-                                                            <i class="bi bi-archive"></i> Archive
-                                                        </button>
-                                                    </form>
-                                                    <form method="POST" style="display: inline; margin-left:4px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
-                                                        <input type="hidden" name="action" value="delete_request">
-                                                        <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
-                                                        <button type="submit" class="btn btn-sm btn-outline-danger">
-                                                            <i class="bi bi-trash"></i> Delete
-                                                        </button>
-                                                    </form>
-                                                    <?php
-                                                }
-                                            } elseif ($request['status'] === 'rejected') {
-                                                echo '<span class="badge bg-danger">Rejected</span>';
-                                                if (isset($_SESSION['role']) && $_SESSION['role'] === 'admin') {
-                                                    ?>
-                                                    <form method="POST" style="display: inline; margin-left:8px;" onsubmit="return confirm('Archive this request?');">
-                                                        <input type="hidden" name="action" value="archive_request">
-                                                        <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
-                                                        <button type="submit" class="btn btn-sm btn-outline-secondary">
-                                                            <i class="bi bi-archive"></i> Archive
-                                                        </button>
-                                                    </form>
-                                                    <form method="POST" style="display: inline; margin-left:4px;" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
-                                                        <input type="hidden" name="action" value="delete_request">
-                                                        <input type="hidden" name="request_id" value="<?php echo htmlspecialchars($request['id']); ?>">
-                                                        <button type="submit" class="btn btn-sm btn-outline-danger">
-                                                            <i class="bi bi-trash"></i> Delete
-                                                        </button>
-                                                    </form>
-                                                    <?php
-                                                }
-                                            }
-                                            ?>
-                                        <!-- Details modal removed -->
-                        <!-- Edit modal removed -->
+                                            <?php if ($group['can_approve_all'] && in_array($_SESSION['role'] ?? '', ['admin', 'front_desk'])): ?>
+                                                <form method="POST" style="display: inline;" onsubmit="return confirm('Approve all requests in this group?');">
+                                                    <input type="hidden" name="action" value="approve_group">
+                                                    <input type="hidden" name="tenant_id" value="<?php echo intval($group['tenant_id']); ?>">
+                                                    <input type="hidden" name="request_ids" value="<?php echo htmlspecialchars(implode(',', $group['request_ids'])); ?>">
+                                                    <button type="submit" class="btn btn-sm btn-success">
+                                                        <i class="bi bi-check-circle"></i> Approve Group
+                                                    </button>
+                                                </form>
+                                            <?php endif; ?>
+
+                                            <?php if (in_array($_SESSION['role'] ?? '', ['admin', 'front_desk'])): ?>
+                                                <form method="POST" style="display: inline; margin-top: 8px;" onsubmit="return confirm('Archive all requests in this group?');">
+                                                    <input type="hidden" name="action" value="archive_request">
+                                                    <input type="hidden" name="request_id" value="<?php echo intval($group['request_ids'][0]); ?>">
+                                                    <button type="submit" class="btn btn-sm btn-outline-secondary">
+                                                        <i class="bi bi-archive"></i> Archive First
+                                                    </button>
+                                                </form>
+                                            <?php endif; ?>
+
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                        <!-- Payment history modal removed -->
                         <?php endforeach; ?>
                     <?php endif; ?>
                 </div>

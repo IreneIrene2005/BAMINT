@@ -238,8 +238,8 @@ if ($staffRes) {
         <?php include 'templates/sidebar.php'; ?>
         <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
             <div class="header-banner mb-4">
-                <h1 class="h2 mb-0"><i class="bi bi-gift"></i> Amenities Queue</h1>
-                <p class="mb-0">View, update, and manage all amenity requests and history.</p>
+                <h1 class="h2"><i class="bi bi-gift"></i> Amenities Queue</h1>
+                <small class="text-muted"><?php echo intval($counts['pending_count'] ?? 0); ?> request<?php echo intval($counts['pending_count'] ?? 0) !== 1 ? 's' : ''; ?> pending</small>
             </div>
 
             <!-- Messages/Alerts -->
@@ -346,12 +346,6 @@ if ($staffRes) {
                                                         <i class="bi bi-archive"></i>
                                                     </button>
                                                 </form>
-                                                <form method="post" class="d-inline" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
-                                                    <input type="hidden" name="request_id" value="<?= $row['id'] ?>">
-                                                    <button type="submit" name="action" value="delete_amenity" class="btn btn-outline-danger btn-sm" title="Delete">
-                                                        <i class="bi bi-trash"></i>
-                                                    </button>
-                                                </form>
                                             <?php endif; ?>
 
                                             <?php if ($status_norm !== 'completed'): ?>
@@ -422,7 +416,15 @@ if ($staffRes) {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <?php if ($archived_result && $archived_result->num_rows > 0): $i = 1; while ($row = $archived_result->fetch_assoc()): ?>
+                                    <?php
+                                    $archived_rows = [];
+                                    if ($archived_result) {
+                                        $archived_rows = $archived_result->fetchAll(PDO::FETCH_ASSOC);
+                                    }
+                                    if (!empty($archived_rows)):
+                                        $i = 1;
+                                        foreach ($archived_rows as $row):
+                                    ?>
                                     <tr>
                                         <td><?= $i++ ?></td>
                                         <td><?= htmlspecialchars($row['room_number']) ?></td>
@@ -455,17 +457,10 @@ if ($staffRes) {
                                                         <i class="bi bi-arrow-counterclockwise"></i>
                                                     </button>
                                                 </form>
-                                                <!-- Delete Button -->
-                                                <form method="post" class="d-inline" onsubmit="return confirm('Permanently delete this request? This cannot be undone.');">
-                                                    <input type="hidden" name="request_id" value="<?= $row['id'] ?>">
-                                                    <button type="submit" name="action" value="delete_amenity" class="btn btn-sm btn-outline-danger" title="Delete">
-                                                        <i class="bi bi-trash"></i>
-                                                    </button>
-                                                </form>
                                             </div>
                                         </td>
                                     </tr>
-                                    <?php endwhile; else: ?>
+                                    <?php endforeach; else: ?>
                                     <tr><td colspan="9" class="text-center text-muted">No archived amenity requests.</td></tr>
                                     <?php endif; ?>
                                 </tbody>
@@ -498,8 +493,13 @@ $modal_sql = "SELECT mr.*, r.room_number, t.name AS customer_name, t.email, t.ph
     
 $modal_result = $conn->query($modal_sql);
 
-if ($modal_result && $modal_result->num_rows > 0) {
-    while ($row = $modal_result->fetch_assoc()) {
+$modal_rows = [];
+if ($modal_result) {
+    $modal_rows = $modal_result->fetchAll(PDO::FETCH_ASSOC);
+}
+
+if (!empty($modal_rows)) {
+    foreach ($modal_rows as $row) {
         if (empty($row['id'])) continue; // Skip if no ID
         ?>
         <!-- Details Modal for Request <?= intval($row['id']) ?> -->

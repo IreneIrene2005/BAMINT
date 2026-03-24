@@ -13,130 +13,98 @@ if (isset($_SESSION["loggedin"]) && $_SESSION["loggedin"] === true) {
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
 
-$email = $username = $password = "";
-$email_err = $username_err = $password_err = $login_err = "";
-$role = isset($_GET['role']) ? $_GET['role'] : 'admin'; // Default to admin
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
+
+$email = $username = $identifier = $password = "";
+$email_err = $username_err = $identifier_err = $password_err = $login_err = "";
 
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $role = isset($_POST['role']) ? $_POST['role'] : 'admin';
+    // unified login: admin/front_desk/tenant
+    if (empty(trim($_POST["identifier"]))) {
+        $identifier_err = "Please enter username or email.";
+    } else {
+        $identifier = trim($_POST["identifier"]);
+    }
 
-    if ($role === 'admin' || $role === 'front_desk') {
-        // Admin/Front Desk Login
-        if (empty(trim($_POST["username"]))) {
-            $username_err = "Please enter username.";
-        } else {
-            $username = trim($_POST["username"]);
-        }
+    if (empty(trim($_POST["password"]))) {
+        $password_err = "Please enter your password.";
+    } else {
+        $password = trim($_POST["password"]);
+    }
 
-        if (empty(trim($_POST["password"]))) {
-            $password_err = "Please enter your password.";
-        } else {
-            $password = trim($_POST["password"]);
-        }
+    if (empty($identifier_err) && empty($password_err)) {
+        // First try admin/front_desk by username
+        $sql = "SELECT id, username, password, role FROM admins WHERE username = :identifier LIMIT 1";
+        if ($stmt = $conn->prepare($sql)) {
+            $stmt->bindParam(":identifier", $identifier, PDO::PARAM_STR);
+            if ($stmt->execute()) {
+                if ($stmt->rowCount() == 1 && ($row = $stmt->fetch())) {
+                    $id = $row["id"];
+                    $hashed_password = $row["password"];
+                    $user_role = $row["role"] ?? 'admin';
 
-        if (empty($username_err) && empty($password_err)) {
-            $sql = "SELECT id, username, password, role FROM admins WHERE username = :username";
+                    if (password_verify($password, $hashed_password)) {
+                        $_SESSION["loggedin"] = true;
+                        $_SESSION["admin_id"] = $id;
+                        $_SESSION["username"] = $identifier;
+                        $_SESSION["role"] = $user_role;
 
-            if ($stmt = $conn->prepare($sql)) {
-                $stmt->bindParam(":username", $param_username, PDO::PARAM_STR);
-                $param_username = $username;
+                        if ($user_role === 'admin') {
+                            header("location: dashboard.php");
+                        } else if ($user_role === 'front_desk') {
+                            header("location: front_desk_dashboard.php");
+                        } else {
+                            // fallback
+                            header("location: index.php");
+                        }
+                        exit;
+                    } else {
+                        $password_err = "The password you entered was not valid.";
+                    }
+                } else {
+                    // not found in admins, try tenant accounts by email
+                    // No PDOStatement::close() in PDO. Just move to tenant query.
+                    $sqlTenant = "SELECT ta.id, ta.tenant_id, ta.password, COALESCE(ta.name, t.name) AS name FROM tenant_accounts ta 
+                        LEFT JOIN tenants t ON ta.tenant_id = t.id 
+                        WHERE ta.email = :identifier LIMIT 1";
+                    if ($stmtTenant = $conn->prepare($sqlTenant)) {
+                        $stmtTenant->bindParam(":identifier", $identifier, PDO::PARAM_STR);
+                        if ($stmtTenant->execute()) {
+                            if ($stmtTenant->rowCount() == 1 && ($rowTenant = $stmtTenant->fetch())) {
+                                $id = $rowTenant["id"];
+                                $tenant_id = $rowTenant["tenant_id"];
+                                $name = $rowTenant["name"];
+                                $hashed_password = $rowTenant["password"];
 
-                if ($stmt->execute()) {
-                    if ($stmt->rowCount() == 1) {
-                        if ($row = $stmt->fetch()) {
-                            $id = $row["id"];
-                            $hashed_password = $row["password"];
-                            $user_role = $row["role"] ?? 'admin'; // Default to admin if role not set
-                            
-                            if (password_verify($password, $hashed_password)) {
-                                // Check if user role matches requested role
-                                if ($role === 'admin' && $user_role !== 'admin') {
-                                    $username_err = "This account does not have admin privileges.";
-                                } else if ($role === 'front_desk' && $user_role !== 'front_desk') {
-                                    $username_err = "This account does not have front desk privileges.";
-                                } else {
+                                if (password_verify($password, $hashed_password)) {
                                     $_SESSION["loggedin"] = true;
-                                    $_SESSION["admin_id"] = $id;
-                                    $_SESSION["username"] = $username;
-                                    $_SESSION["role"] = $user_role;
+                                    $_SESSION["id"] = $id;
+                                    $_SESSION["tenant_id"] = $tenant_id;
+                                    $_SESSION["name"] = $name;
+                                    $_SESSION["email"] = $identifier;
+                                    $_SESSION["role"] = "tenant";
 
-                                    if ($user_role === 'admin') {
-                                        header("location: dashboard.php");
-                                    } else if ($user_role === 'front_desk') {
-                                        header("location: front_desk_dashboard.php");
-                                    } else {
-                                        header("location: index.php");
-                                    }
+                                    header("location: tenant_dashboard.php");
                                     exit;
+                                } else {
+                                    $password_err = "The password you entered was not valid.";
                                 }
                             } else {
-                                $password_err = "The password you entered was not valid.";
+                                $login_err = "No account found with that username/email.";
                             }
+                        } else {
+                            $login_err = "Oops! Something went wrong. Please try again later.";
                         }
-                    } else {
-                        $username_err = "No account found with that username.";
+                        unset($stmtTenant);
                     }
-                } else {
-                    $login_err = "Oops! Something went wrong. Please try again later.";
                 }
-                unset($stmt);
+            } else {
+                $login_err = "Oops! Something went wrong. Please try again later.";
             }
-        }
-    } else {
-        // Tenant Login
-        if (empty(trim($_POST["email"]))) {
-            $email_err = "Please enter your email.";
-        } else {
-            $email = trim($_POST["email"]);
-        }
-
-        if (empty(trim($_POST["password"]))) {
-            $password_err = "Please enter your password.";
-        } else {
-            $password = trim($_POST["password"]);
-        }
-
-        if (empty($email_err) && empty($password_err)) {
-                $sql = "SELECT ta.id, ta.tenant_id, ta.password, COALESCE(ta.name, t.name) AS name FROM tenant_accounts ta 
-                    LEFT JOIN tenants t ON ta.tenant_id = t.id 
-                    WHERE ta.email = :email";
-
-            if ($stmt = $conn->prepare($sql)) {
-                $stmt->bindParam(":email", $param_email, PDO::PARAM_STR);
-                $param_email = $email;
-
-                if ($stmt->execute()) {
-                    if ($stmt->rowCount() == 1) {
-                        if ($row = $stmt->fetch()) {
-                            $id = $row["id"];
-                            $tenant_id = $row["tenant_id"];
-                            $name = $row["name"];
-                            $hashed_password = $row["password"];
-                            
-                            if (password_verify($password, $hashed_password)) {
-                                $_SESSION["loggedin"] = true;
-                                $_SESSION["id"] = $id;
-                                $_SESSION["tenant_id"] = $tenant_id;
-                                $_SESSION["name"] = $name;
-                                $_SESSION["email"] = $email;
-                                $_SESSION["role"] = "tenant";
-
-                                header("location: tenant_dashboard.php");
-                                exit;
-                            } else {
-                                $password_err = "The password you entered was not valid.";
-                            }
-                        }
-                    } else {
-                        $email_err = "No tenant account found with that email.";
-                    }
-                } else {
-                    $login_err = "Oops! Something went wrong. Please try again later.";
-                }
-                unset($stmt);
-            }
+            unset($stmt);
         }
     }
 
@@ -287,32 +255,17 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             <p>Hotel Online Booking System</p>
         </div>
 
-        <!-- Role Selection Tabs -->
-        <div class="role-tabs">
-            <button type="button" class="role-tab active" data-role="admin" onclick="switchRole('admin')">
-                <i class="bi bi-shield-check"></i> Admin
-            </button>
-            <button type="button" class="role-tab" data-role="front_desk" onclick="switchRole('front_desk')">
-                <i class="bi bi-person-badge"></i> Front Desk
-            </button>
-            <button type="button" class="role-tab" data-role="tenant" onclick="switchRole('tenant')">
-                <i class="bi bi-person"></i> Customer
-            </button>
-        </div>
-
         <?php if (!empty($login_err)): ?>
             <div class="error-message"><?php echo htmlspecialchars($login_err); ?></div>
         <?php endif; ?>
 
-        <!-- Admin Login Form -->
-        <form id="adminForm" class="form-section active" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
-            <input type="hidden" name="role" value="admin">
-
-            <div class="form-group <?php echo (!empty($username_err)) ? 'has-error' : ''; ?>">
-                <label class="form-label">Username</label>
-                <input type="text" name="username" class="form-control" value="<?php echo htmlspecialchars($username); ?>" placeholder="Enter your username">
-                <?php if (!empty($username_err)): ?>
-                    <span class="text-danger"><?php echo htmlspecialchars($username_err); ?></span>
+        <!-- Unified Login Form -->
+        <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
+            <div class="form-group <?php echo (!empty($identifier_err)) ? 'has-error' : ''; ?>">
+                <label class="form-label">Username or Email</label>
+                <input type="text" name="identifier" class="form-control" value="<?php echo htmlspecialchars($identifier); ?>" placeholder="Enter your username or email">
+                <?php if (!empty($identifier_err)): ?>
+                    <span class="text-danger"><?php echo htmlspecialchars($identifier_err); ?></span>
                 <?php endif; ?>
             </div>
 
@@ -324,55 +277,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 <?php endif; ?>
             </div>
 
-            <button type="submit" class="btn-login">Login as Admin</button>
-
-            <!-- Admin account creation link intentionally removed to prevent admin self-registration -->
-        </form>
-
-        <!-- Front Desk Login Form -->
-        <form id="front_deskForm" class="form-section" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
-            <input type="hidden" name="role" value="front_desk">
-
-            <div class="form-group <?php echo (!empty($username_err) && $role === 'front_desk') ? 'has-error' : ''; ?>">
-                <label class="form-label">Username</label>
-                <input type="text" name="username" class="form-control" value="<?php echo htmlspecialchars($username); ?>" placeholder="Enter your username">
-                <?php if (!empty($username_err) && $role === 'front_desk'): ?>
-                    <span class="text-danger"><?php echo htmlspecialchars($username_err); ?></span>
-                <?php endif; ?>
-            </div>
-
-            <div class="form-group <?php echo (!empty($password_err) && $role === 'front_desk') ? 'has-error' : ''; ?>">
-                <label class="form-label">Password</label>
-                <input type="password" name="password" class="form-control" placeholder="Enter your password">
-                <?php if (!empty($password_err) && $role === 'front_desk'): ?>
-                    <span class="text-danger"><?php echo htmlspecialchars($password_err); ?></span>
-                <?php endif; ?>
-            </div>
-
-            <button type="submit" class="btn-login">Login as Front Desk</button>
-        </form>
-
-        <!-- Tenant Login Form -->
-        <form id="tenantForm" class="form-section" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
-            <input type="hidden" name="role" value="tenant">
-
-            <div class="form-group <?php echo (!empty($email_err)) ? 'has-error' : ''; ?>">
-                <label class="form-label">Email</label>
-                <input type="email" name="email" class="form-control" value="<?php echo htmlspecialchars($email); ?>" placeholder="Enter your email">
-                <?php if (!empty($email_err)): ?>
-                    <span class="text-danger"><?php echo htmlspecialchars($email_err); ?></span>
-                <?php endif; ?>
-            </div>
-
-            <div class="form-group <?php echo (!empty($password_err)) ? 'has-error' : ''; ?>">
-                <label class="form-label">Password</label>
-                <input type="password" name="password" class="form-control" placeholder="Enter your password">
-                <?php if (!empty($password_err)): ?>
-                    <span class="text-danger"><?php echo htmlspecialchars($password_err); ?></span>
-                <?php endif; ?>
-            </div>
-
-            <button type="submit" class="btn-login">Login as Customer</button>
+            <button type="submit" class="btn-login">Login</button>
 
             <div class="link-register">
                 <p>Don't have an account? <a href="register.php?role=tenant">Create customer account</a></p>

@@ -6,8 +6,11 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION
     exit;
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
 require_once "db/notifications.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 $tenant_id = $_SESSION["tenant_id"];
 // Alias for compatibility: tenant_id and customer_id are the same
@@ -166,27 +169,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'request_room') {
     // Debug: Log received POST data for troubleshooting
     file_put_contents('room_request_debug.log', date('Y-m-d H:i:s') . "\n" . print_r($_POST, true) . "\n\n", FILE_APPEND);
-    // Check if tenant already has a room
-    if ($tenant_has_room) {
-        $message = "⚠️ You already have a room assigned. You cannot request another room while you have an active room.";
-        $message_type = "warning";
-    }
-    else {
-        $room_id = isset($_POST['room_id']) ? intval($_POST['room_id']) : 0;
-        $tenant_count = isset($_POST['tenant_count']) ? intval($_POST['tenant_count']) : 1;
-        $tenant_info_name = isset($_POST['tenant_info_name']) ? trim($_POST['tenant_info_name']) : '';
-        $tenant_info_email = isset($_POST['tenant_info_email']) ? trim($_POST['tenant_info_email']) : '';
-        $tenant_info_phone = isset($_POST['tenant_info_phone']) ? trim($_POST['tenant_info_phone']) : '';
-        $tenant_info_address = isset($_POST['tenant_info_address']) ? trim($_POST['tenant_info_address']) : '';
-        $notes = isset($_POST['notes']) ? trim($_POST['notes']) : '';
+    // Allow customers to book multiple rooms
+    $room_id = isset($_POST['room_id']) ? intval($_POST['room_id']) : 0;
+    $tenant_count = isset($_POST['tenant_count']) ? intval($_POST['tenant_count']) : 1;
+    $tenant_info_name = isset($_POST['tenant_info_name']) ? trim($_POST['tenant_info_name']) : '';
+    $tenant_info_email = isset($_POST['tenant_info_email']) ? trim($_POST['tenant_info_email']) : '';
+    $tenant_info_phone = isset($_POST['tenant_info_phone']) ? trim($_POST['tenant_info_phone']) : '';
+    $tenant_info_address = isset($_POST['tenant_info_address']) ? trim($_POST['tenant_info_address']) : '';
+    $notes = isset($_POST['notes']) ? trim($_POST['notes']) : '';
 
-        // Validate required fields
-        $errors = [];
-        if (empty($tenant_info_name)) $errors[] = "Name is required";
-        if (empty($tenant_info_email) || !filter_var($tenant_info_email, FILTER_VALIDATE_EMAIL)) $errors[] = "Valid email is required";
-        if (empty($tenant_info_phone)) $errors[] = "Phone number is required";
-        if (empty($tenant_info_address)) $errors[] = "Address is required";
-        if ($tenant_count < 1) $errors[] = "Number of occupants must be at least 1";
+    // Validate required fields
+    $errors = [];
+    if (empty($tenant_info_name)) $errors[] = "Name is required";
+    if (empty($tenant_info_email) || !filter_var($tenant_info_email, FILTER_VALIDATE_EMAIL)) $errors[] = "Valid email is required";
+    if (empty($tenant_info_phone)) $errors[] = "Phone number is required";
+    if (empty($tenant_info_address)) $errors[] = "Address is required";
+    if ($tenant_count < 1) $errors[] = "Number of occupants must be at least 1";
 
         // Get room details to validate occupancy limits
         if ($room_id > 0 && empty($errors)) {
@@ -398,7 +396,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $message = "Error submitting request: " . $e->getMessage();
                 $message_type = "danger";
             }
-        }
     }
 }
 
@@ -431,7 +428,7 @@ try {
 // Fetch tenant's existing requests
 try {
     $stmt = $conn->prepare("
-        SELECT rr.*, r.room_number, r.rate
+        SELECT rr.*, r.room_number, r.rate, r.room_type
         FROM room_requests rr
         JOIN rooms r ON rr.room_id = r.id
         WHERE rr.tenant_id = :tenant_id
@@ -670,72 +667,104 @@ try {
                     </div>
                 <?php endif; ?>
 
-                <!-- My Requests Section (Improved UI) - Only show if no approved payment -->
-                <?php if (!$has_approved_payment): ?>
+                <!-- My Requests Section (Improved UI) -->
                 <div class="col-12 mt-4 mb-4">
                     <div class="card shadow-lg border-primary" style="width: 100%;">
-                        <div class="card-header bg-primary text-white text-center" style="font-size: 1.5rem; font-weight: bold; letter-spacing: 1px;">
-                            <i class="bi bi-clock-history"></i> My Requests
+                        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center" style="font-size: 1.5rem; font-weight: bold; letter-spacing: 1px;">
+                            <span><i class="bi bi-clock-history"></i> My Requests</span>
+                            <?php if (count($my_requests) > 1): ?>
+                                <button id="viewAllRequestsBtn" class="btn btn-light btn-sm" onclick="toggleAllRequests()">
+                                    <i class="bi bi-eye"></i> View All (<?php echo count($my_requests); ?>)
+                                </button>
+                            <?php endif; ?>
                         </div>
                         <div class="card-body" style="background: #fafdff;">
                             <?php if (empty($my_requests)): ?>
                                 <p class="text-muted text-center">You haven't submitted any room requests yet.</p>
                             <?php else: ?>
-                                <?php $request = $my_requests[0]; ?>
-                                    <div class="request-card mb-4 p-3 border border-2 rounded-3" style="background: #f4f8ff;">
-                                        <div class="d-flex justify-content-between align-items-center mb-2">
-                                            <span class="fs-5 fw-bold text-primary">Room <?php echo htmlspecialchars($request['room_number']); ?></span>
-                                            <span class="request-status request-<?php echo htmlspecialchars(strtolower($request['status'])); ?> px-3 py-1" style="font-size:1rem;">
-                                                <?php
-                                                    // Show 'Approved' if status is 'approved' or if status is 'pending_payment' but payment is already made and approved
-                                                    if ($request['status'] === 'approved') {
-                                                        echo 'Approved';
-                                                    } elseif ($request['status'] === 'pending_payment') {
-                                                        // Check if there is a verified/approved payment for this request's bill
-                                                        $bill_stmt = $conn->prepare("SELECT id FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' LIMIT 1");
-                                                        $bill_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $request['room_id']]);
-                                                        $bill = $bill_stmt->fetch(PDO::FETCH_ASSOC);
-                                                        $is_paid = false;
-                                                        if ($bill) {
-                                                            $pay_stmt = $conn->prepare("SELECT COUNT(*) FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
-                                                            $pay_stmt->execute(['bill_id' => $bill['id']]);
-                                                            $is_paid = $pay_stmt->fetchColumn() > 0;
-                                                        }
-                                                        if ($is_paid) {
+                                <?php 
+                                    // Check if ANY request has pending_payment status
+                                    $has_pending_payment = false;
+                                    foreach ($my_requests as $req) {
+                                        if ($req['status'] === 'pending_payment') {
+                                            $has_pending_payment = true;
+                                            break;
+                                        }
+                                    }
+                                ?>
+                                <div id="requestsContainer">
+                                    <?php foreach ($my_requests as $index => $request): ?>
+                                        <div class="request-card mb-4 p-3 border border-2 rounded-3 <?php echo $index > 0 ? 'extra-request' : ''; ?>" style="background: #f4f8ff; <?php echo $index > 0 ? 'display: none;' : ''; ?>">
+                                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                                <span class="fs-5 fw-bold text-primary">Room <?php echo htmlspecialchars($request['room_number']); ?></span>
+                                                <span class="request-status request-<?php echo htmlspecialchars(strtolower($request['status'])); ?> px-3 py-1" style="font-size:1rem;">
+                                                    <?php
+                                                        // Show 'Approved' if status is 'approved' or if status is 'pending_payment' but payment is already made and approved
+                                                        if ($request['status'] === 'approved') {
                                                             echo 'Approved';
+                                                        } elseif ($request['status'] === 'pending_payment') {
+                                                            // Check if there is a verified/approved payment for this request's bill
+                                                            $bill_stmt = $conn->prepare("SELECT id FROM bills WHERE tenant_id = :tenant_id AND room_id = :room_id AND notes LIKE '%ADVANCE PAYMENT%' LIMIT 1");
+                                                            $bill_stmt->execute(['tenant_id' => $tenant_id, 'room_id' => $request['room_id']]);
+                                                            $bill = $bill_stmt->fetch(PDO::FETCH_ASSOC);
+                                                            $is_paid = false;
+                                                            if ($bill) {
+                                                                $pay_stmt = $conn->prepare("SELECT COUNT(*) FROM payment_transactions WHERE bill_id = :bill_id AND payment_status IN ('verified','approved')");
+                                                                $pay_stmt->execute(['bill_id' => $bill['id']]);
+                                                                $is_paid = $pay_stmt->fetchColumn() > 0;
+                                                            }
+                                                            if ($is_paid) {
+                                                                echo 'Approved';
+                                                            } else {
+                                                                echo 'Awaiting Payment';
+                                                            }
                                                         } else {
-                                                            echo 'Awaiting Payment';
+                                                            echo htmlspecialchars(ucfirst($request['status']));
                                                         }
-                                                    } else {
-                                                        echo htmlspecialchars(ucfirst($request['status']));
-                                                    }
-                                                ?>
-                                            </span>
+                                                    ?>
+                                                </span>
+                                            </div>
+                                            <div class="mb-1"><strong>Room Type:</strong> <span class="text-info"><?php echo htmlspecialchars($request['room_type'] ?? 'N/A'); ?></span></div>
+                                            <div class="mb-1"><strong>Rate:</strong> <span class="text-success">₱<?php echo number_format($request['rate'], 2); ?>/night</span></div>
+                                            <?php 
+                                                // Calculate number of nights and total cost
+                                                $nights = 1;
+                                                $total_cost = 0;
+                                                if ($request['checkin_date'] && $request['checkout_date']) {
+                                                    $checkin_dt = new DateTime($request['checkin_date']);
+                                                    $checkout_dt = new DateTime($request['checkout_date']);
+                                                    $interval = $checkin_dt->diff($checkout_dt);
+                                                    $nights = max(1, (int)$interval->days);
+                                                }
+                                                $total_cost = floatval($request['rate']) * $nights;
+                                            ?>
+                                            <div class="mb-1"><strong>Total Cost:</strong> <span class="text-success fs-5 fw-bold">₱<?php echo number_format($total_cost, 2); ?></span> (<?php echo $nights; ?> night<?php echo $nights !== 1 ? 's' : ''; ?>)</div>
+                                            <div class="mb-1"><strong>Occupants:</strong> <?php echo intval($request['tenant_count'] ?? 1); ?> person(s)</div>
+                                            <div class="mb-1"><strong>Requested:</strong> <?php echo date('M d, Y', strtotime($request['request_date'])); ?></div>
+                                            <?php if (!empty($request['tenant_info_name'])): ?>
+                                                <div class="mb-1"><strong>Name:</strong> <?php echo htmlspecialchars($request['tenant_info_name']); ?></div>
+                                            <?php endif; ?>
+                                            <?php if ($request['notes']): ?>
+                                                <div class="mb-0 text-muted small"><strong>Notes:</strong> <?php echo htmlspecialchars($request['notes']); ?></div>
+                                            <?php endif; ?>
                                         </div>
-                                        <div class="mb-1"><strong>Rate:</strong> <span class="text-success">₱<?php echo number_format($request['rate'], 2); ?></span></div>
-                                        <div class="mb-1"><strong>Occupants:</strong> <?php echo intval($request['tenant_count'] ?? 1); ?> person(s)</div>
-                                        <div class="mb-1"><strong>Requested:</strong> <?php echo date('M d, Y', strtotime($request['request_date'])); ?></div>
-                                        <?php if (!empty($request['tenant_info_name'])): ?>
-                                            <div class="mb-1"><strong>Name:</strong> <?php echo htmlspecialchars($request['tenant_info_name']); ?></div>
-                                        <?php endif; ?>
-                                        <?php if ($request['notes']): ?>
-                                            <div class="mb-0 text-muted small"><strong>Notes:</strong> <?php echo htmlspecialchars($request['notes']); ?></div>
-                                        <?php endif; ?>
-                                        <?php if ($request['status'] === 'pending_payment') : ?>
+                                    <?php endforeach; ?>
+                                    <?php if ($has_pending_payment): ?>
+                                        <div class="mt-3 p-3 border border-warning rounded-3" style="background: #fffbf0;">
                                             <form method="get" action="tenant_make_payment.php" class="mt-2">
-                                                <input type="hidden" name="room_request_id" value="<?php echo $request['id']; ?>">
-                                                <button type="submit" class="btn btn-warning w-100">Proceed to Payment</button>
+                                                <button type="submit" class="btn btn-warning w-100 btn-lg">
+                                                    <i class="bi bi-credit-card"></i> Proceed to Payment for All Pending Requests
+                                                </button>
                                             </form>
-                                        <?php endif; ?>
-                                    </div>
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
                             <?php endif; ?>
                         </div>
                     </div>
                 </div>
-                <?php endif; ?>
 
-                <!-- Filter Section (Centered) - Only show if no approved payment -->
-                <?php if (!$has_approved_payment): ?>
+                <!-- Filter Section (Centered) -->
                 <div class="filter-section">
                     <label for="filterType">Filter by Room Type:</label>
                     <select class="form-select" id="filterType" name="type" onchange="filterRooms()">
@@ -830,7 +859,7 @@ try {
                                 <?php endif; ?>
                     </div>
                 </div>
-                <?php endif; ?>
+
                 <script>
                     // Cancel request handler: sends AJAX POST to cancel the request
                     document.addEventListener('DOMContentLoaded', function() {
@@ -929,6 +958,20 @@ try {
                         }
                         card.style.display = show ? '' : 'none';
                     });
+                }
+
+                // Function to toggle showing all requests
+                function toggleAllRequests() {
+                    const extraRequests = document.querySelectorAll('.extra-request');
+                    const btn = document.getElementById('viewAllRequestsBtn');
+                    const isShowingAll = btn.textContent.includes('Hide');
+
+                    extraRequests.forEach(function(request) {
+                        request.style.display = isShowingAll ? 'none' : '';
+                    });
+
+                    // Update button text
+                    btn.innerHTML = isShowingAll ? '<i class="bi bi-eye"></i> View All (<?php echo count($my_requests); ?>)' : '<i class="bi bi-eye-slash"></i> Hide Extra';
                 }
                 </script>
                                 <!-- Flatpickr initialization for date fields -->

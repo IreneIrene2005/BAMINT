@@ -4,7 +4,10 @@
  * Adds checkin_time and checkout_time columns to the tenants table
  */
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 try {
     // Check if columns exist before adding them

@@ -5,7 +5,10 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || !in_array
     die("Not logged in");
 }
 
-require_once "db/database.php";
+require_once "db_pdo.php";
+
+// Alias $pdo as $conn for compatibility
+$conn = $pdo;
 
 $customer_id = isset($_SESSION["customer_id"]) ? $_SESSION["customer_id"] : (isset($_SESSION["tenant_id"]) ? $_SESSION["tenant_id"] : null);
 
